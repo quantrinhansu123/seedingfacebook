@@ -1,7 +1,7 @@
 'use client';
 
 import { BusinessProfilePanel } from '@/components/BusinessProfilePanel';
-import { StaffCookiePanel } from '@/components/StaffCookiePanel';
+import { StaffCookiePanel, type StaffPayload } from '@/components/StaffCookiePanel';
 import type { StaffAccount } from '@/lib/types';
 
 type Props = {
@@ -23,7 +23,10 @@ type Props = {
   currentStaff?: StaffAccount | null;
   canManageStaff: boolean;
   staffStatus: string;
-  onAddStaff: (payload: { name: string; username: string; password: string; cookie: string }) => Promise<void>;
+  showStaffManager?: boolean;
+  staffTitle?: string;
+  staffKicker?: string;
+  onSaveStaff: (payload: StaffPayload, staffId?: string) => Promise<boolean>;
   onDeleteStaff: (staffId: string) => Promise<void>;
 };
 
@@ -47,7 +50,10 @@ export function SaleSetupPanel(props: Props) {
     currentStaff,
     canManageStaff,
     staffStatus,
-    onAddStaff,
+    showStaffManager = true,
+    staffTitle = 'Cookie nhân sự',
+    staffKicker = 'Quản lý đăng nhập',
+    onSaveStaff,
     onDeleteStaff,
   } = props;
 
@@ -96,16 +102,22 @@ export function SaleSetupPanel(props: Props) {
         {aiStatus ? <div className="setup-hint">{aiStatus}</div> : null}
       </div>
 
-      <div className="setup-divider" />
+      {showStaffManager ? (
+        <>
+          <div className="setup-divider" />
 
-      <StaffCookiePanel
-        staff={staff}
-        currentStaff={currentStaff}
-        canManage={canManageStaff}
-        status={staffStatus}
-        onAdd={onAddStaff}
-        onDelete={onDeleteStaff}
-      />
+          <StaffCookiePanel
+            staff={staff}
+            currentStaff={currentStaff}
+            canManage={canManageStaff}
+            status={staffStatus}
+            title={staffTitle}
+            kicker={staffKicker}
+            onSave={onSaveStaff}
+            onDelete={onDeleteStaff}
+          />
+        </>
+      ) : null}
 
       <div className="setup-divider" />
 

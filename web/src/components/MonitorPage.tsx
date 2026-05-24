@@ -8,6 +8,7 @@ import { HistoryPanel } from '@/components/HistoryPanel';
 import { LeadManagerPanel } from '@/components/LeadManagerPanel';
 import { PostCard } from '@/components/PostCard';
 import { SaleSetupPanel } from '@/components/SaleSetupPanel';
+import { StaffCookiePanel, type StaffPayload } from '@/components/StaffCookiePanel';
 import { api } from '@/lib/api';
 import type { CommentLog, CommentSummary, FbPage, FbPost, GroupRow, Lead, ManagedChannel, ReplySuggestion, StaffAccount, StoredPostComment } from '@/lib/types';
 import { extractSlug } from '@/lib/utils';
@@ -994,15 +995,19 @@ export function MonitorPage() {
     setHeaderSub('Đã đăng xuất');
   }
 
-  async function addStaffCookie(payload: { name: string; username: string; password: string; cookie: string }) {
-    if (!payload.name.trim() || !payload.username.trim() || !payload.password || !payload.cookie.trim()) {
-      setStaffStatus('Nhập đủ tên, tài khoản, mật khẩu và cookie');
-      return;
+  async function saveStaffCookie(payload: StaffPayload, staffId?: string) {
+    if (!payload.name.trim() || !payload.username.trim()) {
+      setStaffStatus('Nhập đủ tên và tài khoản đăng nhập');
+      return false;
     }
-    setStaffStatus('Đang lưu cookie...');
+    if (!staffId && (!payload.password || !payload.cookie.trim())) {
+      setStaffStatus('Nhập đủ mật khẩu và cookie khi thêm nhân sự');
+      return false;
+    }
+    setStaffStatus(staffId ? 'Đang cập nhật nhân sự...' : 'Đang lưu nhân sự...');
     try {
-      const r = await api('/api/staff-cookies', {
-        method: 'POST',
+      const r = await api(staffId ? `/api/staff-cookies/${staffId}` : '/api/staff-cookies', {
+        method: staffId ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
@@ -1011,12 +1016,15 @@ export function MonitorPage() {
         setStaffRows(d.staff || []);
         setCanManageStaff(!!d.can_manage);
         const storageText = d.storage === 'supabase' ? 'Supabase' : 'local';
-        setStaffStatus(`✅ Đã lưu cookie nhân sự (${storageText})${d.warning ? ` · ${d.warning}` : ''}`);
+        setStaffStatus(`${staffId ? '✅ Đã cập nhật nhân sự' : '✅ Đã thêm nhân sự'} (${storageText})${d.warning ? ` · ${d.warning}` : ''}`);
+        return true;
       } else {
-        setStaffStatus('❌ ' + (d.error || 'Lỗi lưu cookie'));
+        setStaffStatus('❌ ' + (d.error || 'Lỗi lưu nhân sự'));
+        return false;
       }
     } catch {
       setStaffStatus('❌ Lỗi kết nối');
+      return false;
     }
   }
 
@@ -1137,7 +1145,19 @@ export function MonitorPage() {
           ) : null}
           {activeView === 'history' ? <HistoryPanel rows={commentLogs} status={historyStatus} onReload={loadCommentLogs} /> : null}
           {activeView === 'leads' ? <LeadManagerPanel leads={leads} onExtract={extractLeadsAll} /> : null}
-          {activeView === 'staff' || activeView === 'cookies' ? (
+          {activeView === 'staff' ? (
+            <StaffCookiePanel
+              staff={staffRows}
+              currentStaff={currentStaff}
+              canManage={canManageStaff}
+              status={staffStatus}
+              title="Nhân sự"
+              kicker="Quản lý tài khoản"
+              onSave={saveStaffCookie}
+              onDelete={deleteStaffCookie}
+            />
+          ) : null}
+          {activeView === 'cookies' ? (
             <div className="settings-module">
               <SaleSetupPanel
                 aiProvider={aiProvider}
@@ -1161,7 +1181,9 @@ export function MonitorPage() {
                 currentStaff={currentStaff}
                 canManageStaff={canManageStaff}
                 staffStatus={staffStatus}
-                onAddStaff={addStaffCookie}
+                staffTitle="Quản lý Cooki"
+                staffKicker="Cookie nhân sự"
+                onSaveStaff={saveStaffCookie}
                 onDeleteStaff={deleteStaffCookie}
               />
             </div>
@@ -1309,7 +1331,8 @@ export function MonitorPage() {
           currentStaff={currentStaff}
           canManageStaff={canManageStaff}
           staffStatus={staffStatus}
-          onAddStaff={addStaffCookie}
+          showStaffManager={false}
+          onSaveStaff={saveStaffCookie}
           onDeleteStaff={deleteStaffCookie}
         />
         </aside>

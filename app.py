@@ -421,6 +421,29 @@ def _list_supabase_staff() -> tuple[list, str]:
         return [], str(e)
 
 
+def _merged_public_staff_rows() -> tuple[list, str]:
+    merged: dict[str, dict] = {}
+    for item in _staff_accounts():
+        if not _as_enabled(item.get('enabled', True)):
+            continue
+        key = item.get('id') or item.get('username')
+        if key:
+            merged[key] = item
+
+    remote_rows, warning = _list_supabase_staff()
+    for item in remote_rows:
+        if not _as_enabled(item.get('enabled', True)):
+            continue
+        key = item.get('id') or item.get('username')
+        if key:
+            merged[key] = item
+
+    current = _current_staff()
+    if current:
+        merged[current.get('id') or current.get('username') or 'current'] = current
+    return [_public_staff_cookie(item) for item in merged.values() if item], warning
+
+
 def _set_logged_in_staff(staff: dict) -> None:
     old_token = session.pop('staff_cache_token', None)
     if old_token:
@@ -1927,20 +1950,7 @@ def groups_remove(gid):
 def staff_cookies_get():
     warning = ''
     if _is_admin():
-        merged: dict[str, dict] = {}
-        for item in _staff_accounts():
-            key = item.get('id') or item.get('username')
-            if key:
-                merged[key] = item
-        remote_rows, warning = _list_supabase_staff()
-        for item in remote_rows:
-            key = item.get('id') or item.get('username')
-            if key:
-                merged[key] = item
-        current = _current_staff()
-        if current:
-            merged[current.get('id') or current.get('username') or 'current'] = current
-        staff_rows = [_public_staff_cookie(item) for item in merged.values()]
+        staff_rows, warning = _merged_public_staff_rows()
     else:
         staff_rows = [_public_current_staff()] if _current_staff() else []
     payload = {
@@ -2025,19 +2035,119 @@ def staff_cookies_save():
         _staff_cookies['active_staff_id'] = saved_id
     _save_staff_cookies()
     _invalidate_facebook_cache()
-    merged = {}
-    for item in staff:
-        merged[item.get('id') or item.get('username')] = item
-    remote_rows, warning = _list_supabase_staff()
-    for item in remote_rows:
-        merged[item.get('id') or item.get('username')] = item
-    current = _current_staff()
-    if current:
-        merged[current.get('id') or current.get('username') or 'current'] = current
+    staff_rows, warning = _merged_public_staff_rows()
     return jsonify({
         'ok': True,
         'active_staff_id': _current_staff_id(),
-        'staff': [_public_staff_cookie(item) for item in merged.values() if item],
+        'staff': staff_rows,
+        'can_manage': True,
+        'storage': 'supabase' if USE_SUPABASE else 'local',
+        'warning': warning,
+    })
+
+
+@app.route('/api/staff-cookies/<staff_id>', methods=['PUT', 'PATCH'])
+def staff_cookies_update(staff_id):
+    if not _is_admin():
+        return jsonify({'ok': False, 'error': 'Chỉ admin được sửa nhân sự'}), 403
+
+    body = request.get_json() or {}
+    staff = _staff_accounts()
+    local_target = next((item for item in staff if item.get('id') == staff_id), {})
+    remote_target = {}
+    remote_warning = ''
+    if USE_SUPABASE:
+        remote_rows, remote_warning = _list_supabase_staff()
+        remote_target = next((item for item in remote_rows if item.get('id') == staff_id), {})
+
+    target = {**remote_target, **local_target}
+    if not target:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy nhân sự'}), 404
+
+    name = str(body.get('name', target.get('name', '')) or '').strip()[:80]
+    username = str(body.get('username', target.get('username', '')) or '').strip().lower()[:60]
+    password = str(body.get('password') or '')
+    cookie = str(body.get('cookie') or '').strip()
+
+    if not name:
+        return jsonify({'ok': False, 'error': 'Thiếu tên nhân sự'}), 400
+    if not username:
+        return jsonify({'ok': False, 'error': 'Thiếu tài khoản đăng nhập'}), 400
+    if password and len(password) < 6:
+        return jsonify({'ok': False, 'error': 'Mật khẩu tối thiểu 6 ký tự'}), 400
+    if cookie and 'c_user=' not in cookie:
+        return jsonify({'ok': False, 'error': 'Cookie chưa có c_user, vui lòng kiểm tra lại'}), 400
+
+    for item in staff:
+        if item.get('id') != staff_id and item.get('username') == username and _as_enabled(item.get('enabled', True)):
+            return jsonify({'ok': False, 'error': 'Tài khoản đăng nhập đã tồn tại'}), 400
+    if USE_SUPABASE:
+        existing_row, existing_error = _load_supabase_staff(username)
+        if existing_row and str(existing_row.get('id') or '') != staff_id and _as_enabled(existing_row.get('enabled', True)):
+            return jsonify({'ok': False, 'error': 'Tài khoản đăng nhập đã tồn tại trong Supabase'}), 400
+        if existing_error and 'Could not find the table' in existing_error:
+            return jsonify({'ok': False, 'error': f'Chưa có bảng {SUPABASE_STAFF_TABLE} trong Supabase'}), 500
+
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    remote_row = {
+        'name': name,
+        'username': username,
+        'role': target.get('role') or 'staff',
+        'enabled': True,
+        'updated_at': now,
+    }
+    if password:
+        remote_row['password'] = password
+    if cookie:
+        remote_row['cookie'] = cookie
+        remote_row['facebook_user_id'] = _extract_cookie_user(cookie)
+
+    if USE_SUPABASE:
+        try:
+            sb.update_staff_user_by_id(staff_id, remote_row, SUPABASE_STAFF_TABLE)
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'Không cập nhật được nhân sự trên Supabase: {e}'}), 500
+
+    if local_target:
+        local_target['name'] = name
+        local_target['username'] = username
+        local_target['role'] = target.get('role') or local_target.get('role') or 'staff'
+        local_target['updated_at'] = now
+        if password:
+            salt, digest = _hash_password(password)
+            local_target['password_salt'] = salt
+            local_target['password_hash'] = digest
+        if cookie:
+            local_target['cookie'] = cookie
+            local_target['facebook_user_id'] = _extract_cookie_user(cookie)
+    else:
+        local_row = {
+            'id': staff_id,
+            'name': name,
+            'username': username,
+            'role': target.get('role') or 'staff',
+            'enabled': True,
+            'created_at': target.get('created_at') or now,
+            'updated_at': now,
+        }
+        if password:
+            salt, digest = _hash_password(password)
+            local_row['password_salt'] = salt
+            local_row['password_hash'] = digest
+        if cookie:
+            local_row['cookie'] = cookie
+            local_row['facebook_user_id'] = _extract_cookie_user(cookie)
+        staff.append(local_row)
+
+    _save_staff_cookies()
+    _invalidate_facebook_cache()
+    staff_rows, warning = _merged_public_staff_rows()
+    if remote_warning and not warning:
+        warning = remote_warning
+    return jsonify({
+        'ok': True,
+        'active_staff_id': _current_staff_id(),
+        'staff': staff_rows,
         'can_manage': True,
         'storage': 'supabase' if USE_SUPABASE else 'local',
         'warning': warning,
@@ -2071,7 +2181,8 @@ def staff_cookies_delete(staff_id):
         pass
     _save_staff_cookies()
     _invalidate_facebook_cache()
-    return jsonify({'ok': True, 'active_staff_id': _current_staff_id(), 'staff': [_public_staff_cookie(item) for item in _staff_cookies.get('staff', [])], 'can_manage': True})
+    staff_rows, warning = _merged_public_staff_rows()
+    return jsonify({'ok': True, 'active_staff_id': _current_staff_id(), 'staff': staff_rows, 'can_manage': True, 'warning': warning})
 
 
 @app.route('/api/settings', methods=['GET'])

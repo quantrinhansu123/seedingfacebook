@@ -177,6 +177,21 @@ def update_staff_user(username: str, row: dict, table: Optional[str] = None) -> 
     return rows[0] if rows else {}
 
 
+def update_staff_user_by_id(staff_id: str, row: dict, table: Optional[str] = None) -> dict:
+    table_name = table or STAFF_USERS_TABLE
+    staff_id = (staff_id or '').strip()
+    if not staff_id:
+        return {}
+    r = _request(
+        'PATCH',
+        f'{table_name}?id=eq.{quote(staff_id, safe="")}',
+        json=row,
+        prefer='return=representation',
+    )
+    rows = r.json()
+    return rows[0] if rows else {}
+
+
 def delete_staff_user(staff_id: str = '', username: str = '', table: Optional[str] = None) -> None:
     table_name = table or STAFF_USERS_TABLE
     staff_id = (staff_id or '').strip()
