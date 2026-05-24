@@ -1,8 +1,12 @@
 export function getApiBase(): string {
-  const configured = process.env.NEXT_PUBLIC_API_BASE_URL;
+  const configured = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
   if (configured) return configured.replace(/\/$/, '');
   if (typeof window !== 'undefined') {
-    return `${window.location.protocol}//${window.location.hostname}:5000`;
+    const host = window.location.hostname;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') {
+      return `${window.location.protocol}//${host}:5000`;
+    }
+    return '';
   }
   return 'http://127.0.0.1:5000';
 }
