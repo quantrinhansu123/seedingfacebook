@@ -1011,7 +1011,10 @@ export function MonitorPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      const d = await r.json();
+      const d = await r.json().catch(() => ({
+        ok: false,
+        error: r.ok ? 'Phản hồi server không hợp lệ' : `Server lỗi ${r.status}`,
+      }));
       if (d.ok) {
         setStaffRows(d.staff || []);
         setCanManageStaff(!!d.can_manage);
@@ -1033,7 +1036,10 @@ export function MonitorPage() {
     setStaffStatus('Đang xoá...');
     try {
       const r = await api(`/api/staff-cookies/${staffId}`, { method: 'DELETE' });
-      const d = await r.json();
+      const d = await r.json().catch(() => ({
+        ok: false,
+        error: r.ok ? 'Phản hồi server không hợp lệ' : `Server lỗi ${r.status}`,
+      }));
       if (d.ok) {
         setStaffRows(d.staff || []);
         setCanManageStaff(!!d.can_manage);

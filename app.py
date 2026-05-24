@@ -21,6 +21,7 @@ from core import supabase_store as sb
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 load_dotenv(os.path.join(BASE_DIR, '.env'), override=True)
+RUNTIME_DATA_DIR = os.environ.get('RUNTIME_DATA_DIR') or ('/tmp/fb-moni' if os.environ.get('VERCEL') else DATA_DIR)
 
 SEEN_FILE = os.path.join(DATA_DIR, 'seen_posts.json')
 TG_CONFIG_FILE = os.path.join(DATA_DIR, 'telegram_config.json')
@@ -32,7 +33,7 @@ LEADS_FILE = os.path.join(DATA_DIR, 'leads.json')
 REPLY_SUGGESTIONS_FILE = os.path.join(DATA_DIR, 'reply_suggestions.json')
 BUSINESS_PROFILE_FILE = os.path.join(DATA_DIR, 'business_profile.json')
 STAFF_COOKIES_FILE = os.path.join(DATA_DIR, 'staff_cookies.json')
-STAFF_TOKEN_DIR = os.path.join(DATA_DIR, 'staff_tokens')
+STAFF_TOKEN_DIR = os.path.join(RUNTIME_DATA_DIR, 'staff_tokens')
 COMMENT_LOGS_FILE = os.path.join(DATA_DIR, 'comment_logs.json')
 COMMENT_SUMMARIES_FILE = os.path.join(DATA_DIR, 'comment_summaries.json')
 POST_COMMENTS_FILE = os.path.join(DATA_DIR, 'post_comments.json')
@@ -159,7 +160,14 @@ def _verify_password(password: str, salt: str, digest: str) -> bool:
 
 def _load_state():
     global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels
-    os.makedirs(DATA_DIR, exist_ok=True)
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except OSError as e:
+        print(f'[storage] data dir is read-only, using Supabase/runtime storage: {e}')
+    try:
+        os.makedirs(STAFF_TOKEN_DIR, exist_ok=True)
+    except OSError as e:
+        print(f'[storage] token dir unavailable, token cache disabled: {e}')
 
     loaded_from_supabase = False
     if USE_SUPABASE:
@@ -281,38 +289,31 @@ def _save_classifications(new_items=None):
 
 
 def _save_leads():
-    with open(LEADS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(_leads, f, ensure_ascii=False)
+    _write_json(LEADS_FILE, _leads)
 
 
 def _save_reply_suggestions():
-    with open(REPLY_SUGGESTIONS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(_reply_suggestions, f, ensure_ascii=False)
+    _write_json(REPLY_SUGGESTIONS_FILE, _reply_suggestions)
 
 
 def _save_staff_cookies():
-    with open(STAFF_COOKIES_FILE, 'w') as f:
-        json.dump(_staff_cookies, f, ensure_ascii=False)
+    _write_json(STAFF_COOKIES_FILE, _staff_cookies)
 
 
 def _save_comment_logs():
-    with open(COMMENT_LOGS_FILE, 'w') as f:
-        json.dump(_comment_logs[-1000:], f, ensure_ascii=False)
+    _write_json(COMMENT_LOGS_FILE, _comment_logs[-1000:])
 
 
 def _save_comment_summaries():
-    with open(COMMENT_SUMMARIES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(_comment_summaries, f, ensure_ascii=False)
+    _write_json(COMMENT_SUMMARIES_FILE, _comment_summaries)
 
 
 def _save_post_comments():
-    with open(POST_COMMENTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(_post_comments[-5000:], f, ensure_ascii=False)
+    _write_json(POST_COMMENTS_FILE, _post_comments[-5000:])
 
 
 def _save_managed_channels():
-    with open(MANAGED_CHANNELS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(_managed_channels, f, ensure_ascii=False)
+    _write_json(MANAGED_CHANNELS_FILE, _managed_channels)
 
 
 def _extract_cookie_user(cookie: str) -> str:
@@ -2060,7 +2061,9 @@ def staff_cookies_update(staff_id):
         remote_rows, remote_warning = _list_supabase_staff()
         remote_target = next((item for item in remote_rows if item.get('id') == staff_id), {})
 
-    target = {**remote_target, **local_target}
+    # Supabase is the source of truth in production. Local JSON can be stale
+    # after deploys, so let remote values win when both records exist.
+    target = {**local_target, **remote_target}
     if not target:
         return jsonify({'ok': False, 'error': 'Không tìm thấy nhân sự'}), 404
 
