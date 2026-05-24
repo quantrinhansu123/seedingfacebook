@@ -878,6 +878,11 @@ body { font-family: var(--font-roboto), Roboto, Arial, sans-serif; background: #
 .tiktok-detail-head b { display: block; color: #0f172a; font-size: 14px; }
 .tiktok-detail-head span { display: block; color: #64748b; margin-top: 3px; font-size: 12px; }
 .stat-number { display: inline-flex !important; align-items: center; border-radius: 999px; background: #dbeafe; color: #1d4ed8 !important; padding: 4px 10px; font-weight: 800; white-space: nowrap; }
+.tiktok-comment-send { border: 1px solid #dbe3ef; border-radius: 14px; padding: 10px; margin-bottom: 10px; background: #f8fbff; }
+.tiktok-comment-send textarea { width: 100%; min-height: 58px; resize: vertical; border: 1.5px solid #dbe3ef; border-radius: 11px; padding: 10px 12px; font-family: inherit; font-size: 13px; outline: none; }
+.tiktok-comment-send textarea:focus { border-color: #1877f2; background: #fff; }
+.tiktok-comment-send-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+.tiktok-comment-send-row span { color: #64748b; font-size: 12px; }
 .comment-message-cell { min-width: 280px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 .empty-table-cell { text-align: center; color: #64748b !important; padding: 32px 12px !important; }
 .comment-filter-summary { margin-top: 12px; font-size: 12px; color: #65676b; font-weight: 700; }

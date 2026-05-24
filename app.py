@@ -321,6 +321,11 @@ def _extract_cookie_user(cookie: str) -> str:
     return match.group(1) if match else ''
 
 
+def _extract_cookie_value(cookie: str, name: str) -> str:
+    match = re.search(rf'(?:^|;\s*){re.escape(name)}=([^;]+)', cookie or '')
+    return match.group(1) if match else ''
+
+
 def _mask_cookie(cookie: str) -> str:
     if not cookie:
         return ''
@@ -1286,6 +1291,72 @@ def _tiktok_comment_stats(rows: list[dict]) -> list[dict]:
     return stats
 
 
+def _send_tiktok_comment(video_id: str, video_url: str, message: str, cookie: str = '') -> tuple[dict, str]:
+    message = (message or '').strip()
+    if not message:
+        return {}, 'Nhập nội dung bình luận TikTok'
+    merged_cookie = (cookie or TIKTOK_COOKIE or _current_staff().get('cookie') or '').strip()
+    if not merged_cookie:
+        return {}, 'Thiếu cookie TikTok/Facebook của nhân sự. Admin cần gắn cookie tài khoản đang đăng nhập TikTok.'
+
+    csrf = (
+        _extract_cookie_value(merged_cookie, 'tt_csrf_token')
+        or _extract_cookie_value(merged_cookie, 'csrf_session_id')
+    )
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'Referer': video_url or f'https://www.tiktok.com/@/video/{video_id}',
+        'Origin': 'https://www.tiktok.com',
+        'Cookie': merged_cookie,
+    }
+    if csrf:
+        headers['X-Secsdk-Csrf-Token'] = csrf
+        headers['x-secsdk-csrf-token'] = csrf
+
+    params = {
+        'aweme_id': video_id,
+        'aid': 1988,
+        'app_language': 'vi-VN',
+        'browser_language': 'vi-VN',
+        'device_platform': 'webapp',
+        'region': 'VN',
+        'os': 'windows',
+    }
+    data = {
+        'aweme_id': video_id,
+        'text': message,
+    }
+    try:
+        resp = _req.post(
+            'https://www.tiktok.com/api/comment/publish/',
+            params=params,
+            headers=headers,
+            data=data,
+            timeout=30,
+        )
+    except Exception as e:
+        return {}, f'Lỗi kết nối TikTok: {str(e)[:180]}'
+
+    if resp.status_code in (401, 403):
+        return {}, 'TikTok chặn gửi bình luận. Cookie có thể hết hạn, thiếu CSRF hoặc tài khoản không có quyền bình luận video này.'
+    if resp.status_code != 200:
+        return {}, f'TikTok trả lỗi {resp.status_code}: {resp.text[:180]}'
+    try:
+        payload = resp.json()
+    except Exception:
+        return {}, 'TikTok không trả JSON hợp lệ khi gửi bình luận.'
+
+    status_code = payload.get('status_code')
+    if status_code not in (0, '0', None) or payload.get('status_msg') or payload.get('message'):
+        msg = payload.get('status_msg') or payload.get('message') or payload.get('log_pb') or 'TikTok không nhận bình luận'
+        if status_code in (0, '0') and (payload.get('comment') or payload.get('comments')):
+            return payload, ''
+        return {}, str(msg)[:220]
+    return payload, ''
+
+
 def _upload_comment_image_to_supabase(file_storage) -> tuple[str, str]:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return '', 'Chưa cấu hình Supabase'
@@ -1874,6 +1945,93 @@ def fetch_tiktok_comments():
         save_warning = warning if storage == 'supabase' else f'Đã lưu local, Supabase chưa ghi được: {warning}'
         payload['warning'] = (payload.get('warning') + ' | ' if payload.get('warning') else '') + save_warning
     return jsonify(payload)
+
+
+@app.route('/api/tiktok/comment', methods=['POST'])
+def send_tiktok_comment():
+    body = request.get_json() or {}
+    raw_url = str(body.get('url') or body.get('video_url') or body.get('post_url') or '').strip()
+    raw_video_id = str(body.get('video_id') or '').strip()
+    post_id = str(body.get('post_id') or '').strip()
+    message = str(body.get('message') or body.get('text') or '').strip()
+    cookie = str(body.get('cookie') or '').strip()
+    if post_id.startswith('tiktok_') and not raw_video_id:
+        raw_video_id = post_id.replace('tiktok_', '', 1)
+    video_id, final_url = _extract_tiktok_video_id(raw_video_id or raw_url)
+    if not video_id:
+        return jsonify({'ok': False, 'error': 'Không nhận diện được video TikTok để bình luận.'}), 400
+    if not message:
+        return jsonify({'ok': False, 'error': 'Nhập nội dung bình luận TikTok'}), 400
+
+    final_post_id = f'tiktok_{video_id}'
+    if not final_url:
+        final_url = raw_url or f'https://www.tiktok.com/@/video/{video_id}'
+    payload, error = _send_tiktok_comment(video_id, final_url, message, cookie)
+    if error:
+        log = _record_comment_log(final_post_id, 'tiktok', final_url, message, 'tiktok', 'failed', error_message=error)
+        res = {'ok': False, 'error': error, 'log_storage': log.get('storage')}
+        if log.get('storage_warning'):
+            res['warning'] = f"Đã lưu local, Supabase chưa ghi được: {log['storage_warning']}"
+        return jsonify(res), 502
+
+    comment_obj = payload.get('comment') if isinstance(payload.get('comment'), dict) else {}
+    comment_id = str(
+        comment_obj.get('cid')
+        or comment_obj.get('id')
+        or payload.get('cid')
+        or payload.get('comment_id')
+        or uuid.uuid4().hex
+    )
+    log = _record_comment_log(final_post_id, 'tiktok', final_url, message, 'tiktok', 'success', comment_id=f'tiktok_{comment_id}')
+    staff = _current_staff()
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    rows = [{
+        'source': 'tiktok',
+        'post_id': final_post_id,
+        'group_id': '',
+        'post_url': final_url,
+        'comment_id': f'tiktok_{comment_id}',
+        'parent_comment_id': '',
+        'depth': 0,
+        'author_id': staff.get('id', ''),
+        'author_name': staff.get('name') or staff.get('username') or 'Nhân sự',
+        'message': message,
+        'attachment_type': '',
+        'created_time': now,
+        'matched_keywords': [],
+        'is_matched': False,
+        'raw_comment': {
+            'outbound': True,
+            'publish_response': payload,
+            '_video_meta': {
+                'channel_name': _derive_tiktok_channel_name(final_url),
+                'video_title': str(body.get('video_title') or f'Video {video_id}'),
+                'video_id': video_id,
+            },
+        },
+        'fetched_by_staff_id': staff.get('id', ''),
+        'fetched_by_staff_name': staff.get('name', ''),
+        'fetched_by_staff_username': staff.get('username', ''),
+        'fetched_at': now,
+    }]
+    storage, storage_warning = _store_post_comment_rows(rows)
+    res = {
+        'ok': True,
+        'source': 'tiktok',
+        'post_id': final_post_id,
+        'post_url': final_url,
+        'comment_id': f'tiktok_{comment_id}',
+        'storage': storage,
+        'log_storage': log.get('storage'),
+    }
+    warnings = []
+    if storage_warning:
+        warnings.append(f'Comment đã gửi, nhưng Supabase post_comments chưa ghi được: {storage_warning}')
+    if log.get('storage_warning'):
+        warnings.append(f"Lịch sử comment đã lưu local, Supabase chưa ghi được: {log['storage_warning']}")
+    if warnings:
+        res['warning'] = ' | '.join(warnings)
+    return jsonify(res)
 
 
 @app.route('/api/post-comments', methods=['GET'])

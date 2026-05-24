@@ -117,6 +117,9 @@ export function MonitorPage() {
   const [tiktokStatsBusy, setTiktokStatsBusy] = useState(false);
   const [tiktokSelectedPostId, setTiktokSelectedPostId] = useState('');
   const [tiktokOnlyPhone, setTiktokOnlyPhone] = useState(false);
+  const [tiktokCommentText, setTiktokCommentText] = useState('');
+  const [tiktokCommentStatus, setTiktokCommentStatus] = useState('');
+  const [tiktokCommentBusy, setTiktokCommentBusy] = useState(false);
 
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [classifyBusy, setClassifyBusy] = useState(false);
@@ -805,6 +808,45 @@ export function MonitorPage() {
       setTiktokStatsStatus('Lỗi kết nối backend');
     }
     setTiktokStatsBusy(false);
+  }
+
+  async function sendTiktokComment() {
+    if (!selectedTiktokStat?.post_id && !selectedTiktokStat?.video_id) {
+      setTiktokCommentStatus('Chọn video TikTok trước');
+      return;
+    }
+    const message = tiktokCommentText.trim();
+    if (!message) {
+      setTiktokCommentStatus('Nhập nội dung bình luận');
+      return;
+    }
+    setTiktokCommentBusy(true);
+    setTiktokCommentStatus('Đang gửi bình luận lên TikTok...');
+    try {
+      const r = await api('/api/tiktok/comment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          post_id: selectedTiktokStat.post_id,
+          video_id: selectedTiktokStat.video_id,
+          post_url: selectedTiktokStat.post_url,
+          video_title: selectedTiktokStat.video_title,
+          message,
+        }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setTiktokCommentText('');
+        setTiktokCommentStatus(`Đã gửi bình luận TikTok${d.warning ? ` · ${d.warning}` : ''}`);
+        await loadTiktokStats(d.post_id || selectedTiktokStat.post_id || '');
+        await loadTodayCommentStats();
+      } else {
+        setTiktokCommentStatus(`Lỗi: ${d.error || 'Không gửi được bình luận TikTok'}`);
+      }
+    } catch {
+      setTiktokCommentStatus('Lỗi kết nối backend');
+    }
+    setTiktokCommentBusy(false);
   }
 
   async function onProviderChange(next: string) {
@@ -1792,6 +1834,20 @@ export function MonitorPage() {
                   <span>{selectedTiktokStat?.channel_name || '-'}</span>
                 </div>
                 <span className="stat-number">{selectedTiktokComments.length} comment</span>
+              </div>
+              <div className="tiktok-comment-send">
+                <textarea
+                  value={tiktokCommentText}
+                  onChange={(e) => setTiktokCommentText(e.target.value)}
+                  placeholder="Nhập bình luận để gửi lên video TikTok đang chọn..."
+                  rows={2}
+                />
+                <div className="tiktok-comment-send-row">
+                  <button type="button" className="btn-submit" disabled={tiktokCommentBusy || !selectedTiktokStat} onClick={() => void sendTiktokComment()}>
+                    {tiktokCommentBusy ? 'Đang gửi...' : 'Gửi CMT TikTok'}
+                  </button>
+                  <span>{tiktokCommentStatus}</span>
+                </div>
               </div>
               <div className="data-table-wrap">
                 <table className="data-table tiktok-comment-table">
