@@ -75,7 +75,7 @@ _cors_origins = [
     o.strip()
     for o in os.environ.get(
         'CORS_ORIGINS',
-        'http://localhost:3000,http://127.0.0.1:3000',
+        r'http://localhost:3000,http://127.0.0.1:3000,https://.*\.vercel\.app',
     ).split(',')
     if o.strip()
 ]
