@@ -685,6 +685,35 @@ def _clean_managed_channel(body: dict, current: dict | None = None) -> dict:
     }
 
 
+def _resolve_facebook_group_channel(row: dict) -> dict:
+    platform = str(row.get('platform') or '').strip().lower()
+    channel_type = str(row.get('channel_type') or '').strip().lower()
+    target_id = str(row.get('target_id') or '').strip()
+    if platform != 'facebook' or channel_type not in ('nhóm', 'nhom', 'group') or not target_id:
+        return row
+    if re.fullmatch(r'\d{10,20}', target_id):
+        return row
+    resolved = None
+    try:
+        resolved = get_api(DEFAULT_GROUP).resolve_slug(target_id)
+    except Exception:
+        resolved = None
+    if not resolved or not resolved.get('id'):
+        return row
+
+    next_row = {**row, 'target_id': str(resolved.get('id') or '').strip()}
+    if resolved.get('name') and not str(next_row.get('note') or '').strip():
+        next_row['note'] = str(resolved.get('name') or '').strip()[:500]
+    if not str(next_row.get('channel_name') or '').strip():
+        next_row['channel_name'] = str(resolved.get('name') or '').strip()[:160]
+    if USE_SUPABASE and next_row.get('id'):
+        try:
+            sb.update_managed_channel(next_row['id'], next_row, SUPABASE_CHANNEL_TABLE)
+        except Exception as e:
+            print(f'[supabase] update resolved managed channel failed: {e}')
+    return next_row
+
+
 def _norm_channel_text(value: str) -> str:
     return re.sub(r'\s+', ' ', str(value or '').strip()).lower()
 
@@ -2437,13 +2466,24 @@ def _sync_group_from_channel(row: dict) -> None:
 
 
 def _facebook_group_channels() -> list[dict]:
+    global _managed_channels
     rows = []
+    changed = False
+    next_channels = []
     for row in _managed_channels:
+        original_target = str(row.get('target_id') or '').strip()
+        row = _resolve_facebook_group_channel(row)
+        if str(row.get('target_id') or '').strip() != original_target:
+            changed = True
+        next_channels.append(row)
         platform = str(row.get('platform') or '').strip().lower()
         channel_type = str(row.get('channel_type') or '').strip().lower()
         target_id = str(row.get('target_id') or '').strip()
         if platform == 'facebook' and channel_type in ('nhóm', 'nhom', 'group') and target_id:
             rows.append({'id': target_id, 'name': str(row.get('channel_name') or '').strip()})
+    if changed:
+        _managed_channels = next_channels
+        _save_managed_channels()
     return rows
 
 
@@ -2487,6 +2527,7 @@ def channels_create():
     global _managed_channels
     body = request.get_json() or {}
     row = _clean_managed_channel(body)
+    row = _resolve_facebook_group_channel(row)
     if not row['platform']:
         return jsonify({'ok': False, 'error': 'Thiếu nền tảng'}), 400
     if not row['channel_name']:
@@ -2533,6 +2574,7 @@ def channels_update(channel_id):
         return jsonify({'ok': False, 'error': 'Không tìm thấy kênh'}), 404
     body = request.get_json() or {}
     row = {**current, **_clean_managed_channel(body, current), 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}
+    row = _resolve_facebook_group_channel(row)
     if not row.get('platform') or not row.get('channel_name'):
         return jsonify({'ok': False, 'error': 'Thiếu nền tảng hoặc tên kênh'}), 400
     if not row.get('target_id') and not row.get('link'):
