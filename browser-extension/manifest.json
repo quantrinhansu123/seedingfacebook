@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "ST.Real TikTok Bridge",
+  "version": "0.1.0",
+  "description": "Gui binh luan TikTok tu ST.Real Social Console bang phien dang nhap Chrome that.",
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": [
+    "https://www.tiktok.com/*",
+    "https://*.vercel.app/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.vercel.app/*", "http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["web-bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.tiktok.com/*"],
+      "js": ["tiktok-content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "ST.Real TikTok Bridge",
+    "default_popup": "popup.html"
+  }
+}

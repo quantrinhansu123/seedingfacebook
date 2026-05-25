@@ -44,6 +44,15 @@ type TikTokCookieConfig = {
   updated_by?: string;
   can_manage?: boolean;
 };
+type TikTokBridgeResult = {
+  ok?: boolean;
+  final?: boolean;
+  error?: string;
+  message?: string;
+  comment_id?: string;
+  url?: string;
+  version?: string;
+};
 
 export function MonitorPage() {
   const [groups, setGroups] = useState<string[]>([]);
@@ -133,6 +142,8 @@ export function MonitorPage() {
   const [tiktokCookieInput, setTiktokCookieInput] = useState('');
   const [tiktokCookieStatus, setTiktokCookieStatus] = useState('');
   const [tiktokCookieBusy, setTiktokCookieBusy] = useState(false);
+  const [tiktokBridgeReady, setTiktokBridgeReady] = useState(false);
+  const [tiktokBridgeVersion, setTiktokBridgeVersion] = useState('');
 
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [classifyBusy, setClassifyBusy] = useState(false);
@@ -151,6 +162,41 @@ export function MonitorPage() {
   useEffect(() => {
     autoOnRef.current = autoOn;
   }, [autoOn]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const handleBridgeMessage = (event: MessageEvent) => {
+      if (event.source !== window) return;
+      const data = event.data || {};
+      if (data.source !== 'streal-tiktok-extension') return;
+      if (data.type === 'STREAL_TIKTOK_BRIDGE_READY') {
+        setTiktokBridgeReady(true);
+        setTiktokBridgeVersion(data.version || '');
+      }
+    };
+
+    const pingBridge = () => {
+      window.postMessage(
+        {
+          source: 'streal-web-page',
+          type: 'STREAL_TIKTOK_BRIDGE_PING',
+          requestId: `ping_${Date.now()}`,
+        },
+        window.location.origin,
+      );
+    };
+
+    window.addEventListener('message', handleBridgeMessage);
+    pingBridge();
+    const pingTimer = window.setInterval(pingBridge, 2500);
+    const stopTimer = window.setTimeout(() => window.clearInterval(pingTimer), 15000);
+    return () => {
+      window.removeEventListener('message', handleBridgeMessage);
+      window.clearInterval(pingTimer);
+      window.clearTimeout(stopTimer);
+    };
+  }, []);
 
   const checkAuth = useCallback(async () => {
     try {
@@ -839,6 +885,70 @@ export function MonitorPage() {
     setTiktokStatsBusy(false);
   }
 
+  function requestTiktokExtensionComment(payload: Record<string, unknown>): Promise<TikTokBridgeResult> {
+    return new Promise((resolve) => {
+      if (typeof window === 'undefined') {
+        resolve({ ok: false, error: 'Chỉ gửi được TikTok trên trình duyệt Chrome có cài extension' });
+        return;
+      }
+
+      const requestId = `tiktok_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const timer = window.setTimeout(() => {
+        cleanup();
+        resolve({
+          ok: false,
+          error: 'Không thấy extension phản hồi. Hãy cài/bật ST.Real TikTok Bridge rồi tải lại trang.',
+        });
+      }, 120000);
+
+      const handleMessage = (event: MessageEvent) => {
+        if (event.source !== window) return;
+        const data = event.data || {};
+        if (data.source !== 'streal-tiktok-extension') return;
+        if (data.type !== 'STREAL_TIKTOK_COMMENT_RESPONSE') return;
+        if (data.requestId !== requestId) return;
+        cleanup();
+        resolve(data as TikTokBridgeResult);
+      };
+
+      function cleanup() {
+        window.removeEventListener('message', handleMessage);
+        window.clearTimeout(timer);
+      }
+
+      window.addEventListener('message', handleMessage);
+      window.postMessage(
+        {
+          source: 'streal-web-page',
+          type: 'STREAL_TIKTOK_COMMENT_REQUEST',
+          requestId,
+          payload,
+        },
+        window.location.origin,
+      );
+    });
+  }
+
+  async function recordTiktokExtensionResult(status: 'success' | 'failed', message: string, result: TikTokBridgeResult) {
+    const r = await api('/api/tiktok/comment/result', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        status,
+        post_id: selectedTiktokStat?.post_id,
+        video_id: selectedTiktokStat?.video_id,
+        post_url: selectedTiktokStat?.post_url || result.url,
+        video_title: selectedTiktokStat?.video_title,
+        channel_name: selectedTiktokStat?.channel_name,
+        message,
+        comment_id: result.comment_id,
+        error: result.error,
+        extension_result: result,
+      }),
+    });
+    return r.json();
+  }
+
   async function sendTiktokComment() {
     if (!selectedTiktokStat?.post_id && !selectedTiktokStat?.video_id) {
       setTiktokCommentStatus('Chọn video TikTok trước');
@@ -849,32 +959,35 @@ export function MonitorPage() {
       setTiktokCommentStatus('Nhập nội dung bình luận');
       return;
     }
+    if (!tiktokBridgeReady) {
+      setTiktokCommentStatus('Chưa thấy extension ST.Real TikTok Bridge. Cài extension, đăng nhập TikTok trên Chrome rồi tải lại trang.');
+      return;
+    }
     setTiktokCommentBusy(true);
-    setTiktokCommentStatus('Đang gửi bình luận lên TikTok...');
+    setTiktokCommentStatus('Đang mở TikTok bằng extension...');
     try {
-      const r = await api('/api/tiktok/comment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          post_id: selectedTiktokStat.post_id,
-          video_id: selectedTiktokStat.video_id,
-          post_url: selectedTiktokStat.post_url,
-          video_title: selectedTiktokStat.video_title,
-          message,
-        }),
+      const extensionResult = await requestTiktokExtensionComment({
+        post_id: selectedTiktokStat.post_id,
+        video_id: selectedTiktokStat.video_id,
+        post_url: selectedTiktokStat.post_url,
+        video_title: selectedTiktokStat.video_title,
+        channel_name: selectedTiktokStat.channel_name,
+        message,
       });
-      const d = await r.json();
-      if (d.ok) {
+
+      if (extensionResult.ok) {
+        setTiktokCommentStatus('Extension đã gửi, đang lưu lịch sử...');
+        const d = await recordTiktokExtensionResult('success', message, extensionResult);
         setTiktokCommentText('');
-        setTiktokCommentStatus(`Đã gửi bình luận TikTok${d.warning ? ` · ${d.warning}` : ''}`);
+        setTiktokCommentStatus(`Đã gửi bình luận TikTok bằng Chrome${d.warning ? ` · ${d.warning}` : ''}`);
         await loadTiktokStats(d.post_id || selectedTiktokStat.post_id || '');
-        await loadTiktokCookieConfig();
         await loadTodayCommentStats();
       } else {
-        setTiktokCommentStatus(`Lỗi: ${d.error || 'Không gửi được bình luận TikTok'}`);
+        await recordTiktokExtensionResult('failed', message, extensionResult).catch(() => null);
+        setTiktokCommentStatus(`Lỗi: ${extensionResult.error || 'Extension chưa gửi được bình luận TikTok'}`);
       }
     } catch {
-      setTiktokCommentStatus('Lỗi kết nối backend');
+      setTiktokCommentStatus('Lỗi kết nối extension hoặc backend');
     }
     setTiktokCommentBusy(false);
   }
@@ -1395,7 +1508,7 @@ export function MonitorPage() {
                   {tiktokCookieConfig.updated_at ? <span>Cập nhật: {formatDateTime(tiktokCookieConfig.updated_at)}</span> : null}
                 </div>
                 <p className="tiktok-cookie-note">
-                  Cookie này dùng để đọc và gửi bình luận TikTok từ web. Không hiển thị cookie gốc trên giao diện.
+                  Cookie này chỉ hỗ trợ đọc bình luận khi TikTok chặn API. Gửi bình luận TikTok dùng Chrome extension, không dùng cookie lưu trên server.
                 </p>
                 {canManageStaff ? (
                   <>
@@ -1987,6 +2100,12 @@ export function MonitorPage() {
                 <span className="stat-number">{selectedTiktokComments.length} comment</span>
               </div>
               <div className="tiktok-comment-send">
+                <div className="tiktok-extension-status">
+                  <span className={`status-pill ${tiktokBridgeReady ? 'ok' : 'warn'}`}>
+                    {tiktokBridgeReady ? `Extension đã kết nối${tiktokBridgeVersion ? ` v${tiktokBridgeVersion}` : ''}` : 'Chưa kết nối extension'}
+                  </span>
+                  <small>Gửi bình luận bằng Chrome đang đăng nhập TikTok, không dùng cookie server.</small>
+                </div>
                 <textarea
                   value={tiktokCommentText}
                   onChange={(e) => setTiktokCommentText(e.target.value)}

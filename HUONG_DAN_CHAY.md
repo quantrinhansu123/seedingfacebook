@@ -83,13 +83,32 @@ Mo:
 http://localhost:3000
 ```
 
-## 5. Loi hay gap
+## 5. Cai extension gui CMT TikTok
+
+Phan doc/thong ke comment TikTok chay tren web. Rieng phan gui CMT len TikTok can cai Chrome extension de dung dung phien dang nhap TikTok cua khach.
+
+```text
+chrome://extensions
+```
+
+Lam theo thu tu:
+
+1. Bat `Developer mode`.
+2. Bam `Load unpacked`.
+3. Chon thu muc `browser-extension`.
+4. Dang nhap TikTok tren Chrome.
+5. Mo web ST.Real Social Console va bam `Gui CMT TikTok`.
+
+Khong can dan cookie TikTok vao web de gui comment. Neu TikTok bat dang nhap lai, dang nhap truc tiep tren tab TikTok roi bam gui lai.
+
+## 6. Loi hay gap
 
 - Neu hien `Vui long dang nhap`: dang nhap lai bang tai khoan trong bang `staff_users`.
 - Neu bao chua co bang `staff_users`: chay lai file SQL trong Supabase.
 - Neu bao chua co bang `managed_channels`: chay `supabase_managed_channels_patch.sql`, doi vai giay roi tai lai trang.
 - Neu Facebook bao cookie het han: cap nhat cot `cookie` cua nhan su trong bang `staff_users`.
+- Neu nut `Gui CMT TikTok` bao chua thay extension: cai/bat extension, tai lai web, va dang nhap TikTok tren Chrome.
 
-## 6. Deploy
+## 7. Deploy
 
 Frontend Next.js co the deploy len Vercel. Backend Flask (`app.py`) van can mot noi chay rieng nhu VPS/Render/Railway, sau do dat `WEB_UI_URL` va CORS dung domain frontend.

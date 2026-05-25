@@ -1429,6 +1429,113 @@ def _send_tiktok_comment(video_id: str, video_url: str, message: str, cookie: st
     return payload, ''
 
 
+def _record_tiktok_extension_comment(body: dict) -> tuple[dict, int]:
+    raw_url = str(body.get('url') or body.get('video_url') or body.get('post_url') or '').strip()
+    raw_video_id = str(body.get('video_id') or '').strip()
+    post_id = str(body.get('post_id') or '').strip()
+    message = str(body.get('message') or body.get('text') or '').strip()
+    status = str(body.get('status') or '').strip().lower()
+    error = str(body.get('error') or '').strip()
+    extension_result = body.get('extension_result') if isinstance(body.get('extension_result'), dict) else {}
+
+    if post_id.startswith('tiktok_') and not raw_video_id:
+        raw_video_id = post_id.replace('tiktok_', '', 1)
+    video_id, final_url = _extract_tiktok_video_id(raw_video_id or raw_url)
+    if not video_id:
+        return {'ok': False, 'error': 'Không nhận diện được video TikTok để ghi lịch sử.'}, 400
+    if not message:
+        return {'ok': False, 'error': 'Thiếu nội dung bình luận TikTok'}, 400
+    if not final_url:
+        final_url = raw_url or f'https://www.tiktok.com/@/video/{video_id}'
+
+    final_post_id = f'tiktok_{video_id}'
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    staff = _current_staff()
+
+    if status != 'success':
+        log = _record_comment_log(
+            final_post_id,
+            'tiktok',
+            final_url,
+            message,
+            'tiktok-extension',
+            'failed',
+            error_message=error or 'Extension chưa gửi được bình luận TikTok',
+        )
+        res = {
+            'ok': False,
+            'source': 'tiktok',
+            'post_id': final_post_id,
+            'post_url': final_url,
+            'error': error or 'Extension chưa gửi được bình luận TikTok',
+            'log_storage': log.get('storage'),
+        }
+        if log.get('storage_warning'):
+            res['warning'] = f"Đã lưu local, Supabase chưa ghi được: {log['storage_warning']}"
+        return res, 200
+
+    comment_id = str(
+        body.get('comment_id')
+        or extension_result.get('comment_id')
+        or extension_result.get('cid')
+        or extension_result.get('id')
+        or f'extension_{uuid.uuid4().hex}'
+    )
+    if not comment_id.startswith('tiktok_'):
+        comment_id = f'tiktok_{comment_id}'
+
+    log = _record_comment_log(final_post_id, 'tiktok', final_url, message, 'tiktok-extension', 'success', comment_id=comment_id)
+    rows = [{
+        'source': 'tiktok',
+        'post_id': final_post_id,
+        'group_id': '',
+        'post_url': final_url,
+        'comment_id': comment_id,
+        'parent_comment_id': '',
+        'depth': 0,
+        'author_id': staff.get('id', ''),
+        'author_name': staff.get('name') or staff.get('username') or 'Nhân sự',
+        'message': message,
+        'attachment_type': '',
+        'created_time': now,
+        'matched_keywords': [],
+        'is_matched': False,
+        'raw_comment': {
+            'outbound': True,
+            'delivery': 'chrome_extension',
+            'extension_result': extension_result,
+            '_video_meta': {
+                'channel_name': str(body.get('channel_name') or _derive_tiktok_channel_name(final_url)),
+                'video_title': str(body.get('video_title') or f'Video {video_id}'),
+                'video_id': video_id,
+            },
+        },
+        'fetched_by_staff_id': staff.get('id', ''),
+        'fetched_by_staff_name': staff.get('name', ''),
+        'fetched_by_staff_username': staff.get('username', ''),
+        'fetched_at': now,
+    }]
+    storage, storage_warning = _store_post_comment_rows(rows)
+    res = {
+        'ok': True,
+        'source': 'tiktok',
+        'post_id': final_post_id,
+        'post_url': final_url,
+        'comment_id': comment_id,
+        'delivery': 'chrome_extension',
+        'storage': storage,
+        'log_storage': log.get('storage'),
+    }
+    warnings = []
+    if storage_warning:
+        warnings.append(f'Comment đã gửi, nhưng Supabase post_comments chưa ghi được: {storage_warning}')
+    if log.get('storage_warning'):
+        warnings.append(f"Lịch sử comment đã lưu local, Supabase chưa ghi được: {log['storage_warning']}")
+    if warnings:
+        res['warning'] = ' | '.join(warnings)
+    return res, 200
+
+
 def _upload_comment_image_to_supabase(file_storage) -> tuple[str, str]:
     if not SUPABASE_URL or not SUPABASE_KEY:
         return '', 'Chưa cấu hình Supabase'
@@ -2104,6 +2211,13 @@ def send_tiktok_comment():
     if warnings:
         res['warning'] = ' | '.join(warnings)
     return jsonify(res)
+
+
+@app.route('/api/tiktok/comment/result', methods=['POST'])
+def record_tiktok_comment_result():
+    body = request.get_json() or {}
+    payload, status_code = _record_tiktok_extension_comment(body)
+    return jsonify(payload), status_code
 
 
 @app.route('/api/post-comments', methods=['GET'])
