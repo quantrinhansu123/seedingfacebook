@@ -43,6 +43,9 @@ POST_COMMENTS_FILE = os.path.join(DATA_DIR, 'post_comments.json')
 MANAGED_CHANNELS_FILE = os.path.join(DATA_DIR, 'managed_channels.json')
 TIKTOK_CONFIG_FILE = os.path.join(DATA_DIR, 'tiktok_config.json')
 CONTENT_PIPELINE_FILE = os.path.join(DATA_DIR, 'content_pipeline.json')
+COMMENT_TEMPLATES_FILE = os.path.join(DATA_DIR, 'comment_templates.json')
+COMMENT_TAGS_FILE = os.path.join(DATA_DIR, 'comment_tags.json')
+COMMENT_TAG_ASSIGNMENTS_FILE = os.path.join(DATA_DIR, 'comment_tag_assignments.json')
 
 BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '')
 DEFAULT_GROUP = os.environ.get('DEFAULT_GROUP', '3809441172650624')
@@ -108,6 +111,9 @@ _post_comments: list = []
 _managed_channels: list = []
 _tiktok_config: dict = {}
 _content_pipeline: dict = {}
+_comment_templates: list = []
+_comment_tags: list = []
+_comment_tag_assignments: dict = {}
 
 
 def _default_business_profile() -> dict:
@@ -169,6 +175,54 @@ def _default_content_pipeline() -> dict:
     }
 
 
+def _default_comment_templates() -> list[dict]:
+    return [
+        {
+            'id': 'need',
+            'trigger': 'nhucau',
+            'title': 'Hỏi nhu cầu',
+            'text': 'Em chào anh/chị, mình cần hỗ trợ nội dung nào ạ? Anh/chị gửi thêm yêu cầu để bên em tư vấn đúng hơn nhé.',
+            'created_at': 'system',
+            'system': True,
+        },
+        {
+            'id': 'price',
+            'trigger': 'baogia',
+            'title': 'Báo giá',
+            'text': 'Em đã nhận thông tin. Anh/chị cho em xin nhu cầu cụ thể và số lượng/khối lượng để bên em báo giá chính xác ạ.',
+            'created_at': 'system',
+            'system': True,
+        },
+        {
+            'id': 'phone',
+            'trigger': 'sdt',
+            'title': 'Xin SĐT',
+            'text': 'Anh/chị để lại SĐT hoặc nhắn inbox giúp em, sale bên em sẽ liên hệ tư vấn nhanh ạ.',
+            'created_at': 'system',
+            'system': True,
+        },
+        {
+            'id': 'address',
+            'trigger': 'diachi',
+            'title': 'Gửi địa chỉ',
+            'text': 'Dạ anh/chị ghé trực tiếp theo địa chỉ bên em hoặc để lại SĐT, sale sẽ gửi vị trí và tư vấn chi tiết ạ.',
+            'created_at': 'system',
+            'system': True,
+        },
+    ]
+
+
+def _default_comment_tags() -> list[dict]:
+    return [
+        {'id': 'hot', 'label': 'Nóng', 'icon': '🔥', 'color': 'red', 'system': True},
+        {'id': 'closed', 'label': 'Đã chốt', 'icon': '💰', 'color': 'green', 'system': True},
+        {'id': 'need', 'label': 'Có nhu cầu', 'icon': '🎯', 'color': 'blue', 'system': True},
+        {'id': 'price', 'label': 'Hỏi giá', 'icon': '❔', 'color': 'yellow', 'system': True},
+        {'id': 'review', 'label': 'Xem xét', 'icon': '🔎', 'color': 'slate', 'system': True},
+        {'id': 'vip', 'label': 'VIP', 'icon': '⭐', 'color': 'amber', 'system': True},
+    ]
+
+
 def _hash_password(password: str, salt: str = None) -> tuple[str, str]:
     salt = salt or secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 120000)
@@ -183,7 +237,7 @@ def _verify_password(password: str, salt: str, digest: str) -> bool:
 
 
 def _load_state():
-    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _tiktok_config, _content_pipeline
+    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _tiktok_config, _content_pipeline, _comment_templates, _comment_tags, _comment_tag_assignments
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
     except OSError as e:
@@ -288,6 +342,25 @@ def _load_state():
         'articles': loaded_pipeline.get('articles') if isinstance(loaded_pipeline.get('articles'), list) else [],
         'posts': loaded_pipeline.get('posts') if isinstance(loaded_pipeline.get('posts'), list) else [],
     }
+    loaded_templates = _read_json(COMMENT_TEMPLATES_FILE, [])
+    loaded_tags = _read_json(COMMENT_TAGS_FILE, [])
+    loaded_tag_assignments = _read_json(COMMENT_TAG_ASSIGNMENTS_FILE, {})
+    if USE_SUPABASE:
+        try:
+            loaded_templates = sb.kv_get('comment_templates', loaded_templates) or loaded_templates
+        except Exception as e:
+            print(f'[supabase] load comment_templates failed, fallback file: {e}')
+        try:
+            loaded_tags = sb.kv_get('comment_tags', loaded_tags) or loaded_tags
+        except Exception as e:
+            print(f'[supabase] load comment_tags failed, fallback file: {e}')
+        try:
+            loaded_tag_assignments = sb.kv_get('comment_tag_assignments', loaded_tag_assignments) or loaded_tag_assignments
+        except Exception as e:
+            print(f'[supabase] load comment_tag_assignments failed, fallback file: {e}')
+    _comment_templates = _merge_system_rows(_default_comment_templates(), loaded_templates if isinstance(loaded_templates, list) else [])
+    _comment_tags = _merge_system_rows(_default_comment_tags(), loaded_tags if isinstance(loaded_tags, list) else [])
+    _comment_tag_assignments = loaded_tag_assignments if isinstance(loaded_tag_assignments, dict) else {}
 
 
 def _save_seen(new_posts=None):
@@ -345,6 +418,45 @@ def _save_content_pipeline():
             sb.kv_set('content_pipeline', _content_pipeline)
         except Exception as e:
             print(f'[supabase] save content_pipeline failed: {e}')
+
+
+def _merge_system_rows(defaults: list[dict], rows: list[dict]) -> list[dict]:
+    by_id: dict[str, dict] = {}
+    for row in defaults + (rows or []):
+        if not isinstance(row, dict):
+            continue
+        row_id = str(row.get('id') or row.get('trigger') or uuid.uuid4().hex[:10]).strip()
+        if not row_id:
+            continue
+        by_id[row_id] = {**row, 'id': row_id}
+    return list(by_id.values())
+
+
+def _save_comment_templates():
+    _write_json(COMMENT_TEMPLATES_FILE, _comment_templates)
+    if USE_SUPABASE:
+        try:
+            sb.kv_set('comment_templates', _comment_templates)
+        except Exception as e:
+            print(f'[supabase] save comment_templates failed: {e}')
+
+
+def _save_comment_tags():
+    _write_json(COMMENT_TAGS_FILE, _comment_tags)
+    if USE_SUPABASE:
+        try:
+            sb.kv_set('comment_tags', _comment_tags)
+        except Exception as e:
+            print(f'[supabase] save comment_tags failed: {e}')
+
+
+def _save_comment_tag_assignments():
+    _write_json(COMMENT_TAG_ASSIGNMENTS_FILE, _comment_tag_assignments)
+    if USE_SUPABASE:
+        try:
+            sb.kv_set('comment_tag_assignments', _comment_tag_assignments)
+        except Exception as e:
+            print(f'[supabase] save comment_tag_assignments failed: {e}')
 
 
 def _strip_html(text: str, limit: int = 600) -> str:
@@ -1662,6 +1774,7 @@ def _public_comment_row(row: dict) -> dict:
         'attachment_type': row.get('attachment_type') or '',
         'created_time': row.get('created_time'),
         'matched_keywords': row.get('matched_keywords') or [],
+        'manual_tags': _comment_tag_assignments.get(cid) or row.get('manual_tags') or [],
         'is_matched': bool(row.get('is_matched')),
         'phone': phones[0] if phones else '',
         'phones': phones,
@@ -1819,6 +1932,83 @@ def _fetch_tiktok_comments(video_id: str, limit: int = 300, cookie: str = '') ->
 def _derive_tiktok_channel_name(video_url: str) -> str:
     match = re.search(r'tiktok\.com/@([^/?#]+)', video_url or '', re.I)
     return f"@{match.group(1).lstrip('@')}" if match else ''
+
+
+def _extract_tiktok_handle(raw: str) -> tuple[str, str]:
+    value = str(raw or '').strip()
+    if not value:
+        return '', ''
+    match = re.search(r'tiktok\.com/@([^/?#]+)', value, re.I)
+    if match:
+        handle = match.group(1).strip()
+        return handle, f'https://www.tiktok.com/@{handle}'
+    handle = value.lstrip('@').strip('/ ')
+    if re.fullmatch(r'[A-Za-z0-9._-]{2,80}', handle):
+        return handle, f'https://www.tiktok.com/@{handle}'
+    return '', value
+
+
+def _extract_tiktok_video_title(html: str, video_id: str) -> str:
+    if not html:
+        return f'Video {video_id}'
+    idx = html.find(video_id)
+    window = html[max(0, idx - 1600): idx + 1600] if idx >= 0 else html[:4000]
+    for pattern in (
+        r'"desc"\s*:\s*"([^"]{1,220})"',
+        r'"description"\s*:\s*"([^"]{1,220})"',
+        r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']',
+    ):
+        match = re.search(pattern, window, re.I)
+        if match:
+            try:
+                return unescape(match.group(1)).encode('utf-8').decode('unicode_escape')[:220]
+            except Exception:
+                return unescape(match.group(1))[:220]
+    return f'Video {video_id}'
+
+
+def _fetch_tiktok_channel_videos(channel: str, max_videos: int = 8, cookie: str = '') -> tuple[list[dict], str]:
+    handle, profile_url = _extract_tiktok_handle(channel)
+    if not handle:
+        return [], 'Không nhận diện được kênh TikTok. Nhập @username hoặc link kênh TikTok.'
+    max_videos = max(1, min(int(max_videos or 8), 30))
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Referer': 'https://www.tiktok.com/',
+    }
+    merged_cookie = (cookie or _configured_tiktok_cookie()).strip()
+    if merged_cookie:
+        headers['Cookie'] = merged_cookie
+    try:
+        resp = _req.get(profile_url, headers=headers, timeout=25)
+    except Exception as e:
+        return [], f'Lỗi kết nối TikTok khi đọc kênh: {str(e)[:180]}'
+    if resp.status_code in (401, 403):
+        return [], 'TikTok đang chặn đọc kênh. Cập nhật TikTok cookie hoặc mở kênh bằng Chrome đang đăng nhập.'
+    if resp.status_code != 200:
+        return [], f'TikTok trả lỗi {resp.status_code} khi đọc kênh: {resp.text[:120]}'
+    html = resp.text or ''
+    video_ids: list[str] = []
+    for pattern in (rf'tiktok\.com/@{re.escape(handle)}/video/(\d+)', r'/video/(\d{8,})', r'"id"\s*:\s*"(\d{8,})"'):
+        for vid in re.findall(pattern, html, re.I):
+            if vid and vid not in video_ids:
+                video_ids.append(vid)
+            if len(video_ids) >= max_videos:
+                break
+        if len(video_ids) >= max_videos:
+            break
+    rows = []
+    for vid in video_ids[:max_videos]:
+        rows.append({
+            'video_id': vid,
+            'post_url': f'https://www.tiktok.com/@{handle}/video/{vid}',
+            'channel_name': f'@{handle}',
+            'video_title': _extract_tiktok_video_title(html, vid),
+        })
+    if not rows:
+        return [], 'Không tìm thấy video công khai trên kênh này hoặc TikTok đang ẩn dữ liệu với request server.'
+    return rows, ''
 
 
 def _flatten_tiktok_comment_rows(
@@ -2874,6 +3064,140 @@ def fetch_tiktok_comments():
     return jsonify(payload)
 
 
+@app.route('/api/tiktok/channel-comments/fetch', methods=['POST'])
+def fetch_tiktok_channel_comments():
+    body = request.get_json() or {}
+    channel = str(body.get('channel') or body.get('channel_url') or body.get('handle') or '').strip()
+    keywords = _normalize_keywords(body.get('keywords') or [])
+    max_videos = max(1, min(int(body.get('max_videos') or 8), 30))
+    per_video_limit = max(1, min(int(body.get('limit_per_video') or body.get('limit') or 200), 500))
+    cookie = str(body.get('cookie') or '').strip()
+    videos, video_error = _fetch_tiktok_channel_videos(channel, max_videos=max_videos, cookie=cookie)
+    if not videos:
+        return jsonify({'ok': False, 'error': video_error or 'Không lấy được video từ kênh TikTok'}), 502
+
+    all_rows: list[dict] = []
+    errors: list[str] = []
+    fetched_at = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    for video in videos:
+        comments, fetch_error = _fetch_tiktok_comments(video['video_id'], limit=per_video_limit, cookie=cookie)
+        if fetch_error:
+            errors.append(f"{video.get('video_id')}: {fetch_error}")
+        rows = _flatten_tiktok_comment_rows(
+            video['video_id'],
+            video['post_url'],
+            comments,
+            keywords,
+            fetched_at,
+            _current_staff(),
+            video.get('channel_name') or '',
+            video.get('video_title') or '',
+        )
+        all_rows.extend(rows)
+
+    if not all_rows and errors:
+        return jsonify({'ok': False, 'error': ' | '.join(errors[:3]), 'videos': videos}), 502
+
+    storage, warning = _store_post_comment_rows(all_rows)
+    matched_count = sum(1 for row in all_rows if row.get('is_matched'))
+    phone_count = sum(1 for row in all_rows if extract_phones(row.get('message') or ''))
+    payload = {
+        'ok': True,
+        'source': 'tiktok',
+        'channel': channel,
+        'video_count': len(videos),
+        'comment_count': len(all_rows),
+        'fetched_comment_count': len(all_rows),
+        'matched_count': matched_count,
+        'phone_count': phone_count,
+        'videos': videos,
+        'comments': all_rows,
+        'storage': storage,
+    }
+    warnings = []
+    if errors:
+        warnings.append('Một số video lỗi: ' + ' | '.join(errors[:3]))
+    if warning:
+        warnings.append(warning if storage == 'supabase' else f'Đã lưu local, Supabase chưa ghi được: {warning}')
+    if warnings:
+        payload['warning'] = ' | '.join(warnings)
+    return jsonify(payload)
+
+
+@app.route('/api/tiktok/channels/fetch-comments', methods=['POST'])
+def fetch_configured_tiktok_channels_comments():
+    body = request.get_json() or {}
+    keywords = _normalize_keywords(body.get('keywords') or [])
+    max_videos = max(1, min(int(body.get('max_videos') or 5), 20))
+    per_video_limit = max(1, min(int(body.get('limit_per_video') or 150), 400))
+    selected_ids = {
+        str(item).strip()
+        for item in (body.get('channel_ids') or [])
+        if str(item).strip()
+    }
+    _refresh_managed_channels_from_supabase()
+    tiktok_channels = [
+        row for row in _managed_channels
+        if str(row.get('platform') or '').strip().lower() == 'tiktok'
+        and (not selected_ids or str(row.get('id') or '') in selected_ids)
+    ]
+    if not tiktok_channels:
+        return jsonify({'ok': False, 'error': 'Chưa có kênh TikTok nào trong Quản lý nhóm/kênh. Hãy thêm kênh TikTok trước.'}), 400
+
+    merged_rows: list[dict] = []
+    reports: list[dict] = []
+    for channel in tiktok_channels:
+        raw = channel.get('link') or channel.get('target_id') or channel.get('channel_name') or ''
+        videos, video_error = _fetch_tiktok_channel_videos(raw, max_videos=max_videos)
+        if not videos:
+            reports.append({'channel_id': channel.get('id'), 'channel_name': channel.get('channel_name'), 'ok': False, 'error': video_error})
+            continue
+        fetched_at = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+        channel_rows: list[dict] = []
+        channel_errors: list[str] = []
+        for video in videos:
+            comments, fetch_error = _fetch_tiktok_comments(video['video_id'], limit=per_video_limit)
+            if fetch_error:
+                channel_errors.append(f"{video.get('video_id')}: {fetch_error}")
+            channel_rows.extend(_flatten_tiktok_comment_rows(
+                video['video_id'],
+                video['post_url'],
+                comments,
+                keywords,
+                fetched_at,
+                _current_staff(),
+                channel.get('channel_name') or video.get('channel_name') or '',
+                video.get('video_title') or '',
+            ))
+        merged_rows.extend(channel_rows)
+        reports.append({
+            'channel_id': channel.get('id'),
+            'channel_name': channel.get('channel_name'),
+            'ok': bool(channel_rows),
+            'video_count': len(videos),
+            'comment_count': len(channel_rows),
+            'error': ' | '.join(channel_errors[:2]),
+        })
+
+    storage, warning = _store_post_comment_rows(merged_rows)
+    payload = {
+        'ok': any(item.get('ok') for item in reports),
+        'channel_count': len(tiktok_channels),
+        'comment_count': len(merged_rows),
+        'fetched_comment_count': len(merged_rows),
+        'matched_count': sum(1 for row in merged_rows if row.get('is_matched')),
+        'phone_count': sum(1 for row in merged_rows if extract_phones(row.get('message') or '')),
+        'reports': reports,
+        'comments': merged_rows,
+        'storage': storage,
+    }
+    if warning:
+        payload['warning'] = warning if storage == 'supabase' else f'Đã lưu local, Supabase chưa ghi được: {warning}'
+    if not payload['ok']:
+        payload['error'] = 'Chưa lấy được comment từ kênh TikTok nào. Kiểm tra link kênh/cookie TikTok hoặc thử từng video.'
+    return jsonify(payload), (200 if payload['ok'] else 502)
+
+
 @app.route('/api/tiktok/comment', methods=['POST'])
 def send_tiktok_comment():
     body = request.get_json() or {}
@@ -2982,6 +3306,214 @@ def list_post_comments():
     if warning:
         payload['warning'] = warning
     return jsonify(payload)
+
+
+@app.route('/api/comment-templates', methods=['GET'])
+def comment_templates_get():
+    rows = sorted(_comment_templates, key=lambda item: (not bool(item.get('system')), str(item.get('title') or '')))
+    return jsonify({'ok': True, 'templates': rows})
+
+
+@app.route('/api/comment-templates', methods=['POST'])
+def comment_templates_create():
+    global _comment_templates
+    body = request.get_json() or {}
+    title = str(body.get('title') or '').strip()[:80]
+    text = str(body.get('text') or '').strip()[:1600]
+    trigger = re.sub(r'[^A-Za-z0-9_\\-À-ỹ]', '', str(body.get('trigger') or title).strip().lstrip('/').lower())[:40]
+    if not title or not text:
+        return jsonify({'ok': False, 'error': 'Nhập tên mẫu câu và nội dung'}), 400
+    if not trigger:
+        trigger = hashlib.sha1(title.encode('utf-8')).hexdigest()[:8]
+    row = {
+        'id': uuid.uuid4().hex[:12],
+        'trigger': trigger,
+        'title': title,
+        'text': text,
+        'created_by_staff_id': _current_staff_id(),
+        'created_by_staff_name': _current_staff().get('name') or '',
+        'created_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+        'system': False,
+    }
+    _comment_templates = [*(_comment_templates or []), row]
+    _save_comment_templates()
+    return jsonify({'ok': True, 'template': row, 'templates': _comment_templates})
+
+
+@app.route('/api/comment-templates/<template_id>', methods=['PUT', 'DELETE'])
+def comment_templates_update(template_id):
+    global _comment_templates
+    template_id = str(template_id or '').strip()
+    current = next((item for item in _comment_templates if str(item.get('id') or '') == template_id), None)
+    if not current:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy mẫu câu'}), 404
+    if current.get('system') and request.method == 'DELETE':
+        return jsonify({'ok': False, 'error': 'Không xoá mẫu câu hệ thống'}), 400
+    if request.method == 'DELETE':
+        _comment_templates = [item for item in _comment_templates if str(item.get('id') or '') != template_id]
+        _save_comment_templates()
+        return jsonify({'ok': True, 'templates': _comment_templates})
+    body = request.get_json() or {}
+    current['title'] = str(body.get('title') or current.get('title') or '').strip()[:80]
+    current['trigger'] = re.sub(r'[^A-Za-z0-9_\\-À-ỹ]', '', str(body.get('trigger') or current.get('trigger') or '').strip().lstrip('/').lower())[:40]
+    current['text'] = str(body.get('text') or current.get('text') or '').strip()[:1600]
+    current['updated_at'] = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    _save_comment_templates()
+    return jsonify({'ok': True, 'template': current, 'templates': _comment_templates})
+
+
+@app.route('/api/comment-tags', methods=['GET'])
+def comment_tags_get():
+    rows = sorted(_comment_tags, key=lambda item: (not bool(item.get('system')), str(item.get('label') or '')))
+    return jsonify({'ok': True, 'tags': rows})
+
+
+@app.route('/api/comment-tags', methods=['POST'])
+def comment_tags_create():
+    global _comment_tags
+    body = request.get_json() or {}
+    label = str(body.get('label') or '').strip()[:50]
+    icon = str(body.get('icon') or '🏷️').strip()[:4]
+    color = str(body.get('color') or 'blue').strip()[:30]
+    if not label:
+        return jsonify({'ok': False, 'error': 'Nhập tên tag'}), 400
+    row_id = re.sub(r'[^a-z0-9_-]+', '-', label.lower()).strip('-')[:30] or uuid.uuid4().hex[:8]
+    if any(str(item.get('id') or '') == row_id for item in _comment_tags):
+        row_id = f'{row_id}-{uuid.uuid4().hex[:4]}'
+    row = {
+        'id': row_id,
+        'label': label,
+        'icon': icon,
+        'color': color,
+        'created_by_staff_id': _current_staff_id(),
+        'created_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+        'system': False,
+    }
+    _comment_tags = [*(_comment_tags or []), row]
+    _save_comment_tags()
+    return jsonify({'ok': True, 'tag': row, 'tags': _comment_tags})
+
+
+@app.route('/api/comment-tags/<tag_id>', methods=['DELETE'])
+def comment_tags_delete(tag_id):
+    global _comment_tags, _comment_tag_assignments
+    tag_id = str(tag_id or '').strip()
+    current = next((item for item in _comment_tags if str(item.get('id') or '') == tag_id), None)
+    if not current:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy tag'}), 404
+    if current.get('system'):
+        return jsonify({'ok': False, 'error': 'Không xoá tag hệ thống'}), 400
+    _comment_tags = [item for item in _comment_tags if str(item.get('id') or '') != tag_id]
+    for row in _post_comments:
+        tags = row.get('manual_tags') if isinstance(row.get('manual_tags'), list) else []
+        row['manual_tags'] = [item for item in tags if str(item) != tag_id]
+    for comment_id, tags in list(_comment_tag_assignments.items()):
+        if isinstance(tags, list):
+            kept = [item for item in tags if str(item) != tag_id]
+            if kept:
+                _comment_tag_assignments[comment_id] = kept
+            else:
+                _comment_tag_assignments.pop(comment_id, None)
+    _save_comment_tags()
+    _save_comment_tag_assignments()
+    _save_post_comments()
+    return jsonify({'ok': True, 'tags': _comment_tags})
+
+
+@app.route('/api/post-comments/tags', methods=['POST'])
+def post_comment_tags_save():
+    global _post_comments, _comment_tag_assignments
+    body = request.get_json() or {}
+    comment_id = str(body.get('comment_id') or '').strip()
+    tags = [str(item).strip() for item in (body.get('tags') or []) if str(item).strip()]
+    if not comment_id:
+        return jsonify({'ok': False, 'error': 'Thiếu comment_id'}), 400
+    changed = False
+    for row in _post_comments:
+        if str(row.get('comment_id') or '') == comment_id:
+            row['manual_tags'] = tags
+            changed = True
+            break
+    if not changed:
+        rows, _ = _load_post_comment_rows(limit=5000)
+        for row in rows:
+            if str(row.get('comment_id') or '') == comment_id:
+                row['manual_tags'] = tags
+                _post_comments.append(row)
+                changed = True
+                break
+    if not changed:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy comment để gắn tag'}), 404
+    _comment_tag_assignments[comment_id] = tags
+    _save_post_comments()
+    _save_comment_tag_assignments()
+    return jsonify({'ok': True, 'comment_id': comment_id, 'tags': tags, 'storage': 'supabase' if USE_SUPABASE else 'local'})
+
+
+@app.route('/api/ai/caption-variants', methods=['POST'])
+def ai_caption_variants():
+    body = request.get_json() or {}
+    base = str(body.get('message') or body.get('content') or '').strip()
+    targets = body.get('targets') if isinstance(body.get('targets'), list) else []
+    if not base:
+        return jsonify({'ok': False, 'error': 'Nhập nội dung gốc trước khi tạo caption'}), 400
+    clean_targets = []
+    for index, target in enumerate(targets[:30], 1):
+        if not isinstance(target, dict):
+            continue
+        clean_targets.append({
+            'id': str(target.get('id') or index),
+            'name': str(target.get('name') or target.get('id') or f'Kênh {index}')[:120],
+            'type': str(target.get('type') or 'group')[:30],
+        })
+    if not clean_targets:
+        clean_targets = [{'id': 'default', 'name': 'Kênh mặc định', 'type': 'group'}]
+
+    fallback_rows = []
+    tails = [
+        'Anh/chị cần tư vấn thêm cứ để lại bình luận, bên em phản hồi ngay.',
+        'Mình quan tâm phần nào nhất thì nhắn bên em để được hỗ trợ cụ thể.',
+        'Bên em có thể tư vấn theo nhu cầu thực tế để chọn phương án phù hợp.',
+        'Ai cần mẫu/chi tiết thì để lại SĐT hoặc inbox bên em nhé.',
+    ]
+    for idx, target in enumerate(clean_targets):
+        fallback_rows.append({
+            **target,
+            'caption': f"{base}\n\n{tails[idx % len(tails)]}",
+            'source': 'fallback',
+        })
+
+    classifier = _get_classifier()
+    if not classifier.api_key:
+        return jsonify({'ok': True, 'captions': fallback_rows, 'warning': 'Chưa có AI key, hệ thống dùng caption biến thể mặc định.'})
+    try:
+        prompt = f"""Bạn là content marketer tiếng Việt.
+
+Tạo caption biến thể để đăng cùng một nội dung lên nhiều Facebook Group/Page, mục tiêu là tránh trùng lặp máy móc nhưng vẫn giữ đúng ý.
+
+Yêu cầu:
+- Trả về JSON array, mỗi item có id và caption.
+- Giữ thông tin quan trọng, không bịa khuyến mãi/số liệu.
+- Mỗi caption khác cách mở đầu hoặc CTA.
+- Giọng tự nhiên, không spam, không quá dài.
+
+Nội dung gốc:
+{base}
+
+Danh sách nơi đăng:
+{json.dumps(clean_targets, ensure_ascii=False)}
+"""
+        raw = classifier._call_api(prompt)
+        parsed = json.loads(re.sub(r'^```(?:json)?|```$', '', raw.strip(), flags=re.I | re.M))
+        if not isinstance(parsed, list):
+            raise ValueError('AI không trả list')
+        by_id = {str(item.get('id') or ''): str(item.get('caption') or '').strip() for item in parsed if isinstance(item, dict)}
+        rows = []
+        for target, fallback in zip(clean_targets, fallback_rows):
+            rows.append({**target, 'caption': by_id.get(target['id']) or fallback['caption'], 'source': 'ai'})
+        return jsonify({'ok': True, 'captions': rows})
+    except Exception as e:
+        return jsonify({'ok': True, 'captions': fallback_rows, 'warning': f'AI lỗi, đã dùng caption biến thể mặc định: {str(e)[:180]}'})
 
 
 @app.route('/api/tiktok/comment-stats', methods=['GET'])

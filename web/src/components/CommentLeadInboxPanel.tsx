@@ -1,12 +1,12 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import type { StoredPostComment } from '@/lib/types';
 
 type TabKey = 'inbox' | 'customers' | 'stats' | 'templates';
 type SourceKey = 'all' | 'fb-page' | 'fb-group' | 'tiktok' | 'instagram';
-type TagKey = 'hot' | 'closed' | 'need' | 'price' | 'review' | 'vip';
+type TagKey = string;
 type WorkflowFilter = 'all' | 'open' | 'done' | 'starred';
 
 type CommentPayload = {
@@ -32,6 +32,15 @@ type TagMeta = {
   label: string;
   icon: string;
   className: string;
+  system?: boolean;
+};
+
+type ReplyTemplate = {
+  id: string;
+  trigger: string;
+  title: string;
+  text: string;
+  system?: boolean;
 };
 
 const SOURCE_META: Record<SourceKey, { label: string; icon: string; className: string }> = {
@@ -51,26 +60,35 @@ const TAGS: TagMeta[] = [
   { key: 'vip', label: 'VIP', icon: '⭐', className: 'tag-vip' },
 ];
 
-const QUICK_REPLIES = [
+const QUICK_REPLIES: ReplyTemplate[] = [
   {
+    id: 'need',
+    trigger: 'nhucau',
     title: 'Hỏi nhu cầu',
     text: 'Em chào anh/chị, mình cần hỗ trợ nội dung nào ạ? Anh/chị gửi thêm yêu cầu để bên em tư vấn đúng hơn nhé.',
   },
   {
+    id: 'price',
+    trigger: 'baogia',
     title: 'Báo giá',
     text: 'Em đã nhận thông tin. Anh/chị cho em xin nhu cầu cụ thể và số lượng/khối lượng để bên em báo giá chính xác ạ.',
   },
   {
+    id: 'phone',
+    trigger: 'sdt',
     title: 'Xin SĐT',
     text: 'Anh/chị để lại SĐT hoặc nhắn inbox giúp em, sale bên em sẽ liên hệ tư vấn nhanh ạ.',
   },
   {
+    id: 'closed',
+    trigger: 'chot',
     title: 'Đã chốt',
     text: 'Em cảm ơn anh/chị. Bên em sẽ ghi nhận thông tin và liên hệ xác nhận đơn/yêu cầu ngay ạ.',
   },
 ];
 
 const WORKFLOW_STORAGE_KEY = 'streal-comment-inbox-workflow-v1';
+const MANUAL_TAG_STORAGE_KEY = 'streal-comment-manual-tags-v1';
 
 function readWorkflowStore() {
   if (typeof window === 'undefined') return { processed: [] as string[], starred: [] as string[] };
@@ -84,6 +102,43 @@ function readWorkflowStore() {
   } catch {
     return { processed: [] as string[], starred: [] as string[] };
   }
+}
+
+function readManualTagStore() {
+  if (typeof window === 'undefined') return {} as Record<string, string[]>;
+  try {
+    const raw = window.localStorage.getItem(MANUAL_TAG_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed as Record<string, string[]> : {};
+  } catch {
+    return {};
+  }
+}
+
+function templateRows(rows?: ReplyTemplate[]) {
+  const source = Array.isArray(rows) && rows.length ? rows : QUICK_REPLIES;
+  return source.map((item, index) => ({
+    id: String(item.id || item.trigger || item.title || index),
+    trigger: String(item.trigger || item.title || '').replace(/^\//, '').trim().toLowerCase(),
+    title: String(item.title || item.trigger || 'Mẫu câu'),
+    text: String(item.text || ''),
+    system: Boolean(item.system),
+  })).filter((item) => item.text);
+}
+
+function tagRows(rows?: (Partial<TagMeta> & { id?: string; color?: string })[]) {
+  const source: (Partial<TagMeta> & { id?: string; color?: string })[] = Array.isArray(rows) && rows.length ? rows : TAGS;
+  return source.map((item, index) => {
+    const key = String(item.key || item.id || item.label || index);
+    const color = String((item as { color?: string }).color || '').toLowerCase();
+    return {
+      key,
+      label: String(item.label || key),
+      icon: String(item.icon || '🏷️'),
+      className: String(item.className || `tag-${color || key}`),
+      system: Boolean(item.system),
+    };
+  });
 }
 
 function normalizeText(value?: string) {
@@ -121,7 +176,7 @@ function commentKey(row: StoredPostComment) {
   );
 }
 
-function commentTags(row: StoredPostComment): TagMeta[] {
+function commentTags(row: StoredPostComment, tagOptions: TagMeta[] = TAGS, manualTagIds: string[] = []): TagMeta[] {
   const text = normalizeText(commentText(row));
   const matched = new Set((row.matched_keywords || []).map((item) => normalizeText(item)));
   const phones = row.phones || (row.phone ? [row.phone] : []);
@@ -134,7 +189,8 @@ function commentTags(row: StoredPostComment): TagMeta[] {
   if (phones.length && tags.has('need')) tags.add('vip');
   if (!tags.size || /\?/.test(text)) tags.add('review');
 
-  return TAGS.filter((item) => tags.has(item.key));
+  manualTagIds.forEach((item) => item && tags.add(item));
+  return tagOptions.filter((item) => tags.has(item.key));
 }
 
 function commentTime(row: StoredPostComment) {
@@ -154,18 +210,6 @@ function channelName(row: StoredPostComment) {
   return row.post_id || '-';
 }
 
-function leadRows(comments: StoredPostComment[]) {
-  return comments
-    .map((row) => {
-      const tags = commentTags(row);
-      const phones = row.phones || (row.phone ? [row.phone] : []);
-      const isLead = phones.length || tags.some((tag) => ['hot', 'closed', 'need', 'price', 'vip'].includes(tag.key));
-      if (!isLead) return null;
-      return { row, tags, phones };
-    })
-    .filter(Boolean) as { row: StoredPostComment; tags: TagMeta[]; phones: string[] }[];
-}
-
 export function CommentLeadInboxPanel() {
   const [tab, setTab] = useState<TabKey>('inbox');
   const [comments, setComments] = useState<StoredPostComment[]>([]);
@@ -179,6 +223,11 @@ export function CommentLeadInboxPanel() {
   const [replyText, setReplyText] = useState('');
   const [replyBusy, setReplyBusy] = useState(false);
   const [replyStatus, setReplyStatus] = useState('');
+  const [templates, setTemplates] = useState<ReplyTemplate[]>(() => templateRows(QUICK_REPLIES));
+  const [templateForm, setTemplateForm] = useState({ title: '', trigger: '', text: '' });
+  const [tagOptions, setTagOptions] = useState<TagMeta[]>(() => tagRows(TAGS));
+  const [newTagLabel, setNewTagLabel] = useState('');
+  const [manualTagsByComment, setManualTagsByComment] = useState<Record<string, string[]>>(() => readManualTagStore());
   const [tiktokBridgeReady, setTiktokBridgeReady] = useState(false);
   const [tiktokBridgeVersion, setTiktokBridgeVersion] = useState('');
   const [processedIds, setProcessedIds] = useState<string[]>(() => readWorkflowStore().processed);
@@ -210,7 +259,23 @@ export function CommentLeadInboxPanel() {
 
   useEffect(() => {
     void loadComments();
+    void loadTemplateConfig();
   }, []);
+
+  async function loadTemplateConfig() {
+    try {
+      const [templateRes, tagRes] = await Promise.all([
+        api('/api/comment-templates'),
+        api('/api/comment-tags'),
+      ]);
+      const templateData = await templateRes.json().catch(() => ({}));
+      const tagData = await tagRes.json().catch(() => ({}));
+      if (templateData.ok) setTemplates(templateRows(templateData.templates));
+      if (tagData.ok) setTagOptions(tagRows(tagData.tags));
+    } catch {
+      // Giữ bộ mặc định nếu backend chưa sẵn sàng.
+    }
+  }
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -219,6 +284,11 @@ export function CommentLeadInboxPanel() {
       JSON.stringify({ processed: processedIds, starred: starredIds }),
     );
   }, [processedIds, starredIds]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(MANUAL_TAG_STORAGE_KEY, JSON.stringify(manualTagsByComment));
+  }, [manualTagsByComment]);
 
   useEffect(() => {
     setReplyStatus('');
@@ -259,6 +329,12 @@ export function CommentLeadInboxPanel() {
     };
   }, []);
 
+  const tagsForRow = useCallback((row: StoredPostComment) => {
+    const key = commentKey(row);
+    const manual = manualTagsByComment[key] || row.manual_tags || [];
+    return commentTags(row, tagOptions, manual);
+  }, [manualTagsByComment, tagOptions]);
+
   const filtered = useMemo(() => {
     const kw = normalizeText(query);
     return comments.filter((row) => {
@@ -267,14 +343,14 @@ export function CommentLeadInboxPanel() {
       if (workflowFilter === 'open' && processedSet.has(key)) return false;
       if (workflowFilter === 'done' && !processedSet.has(key)) return false;
       if (workflowFilter === 'starred' && !starredSet.has(key)) return false;
-      const tags = commentTags(row);
+      const tags = tagsForRow(row);
       if (tagFilter && !tags.some((tag) => tag.key === tagFilter)) return false;
       if (!kw) return true;
       return [row.author_name, row.message, row.post_id, row.channel_name, row.video_title, row.phone, ...(row.phones || [])]
         .filter(Boolean)
         .some((value) => normalizeText(String(value)).includes(kw));
     });
-  }, [comments, query, sourceFilter, tagFilter, workflowFilter, processedSet, starredSet]);
+  }, [comments, query, sourceFilter, tagFilter, workflowFilter, processedSet, starredSet, tagsForRow]);
 
   const selected = filtered.find((row) => commentKey(row) === selectedId) || filtered[0] || null;
 
@@ -292,22 +368,30 @@ export function CommentLeadInboxPanel() {
   const sourceCounts = useMemo(() => {
     const counts: Record<SourceKey, number> = { all: comments.length, 'fb-page': 0, 'fb-group': 0, tiktok: 0, instagram: 0 };
     comments.forEach((row) => {
-      counts[sourceKey(row)] += 1;
-    });
+        counts[sourceKey(row)] += 1;
+      });
     return counts;
   }, [comments]);
 
   const tagCounts = useMemo(() => {
-    const counts: Record<TagKey, number> = { hot: 0, closed: 0, need: 0, price: 0, review: 0, vip: 0 };
+    const counts: Record<TagKey, number> = {};
+    tagOptions.forEach((tag) => { counts[tag.key] = 0; });
     comments.forEach((row) => {
-      commentTags(row).forEach((tag) => {
-        counts[tag.key] += 1;
+      tagsForRow(row).forEach((tag) => {
+        counts[tag.key] = (counts[tag.key] || 0) + 1;
       });
     });
     return counts;
-  }, [comments]);
+  }, [comments, tagOptions, tagsForRow]);
 
-  const customers = useMemo(() => leadRows(comments), [comments]);
+  const customers = useMemo(() => comments
+    .map((row) => {
+      const tags = tagsForRow(row);
+      const phones = row.phones || (row.phone ? [row.phone] : []);
+      const isLead = phones.length || tags.some((tag) => ['hot', 'closed', 'need', 'price', 'vip'].includes(tag.key));
+      return isLead ? { row, tags, phones } : null;
+    })
+    .filter(Boolean) as { row: StoredPostComment; tags: TagMeta[]; phones: string[] }[], [comments, tagsForRow]);
 
   const syncLead = async (row?: StoredPostComment | null) => {
     const body = row?.post_id ? { source: row.source || '', post_id: row.post_id } : {};
@@ -325,14 +409,101 @@ export function CommentLeadInboxPanel() {
     }
   };
 
-  const copyReply = async (text: string) => {
-    setReplyText(text);
-    try {
-      await navigator.clipboard.writeText(text);
-      setStatus('✅ Đã copy mẫu câu');
-    } catch {
-      setStatus('Đã chèn mẫu câu vào ô trả lời');
+  const slashMatch = replyText.match(/(^|\s)\/([^\s/]*)$/);
+  const slashQuery = normalizeText(slashMatch?.[2] || '');
+  const templateSuggestions = useMemo(() => {
+    if (!slashMatch) return [];
+    return templates
+      .filter((item) => !slashQuery || normalizeText(item.trigger).includes(slashQuery) || normalizeText(item.title).includes(slashQuery))
+      .slice(0, 8);
+  }, [slashMatch, slashQuery, templates]);
+
+  const insertTemplate = (template: ReplyTemplate) => {
+    setReplyText((current) => {
+      const match = current.match(/(^|\s)\/([^\s/]*)$/);
+      if (!match || match.index === undefined) return template.text;
+      const prefix = current.slice(0, match.index) + match[1];
+      return `${prefix}${template.text}`.trimStart();
+    });
+    setReplyStatus(`Đã chèn /${template.trigger}`);
+  };
+
+  const createTemplate = async () => {
+    if (!templateForm.title.trim() || !templateForm.text.trim()) {
+      setStatus('Nhập tên và nội dung mẫu câu trước');
+      return;
     }
+    try {
+      const r = await api('/api/comment-templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(templateForm),
+      });
+      const data = await r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
+      if (data.ok) {
+        setTemplates(templateRows(data.templates));
+        setTemplateForm({ title: '', trigger: '', text: '' });
+        setStatus('✅ Đã thêm mẫu câu mới');
+      } else {
+        setStatus(`❌ ${data.error || 'Không thêm được mẫu câu'}`);
+      }
+    } catch {
+      setStatus('❌ Lỗi kết nối khi thêm mẫu câu');
+    }
+  };
+
+  const deleteTemplate = async (id: string) => {
+    try {
+      const r = await api(`/api/comment-templates/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const data = await r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
+      if (data.ok) {
+        setTemplates(templateRows(data.templates));
+        setStatus('Đã xoá mẫu câu');
+      } else {
+        setStatus(`❌ ${data.error || 'Không xoá được mẫu câu'}`);
+      }
+    } catch {
+      setStatus('❌ Lỗi kết nối khi xoá mẫu câu');
+    }
+  };
+
+  const createTag = async () => {
+    const label = newTagLabel.trim();
+    if (!label) return;
+    try {
+      const r = await api('/api/comment-tags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label, icon: '🏷️', color: 'blue' }),
+      });
+      const data = await r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
+      if (data.ok) {
+        setTagOptions(tagRows(data.tags));
+        setNewTagLabel('');
+        setStatus('✅ Đã thêm tag mới');
+      } else {
+        setStatus(`❌ ${data.error || 'Không thêm được tag'}`);
+      }
+    } catch {
+      setStatus('❌ Lỗi kết nối khi thêm tag');
+    }
+  };
+
+  const toggleManualTag = async (row: StoredPostComment, tagKey: string) => {
+    const key = commentKey(row);
+    const current = manualTagsByComment[key] || row.manual_tags || [];
+    const next = current.includes(tagKey) ? current.filter((item) => item !== tagKey) : [...current, tagKey];
+    setManualTagsByComment((state) => ({ ...state, [key]: next }));
+    try {
+      await api('/api/post-comments/tags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ comment_id: row.comment_id, tags: next }),
+      });
+    } catch {
+      // localStorage vẫn giữ tag để sale lọc trong phiên web hiện tại.
+    }
+    setStatus(next.includes(tagKey) ? '✅ Đã gắn tag cho comment' : 'Đã bỏ tag khỏi comment');
   };
 
   const toggleWorkflow = (row: StoredPostComment, type: 'processed' | 'starred') => {
@@ -537,7 +708,7 @@ export function CommentLeadInboxPanel() {
             ))}
 
             <div className="comment-filter-title tag-title">Tags</div>
-            {TAGS.map((tag) => (
+            {tagOptions.map((tag) => (
               <button
                 key={tag.key}
                 type="button"
@@ -546,8 +717,12 @@ export function CommentLeadInboxPanel() {
               >
                 <span className={`comment-tag ${tag.className}`}>{tag.icon} {tag.label}</span>
                 <b>{tagCounts[tag.key]}</b>
-              </button>
-            ))}
+                </button>
+              ))}
+            <div className="comment-add-tag">
+              <input value={newTagLabel} onChange={(e) => setNewTagLabel(e.target.value)} placeholder="+ Tag mới" />
+              <button type="button" onClick={() => void createTag()}>+</button>
+            </div>
           </aside>
 
           <div className="comment-list-pane">
@@ -577,7 +752,7 @@ export function CommentLeadInboxPanel() {
             <div className="comment-list">
               {filtered.length ? filtered.map((row) => {
                 const meta = sourceLabel(row);
-                const tags = commentTags(row);
+                const tags = tagsForRow(row);
                 const key = commentKey(row);
                 const isProcessed = processedSet.has(key);
                 const isStarred = starredSet.has(key);
@@ -626,7 +801,22 @@ export function CommentLeadInboxPanel() {
                   <span className={`comment-state-pill ${processedSet.has(commentKey(selected)) ? 'done' : 'open'}`}>
                     {processedSet.has(commentKey(selected)) ? 'Đã xử lý' : 'Chưa xử lý'}
                   </span>
-                  {commentTags(selected).map((tag) => <span key={tag.key} className={`comment-tag ${tag.className}`}>{tag.icon} {tag.label}</span>)}
+                  {tagsForRow(selected).map((tag) => <span key={tag.key} className={`comment-tag ${tag.className}`}>{tag.icon} {tag.label}</span>)}
+                </div>
+                <div className="comment-manual-tags">
+                  {tagOptions.map((tag) => {
+                    const active = (manualTagsByComment[commentKey(selected)] || selected.manual_tags || []).includes(tag.key);
+                    return (
+                      <button
+                        key={tag.key}
+                        type="button"
+                        className={active ? 'active' : ''}
+                        onClick={() => void toggleManualTag(selected, tag.key)}
+                      >
+                        {tag.icon} {tag.label}
+                      </button>
+                    );
+                  })}
                 </div>
                 <div className="comment-detail-grid">
                   <span>Bài viết</span><b className="mono-cell">{selected.post_id || '-'}</b>
@@ -656,11 +846,22 @@ export function CommentLeadInboxPanel() {
                     <div className="reply-hint">Facebook sẽ reply trực tiếp vào Comment ID đang chọn.</div>
                   )}
                   <div className="reply-template-row">
-                    {QUICK_REPLIES.map((item) => (
-                      <button key={item.title} type="button" onClick={() => void copyReply(item.text)}>{item.title}</button>
+                    {templates.slice(0, 6).map((item) => (
+                      <button key={item.id} type="button" onClick={() => insertTemplate(item)}>/{item.trigger || item.title}</button>
                     ))}
                   </div>
-                  <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Chọn mẫu câu hoặc nhập nội dung phản hồi..." />
+                  <div className="reply-textarea-wrap">
+                    <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Gõ / để chèn mẫu câu, ví dụ /baogia hoặc /diachi..." />
+                    {templateSuggestions.length ? (
+                      <div className="slash-template-menu">
+                        {templateSuggestions.map((item) => (
+                          <button key={item.id} type="button" onClick={() => insertTemplate(item)}>
+                            <b>/{item.trigger}</b><span>{item.title}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                   <div className="reply-send-row">
                     <button type="button" className="btn-submit" disabled={replyBusy || !replyText.trim()} onClick={() => void sendReply()}>
                       {replyBusy ? 'Đang gửi...' : sourceKey(selected) === 'tiktok' ? 'Gửi CMT TikTok' : 'Gửi trả lời'}
@@ -731,21 +932,31 @@ export function CommentLeadInboxPanel() {
             </div>
             <div>
               <h3>Tags</h3>
-              {TAGS.map((tag) => <div key={tag.key} className="stat-line"><span className={`comment-tag ${tag.className}`}>{tag.icon} {tag.label}</span><b>{tagCounts[tag.key]}</b></div>)}
+              {tagOptions.map((tag) => <div key={tag.key} className="stat-line"><span className={`comment-tag ${tag.className}`}>{tag.icon} {tag.label}</span><b>{tagCounts[tag.key] || 0}</b></div>)}
             </div>
           </div>
         </div>
       ) : null}
 
       {tab === 'templates' ? (
-        <div className="comment-tab-panel template-grid">
-          {QUICK_REPLIES.map((item) => (
-            <div key={item.title} className="template-card">
+        <div className="comment-tab-panel template-manager">
+          <div className="template-editor">
+            <input value={templateForm.title} onChange={(e) => setTemplateForm((s) => ({ ...s, title: e.target.value }))} placeholder="Tên mẫu câu" />
+            <input value={templateForm.trigger} onChange={(e) => setTemplateForm((s) => ({ ...s, trigger: e.target.value }))} placeholder="Lệnh /, ví dụ diachi" />
+            <textarea value={templateForm.text} onChange={(e) => setTemplateForm((s) => ({ ...s, text: e.target.value }))} placeholder="Nội dung trả lời nhanh..." />
+            <button type="button" className="btn-submit" onClick={() => void createTemplate()}>+ Thêm mẫu câu</button>
+          </div>
+          <div className="template-grid">
+          {templates.map((item) => (
+            <div key={item.id} className="template-card">
               <b>{item.title}</b>
+              <small>/{item.trigger}</small>
               <p>{item.text}</p>
-              <button type="button" className="btn-cancel" onClick={() => void copyReply(item.text)}>Copy</button>
+              <button type="button" className="btn-cancel" onClick={() => insertTemplate(item)}>Chèn thử</button>
+              {!item.system ? <button type="button" className="btn-danger-soft" onClick={() => void deleteTemplate(item.id)}>Xoá</button> : null}
             </div>
           ))}
+          </div>
         </div>
       ) : null}
 

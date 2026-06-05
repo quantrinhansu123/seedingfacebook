@@ -136,8 +136,10 @@ export function MonitorPage() {
   const [postSelected, setPostSelected] = useState<Record<string, boolean>>({});
   const [postPageId, setPostPageId] = useState('');
   const [postContent, setPostContent] = useState('');
+  const [postCaptions, setPostCaptions] = useState<Record<string, string>>({});
   const [postResult, setPostResult] = useState('');
   const [postSubmitting, setPostSubmitting] = useState(false);
+  const [postCaptionBusy, setPostCaptionBusy] = useState(false);
 
   const [fbCommentModalPost, setFbCommentModalPost] = useState<FbPost | null>(null);
   const [fbCommentKeywords, setFbCommentKeywords] = useState('quan tâm, đặt hàng, sđt, địa chỉ, ib, giá');
@@ -146,7 +148,11 @@ export function MonitorPage() {
   const [fbCommentBusy, setFbCommentBusy] = useState(false);
 
   const [tiktokModal, setTiktokModal] = useState(false);
+  const [tiktokMode, setTiktokMode] = useState<'channel' | 'video' | 'managed'>('managed');
   const [tiktokUrl, setTiktokUrl] = useState('');
+  const [tiktokManagedChannelId, setTiktokManagedChannelId] = useState('');
+  const [tiktokMaxVideos, setTiktokMaxVideos] = useState(8);
+  const [tiktokLimitPerVideo, setTiktokLimitPerVideo] = useState(150);
   const [tiktokChannelName, setTiktokChannelName] = useState('');
   const [tiktokVideoTitle, setTiktokVideoTitle] = useState('');
   const [tiktokKeywords, setTiktokKeywords] = useState('quan tâm, đặt hàng, sđt, địa chỉ, ib, giá');
@@ -862,8 +868,47 @@ export function MonitorPage() {
     setPostSelected(sel);
     setPostPageId('');
     setPostContent('');
+    setPostCaptions({});
     setPostResult('');
     setPostModal(true);
+  }
+
+  async function generatePostCaptions() {
+    const selectedGroups = groups.filter((g) => postSelected[g]);
+    const message = postContent.trim();
+    if (!message) {
+      setPostResult('Nhập nội dung gốc trước khi tạo caption AI');
+      return;
+    }
+    if (!selectedGroups.length) {
+      setPostResult('Chọn ít nhất 1 nhóm/page để tạo caption');
+      return;
+    }
+    setPostCaptionBusy(true);
+    setPostResult('Đang tạo caption biến thể cho từng nơi đăng...');
+    try {
+      const targets = selectedGroups.map((id) => ({ id, name: groupNames[id] || id, type: 'group' }));
+      const r = await api('/api/ai/caption-variants', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, targets }),
+      });
+      const d = await r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
+      if (d.ok) {
+        const next: Record<string, string> = {};
+        (d.captions || []).forEach((item: { id?: string; caption?: string }) => {
+          if (item.id && item.caption) next[item.id] = item.caption;
+        });
+        setPostCaptions(next);
+        setPostResult(d.warning ? `⚠️ ${d.warning}` : `✅ Đã tạo ${Object.keys(next).length} caption riêng`);
+      } else {
+        setPostResult(`❌ ${d.error || 'Không tạo được caption AI'}`);
+      }
+    } catch {
+      setPostResult('❌ Lỗi kết nối khi tạo caption AI');
+    } finally {
+      setPostCaptionBusy(false);
+    }
   }
 
   async function submitPost() {
@@ -883,7 +928,7 @@ export function MonitorPage() {
         const r = await api('/api/post', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ group_id, page_id: postPageId, message }),
+          body: JSON.stringify({ group_id, page_id: postPageId, message: postCaptions[group_id]?.trim() || message }),
         });
         const d = await r.json();
         if (d.ok) ok++;
@@ -949,29 +994,59 @@ export function MonitorPage() {
 
   async function fetchTiktokCommentsForFilter() {
     const url = tiktokUrl.trim();
-    if (!url) {
+    const selectedChannel = channels.find((item) => item.id === tiktokManagedChannelId);
+    if (tiktokMode === 'video' && !url) {
       setTiktokStatus('Dán link video TikTok trước');
       return;
     }
+    if (tiktokMode === 'channel' && !url) {
+      setTiktokStatus('Dán link kênh TikTok hoặc @username trước');
+      return;
+    }
     setTiktokBusy(true);
-    setTiktokStatus('Đang lấy comment TikTok...');
+    setTiktokStatus(tiktokMode === 'video' ? 'Đang lấy comment TikTok theo video...' : 'Đang lấy comment TikTok theo kênh...');
     try {
-      const r = await api('/api/tiktok/comments/fetch', {
+      const endpoint = tiktokMode === 'video'
+        ? '/api/tiktok/comments/fetch'
+        : tiktokMode === 'managed'
+          ? '/api/tiktok/channels/fetch-comments'
+          : '/api/tiktok/channel-comments/fetch';
+      const body = tiktokMode === 'video'
+        ? {
+            url,
+            channel_name: tiktokChannelName.trim(),
+            video_title: tiktokVideoTitle.trim(),
+            keywords: parseKeywordInput(tiktokKeywords),
+            limit: 500,
+          }
+        : tiktokMode === 'managed'
+          ? {
+              channel_ids: tiktokManagedChannelId ? [tiktokManagedChannelId] : [],
+              keywords: parseKeywordInput(tiktokKeywords),
+              max_videos: tiktokMaxVideos,
+              limit_per_video: tiktokLimitPerVideo,
+            }
+          : {
+              channel: url,
+              keywords: parseKeywordInput(tiktokKeywords),
+              max_videos: tiktokMaxVideos,
+              limit_per_video: tiktokLimitPerVideo,
+            };
+      const r = await api(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url,
-          channel_name: tiktokChannelName.trim(),
-          video_title: tiktokVideoTitle.trim(),
-          keywords: parseKeywordInput(tiktokKeywords),
-          limit: 500,
-        }),
+        body: JSON.stringify(body),
       });
       const d = await r.json();
       if (d.ok) {
         setTiktokRows(d.comments || []);
         const warn = d.warning ? ` · ${d.warning}` : '';
-        setTiktokStatus(`Đã đọc ${d.fetched_comment_count} comment · khớp ${d.matched_count} · có SĐT ${d.phone_count || 0} · lưu ${d.storage}${warn}`);
+        const prefix = tiktokMode === 'video'
+          ? 'Video'
+          : tiktokMode === 'managed'
+            ? `${selectedChannel?.channel_name || 'Các kênh đã lưu'}`
+            : `Kênh ${url}`;
+        setTiktokStatus(`${prefix}: đã đọc ${d.fetched_comment_count || d.comment_count || 0} comment · ${d.video_count ? `${d.video_count} video · ` : ''}khớp ${d.matched_count || 0} · có SĐT ${d.phone_count || 0} · lưu ${d.storage}${warn}`);
         void loadTiktokStats(d.post_id || '');
       } else {
         setTiktokRows([]);
@@ -2038,6 +2113,25 @@ export function MonitorPage() {
             <label>Nội dung</label>
             <textarea value={postContent} onChange={(e) => setPostContent(e.target.value)} placeholder="Bạn đang nghĩ gì?" />
           </div>
+          <div className="post-ai-row">
+            <button type="button" className="btn-cancel" disabled={postCaptionBusy || postSubmitting} onClick={() => void generatePostCaptions()}>
+              {postCaptionBusy ? 'AI đang viết...' : '✨ AI tạo caption từng nhóm'}
+            </button>
+            <span>AI nằm trong nội dung đăng bài, mỗi nhóm/page nhận một caption khác nhau để tránh trùng lặp.</span>
+          </div>
+          {Object.keys(postCaptions).length ? (
+            <div className="post-caption-variants">
+              {groups.filter((g) => postSelected[g]).map((g) => (
+                <div key={g} className="post-caption-card">
+                  <b>{groupNames[g] || g}</b>
+                  <textarea
+                    value={postCaptions[g] || postContent}
+                    onChange={(e) => setPostCaptions((current) => ({ ...current, [g]: e.target.value }))}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : null}
           <div className="modal-result">{postResult}</div>
           <div className="modal-actions">
             <button type="button" className="btn-cancel" onClick={() => setPostModal(false)}>
@@ -2108,37 +2202,56 @@ export function MonitorPage() {
       >
         <div className="modal modal-wide">
           <div className="modal-hd">
-            🎵 Lọc bình luận TikTok
+            🎵 Lọc bình luận TikTok theo kênh/video
             <span className="modal-close" onClick={() => setTiktokModal(false)} role="presentation">
               ✕
             </span>
           </div>
+          <div className="segment-row">
+            <button type="button" className={tiktokMode === 'managed' ? 'active' : ''} onClick={() => setTiktokMode('managed')}>Kênh đã lưu</button>
+            <button type="button" className={tiktokMode === 'channel' ? 'active' : ''} onClick={() => setTiktokMode('channel')}>Một kênh</button>
+            <button type="button" className={tiktokMode === 'video' ? 'active' : ''} onClick={() => setTiktokMode('video')}>Một video</button>
+          </div>
+          {tiktokMode === 'managed' ? (
+            <div className="field">
+              <label>Kênh TikTok trong Quản lý nhóm/kênh</label>
+              <select className="modal-input" value={tiktokManagedChannelId} onChange={(e) => setTiktokManagedChannelId(e.target.value)}>
+                <option value="">Tất cả kênh TikTok đã lưu</option>
+                {channels.filter((item) => String(item.platform || '').toLowerCase() === 'tiktok').map((item) => (
+                  <option key={item.id || item.target_id || item.channel_name} value={item.id || ''}>
+                    {item.channel_name || item.link || item.target_id}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
           <div className="field">
-            <label>Link video TikTok</label>
+            <label>{tiktokMode === 'video' ? 'Link video TikTok' : 'Link kênh TikTok hoặc @username'}</label>
             <input
               className="modal-input"
               value={tiktokUrl}
               onChange={(e) => setTiktokUrl(e.target.value)}
-              placeholder="https://www.tiktok.com/@user/video/..."
+              disabled={tiktokMode === 'managed'}
+              placeholder={tiktokMode === 'video' ? 'https://www.tiktok.com/@user/video/...' : 'https://www.tiktok.com/@tenkenh hoặc @tenkenh'}
             />
           </div>
           <div className="tiktok-meta-grid">
             <div className="field">
-              <label>Tên kênh</label>
+              <label>{tiktokMode === 'video' ? 'Tên kênh' : 'Số video mới cần quét'}</label>
               <input
                 className="modal-input"
-                value={tiktokChannelName}
-                onChange={(e) => setTiktokChannelName(e.target.value)}
-                placeholder="@tenkenh hoặc tên shop"
+                value={tiktokMode === 'video' ? tiktokChannelName : String(tiktokMaxVideos)}
+                onChange={(e) => (tiktokMode === 'video' ? setTiktokChannelName(e.target.value) : setTiktokMaxVideos(Number(e.target.value) || 1))}
+                placeholder={tiktokMode === 'video' ? '@tenkenh hoặc tên shop' : '8'}
               />
             </div>
             <div className="field">
-              <label>Tên bài / video</label>
+              <label>{tiktokMode === 'video' ? 'Tên bài / video' : 'Comment mỗi video'}</label>
               <input
                 className="modal-input"
-                value={tiktokVideoTitle}
-                onChange={(e) => setTiktokVideoTitle(e.target.value)}
-                placeholder="Ví dụ: video giới thiệu sản phẩm"
+                value={tiktokMode === 'video' ? tiktokVideoTitle : String(tiktokLimitPerVideo)}
+                onChange={(e) => (tiktokMode === 'video' ? setTiktokVideoTitle(e.target.value) : setTiktokLimitPerVideo(Number(e.target.value) || 50))}
+                placeholder={tiktokMode === 'video' ? 'Ví dụ: video giới thiệu sản phẩm' : '150'}
               />
             </div>
           </div>
@@ -2154,7 +2267,7 @@ export function MonitorPage() {
           <div className="modal-actions modal-actions-between">
             <div className="modal-result">{tiktokStatus}</div>
             <button type="button" className="btn-submit" disabled={tiktokBusy} onClick={() => void fetchTiktokCommentsForFilter()}>
-              {tiktokBusy ? 'Đang đọc...' : 'Lấy & lọc TikTok'}
+              {tiktokBusy ? 'Đang đọc...' : tiktokMode === 'video' ? 'Lấy video' : 'Lấy comment theo kênh'}
             </button>
           </div>
           <div className="comment-filter-summary">

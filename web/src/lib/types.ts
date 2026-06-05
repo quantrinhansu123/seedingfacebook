@@ -173,6 +173,7 @@ export type StoredPostComment = {
   attachment_type?: string;
   created_time?: string;
   matched_keywords?: string[];
+  manual_tags?: string[];
   is_matched?: boolean;
   phone?: string;
   phones?: string[];
