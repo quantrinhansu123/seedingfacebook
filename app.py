@@ -3519,6 +3519,23 @@ def staff_cookies_update(staff_id):
 
     _save_staff_cookies()
     _invalidate_facebook_cache()
+
+    if staff_id == _current_staff_id():
+        refreshed_staff = {
+            **target,
+            **remote_row,
+            'id': staff_id,
+            'created_at': target.get('created_at') or now,
+            '_auth_source': 'supabase' if USE_SUPABASE else target.get('_auth_source', 'local'),
+        }
+        refreshed_staff['cookie'] = cookie or target.get('cookie', '')
+        refreshed_staff['facebook_user_id'] = (
+            remote_row.get('facebook_user_id')
+            or target.get('facebook_user_id')
+            or _extract_cookie_user(refreshed_staff.get('cookie', ''))
+        )
+        _set_logged_in_staff(refreshed_staff)
+
     staff_rows, warning = _merged_public_staff_rows()
     if remote_warning and not warning:
         warning = remote_warning
