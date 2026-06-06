@@ -248,6 +248,37 @@ async function handleSendComment(request) {
   return publishCommentFromBackground({ ...payload, message: text }, url, response?.error || '');
 }
 
+async function openTikTokCommentContext(request) {
+  const payload = request.payload || {};
+  const url = normalizeTikTokUrl({
+    ...payload,
+    post_url: payload.post_url || payload.comment_url || payload.url,
+  });
+  if (!url) {
+    return {
+      ok: false,
+      final: true,
+      error: 'Thieu link video TikTok de mo dung comment.',
+    };
+  }
+
+  const tab = await chrome.tabs.create({ url, active: true });
+  await waitForTabLoaded(tab.id);
+  await sleep(2500);
+  const response = await sendMessageWithRetries(tab.id, {
+    type: 'STREAL_TIKTOK_FOCUS_COMMENT',
+    requestId: request.requestId,
+    payload: { ...payload, url },
+  });
+  if (response?.ok) return response;
+  return {
+    ok: false,
+    final: true,
+    url,
+    error: response?.error || 'Da mo video TikTok nhung chua dinh vi duoc comment.',
+  };
+}
+
 async function collectTikTokChannelVideos(request) {
   const payload = request.payload || {};
   const rawChannel = String(payload.channel || payload.channel_url || payload.url || '').trim();
@@ -353,6 +384,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     collectTikTokChannelVideos(message)
       .then((response) => sendResponse(response))
       .catch((error) => sendResponse({ ok: false, final: true, error: error?.message || String(error), videos: [] }));
+    return true;
+  }
+  if (message?.type === 'STREAL_EXTENSION_OPEN_TIKTOK_COMMENT') {
+    openTikTokCommentContext(message)
+      .then((response) => sendResponse(response))
+      .catch((error) => sendResponse({ ok: false, final: true, error: error?.message || String(error) }));
     return true;
   }
   if (message?.type !== 'STREAL_EXTENSION_SEND_COMMENT') return false;

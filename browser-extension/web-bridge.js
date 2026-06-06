@@ -74,6 +74,33 @@
       return;
     }
 
+    if (data.type === 'STREAL_TIKTOK_OPEN_COMMENT_REQUEST') {
+      chrome.runtime.sendMessage(
+        {
+          type: 'STREAL_EXTENSION_OPEN_TIKTOK_COMMENT',
+          requestId: data.requestId,
+          payload: data.payload || {},
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            postToPage({
+              type: 'STREAL_TIKTOK_OPEN_COMMENT_RESPONSE',
+              requestId: data.requestId,
+              ok: false,
+              error: chrome.runtime.lastError.message || 'Extension khong phan hoi',
+            });
+            return;
+          }
+          postToPage({
+            type: 'STREAL_TIKTOK_OPEN_COMMENT_RESPONSE',
+            requestId: data.requestId,
+            ...(response || { ok: false, error: 'Extension khong mo duoc comment TikTok' }),
+          });
+        },
+      );
+      return;
+    }
+
     if (data.type !== 'STREAL_TIKTOK_COMMENT_REQUEST') return;
 
     chrome.runtime.sendMessage(
