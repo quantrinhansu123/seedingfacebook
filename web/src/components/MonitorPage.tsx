@@ -60,10 +60,14 @@ type TikTokBridgeResult = {
   error?: string;
   message?: string;
   comment_id?: string;
+  post_id?: string;
+  post_url?: string;
   url?: string;
   version?: string;
   manual?: boolean;
   method?: string;
+  fallback_allowed?: boolean;
+  warning?: string;
 };
 type TikTokVideoCollectResult = {
   ok?: boolean;
@@ -1244,6 +1248,29 @@ export function MonitorPage() {
     return r.json();
   }
 
+  async function requestTiktokPlaywrightComment(message: string): Promise<TikTokBridgeResult> {
+    if (!selectedTiktokStat) {
+      return { ok: false, error: 'Chưa chọn video TikTok' };
+    }
+    try {
+      const r = await api('/api/tiktok/comment/playwright', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          post_id: selectedTiktokStat.post_id,
+          video_id: selectedTiktokStat.video_id,
+          post_url: selectedTiktokStat.post_url,
+          video_title: selectedTiktokStat.video_title,
+          channel_name: selectedTiktokStat.channel_name,
+          message,
+        }),
+      });
+      return r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
+    } catch {
+      return { ok: false, error: 'Không kết nối được Playwright backend' };
+    }
+  }
+
   async function prepareManualTikTokComment(message: string, fallbackReason = '') {
     if (!selectedTiktokStat?.post_url) {
       setTiktokCommentStatus('Video TikTok này chưa có link để mở.');
@@ -1306,8 +1333,19 @@ export function MonitorPage() {
       return;
     }
     setTiktokCommentBusy(true);
-    setTiktokCommentStatus('Đang gửi TikTok bằng Chrome đang đăng nhập...');
+    setTiktokCommentStatus('Đang thử gửi TikTok bằng Playwright backend...');
     try {
+      const playwrightResult = await requestTiktokPlaywrightComment(message);
+      if (playwrightResult.ok) {
+        setTiktokCommentText('');
+        setTiktokCommentStatus(`Đã gửi comment TikTok bằng Playwright browser${playwrightResult.warning ? ` · ${playwrightResult.warning}` : ''}`);
+        await loadTiktokStats(playwrightResult.post_id || selectedTiktokStat.post_id || '');
+        await loadTodayCommentStats();
+        setTiktokCommentBusy(false);
+        return;
+      }
+
+      setTiktokCommentStatus(`Playwright chưa gửi được (${playwrightResult.error || 'không rõ lỗi'}). Đang thử Chrome extension...`);
       const directResult = await sendDirectTikTokComment(message);
       if (directResult.ok) {
         const d = await recordTiktokExtensionResult('success', message, directResult);

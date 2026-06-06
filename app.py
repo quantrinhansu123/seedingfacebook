@@ -69,6 +69,13 @@ SUPABASE_CHANNEL_TABLE = os.environ.get('SUPABASE_CHANNEL_TABLE', 'managed_chann
 SUPABASE_COMMENT_IMAGE_BUCKET = os.environ.get('SUPABASE_COMMENT_IMAGE_BUCKET', 'comment-images')
 APP_TIMEZONE = os.environ.get('APP_TIMEZONE', 'Asia/Ho_Chi_Minh')
 TIKTOK_COOKIE = os.environ.get('TIKTOK_COOKIE', '')
+TIKTOK_PLAYWRIGHT_ENABLED = os.environ.get('TIKTOK_PLAYWRIGHT_ENABLED', '').lower() in ('1', 'true', 'yes', 'on')
+TIKTOK_PLAYWRIGHT_HEADLESS = os.environ.get('TIKTOK_PLAYWRIGHT_HEADLESS', 'false').lower() in ('1', 'true', 'yes', 'on')
+TIKTOK_PLAYWRIGHT_USER_DATA_DIR = os.environ.get(
+    'TIKTOK_PLAYWRIGHT_USER_DATA_DIR',
+    os.path.join(RUNTIME_DATA_DIR, 'playwright', 'tiktok-profile'),
+)
+TIKTOK_PLAYWRIGHT_TIMEOUT_MS = int(os.environ.get('TIKTOK_PLAYWRIGHT_TIMEOUT_MS', '60000') or 60000)
 SIMPLE_LOGIN_ONLY = os.environ.get('SIMPLE_LOGIN_ONLY', 'true').lower() not in ('0', 'false', 'no')
 MAX_COMMENT_IMAGE_BYTES = int(os.environ.get('MAX_COMMENT_IMAGE_BYTES', 8 * 1024 * 1024))
 ALLOWED_COMMENT_IMAGE_TYPES = {
@@ -2183,6 +2190,200 @@ def _send_tiktok_comment(video_id: str, video_url: str, message: str, cookie: st
     return payload, ''
 
 
+def _click_first_visible(locator) -> bool:
+    try:
+        count = min(locator.count(), 6)
+    except Exception:
+        return False
+    for idx in range(count):
+        item = locator.nth(idx)
+        try:
+            if item.is_visible(timeout=700):
+                item.click(timeout=2500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _run_tiktok_playwright_comment(body: dict) -> tuple[dict, str]:
+    if not TIKTOK_PLAYWRIGHT_ENABLED:
+        return {}, 'Playwright backend chưa bật. Bật TIKTOK_PLAYWRIGHT_ENABLED=true trên máy/VPS chạy backend để thử browser automation.'
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:
+        return {}, 'Backend chưa cài Playwright. Chạy: pip install playwright && python -m playwright install chromium'
+
+    raw_url = str(body.get('url') or body.get('video_url') or body.get('post_url') or '').strip()
+    raw_video_id = str(body.get('video_id') or '').strip()
+    post_id = str(body.get('post_id') or '').strip()
+    message = str(body.get('message') or body.get('text') or '').strip()
+    comment_text = str(body.get('comment_text') or '').strip()
+    if post_id.startswith('tiktok_') and not raw_video_id:
+        raw_video_id = post_id.replace('tiktok_', '', 1)
+    video_id, final_url = _extract_tiktok_video_id(raw_video_id or raw_url)
+    if not video_id:
+        return {}, 'Không nhận diện được video TikTok để chạy Playwright.'
+    if not message:
+        return {}, 'Nhập nội dung bình luận TikTok'
+    if not final_url:
+        final_url = raw_url or f'https://www.tiktok.com/@/video/{video_id}'
+
+    os.makedirs(TIKTOK_PLAYWRIGHT_USER_DATA_DIR, exist_ok=True)
+    timeout = max(15000, min(TIKTOK_PLAYWRIGHT_TIMEOUT_MS, 180000))
+    context = None
+    try:
+        with sync_playwright() as p:
+            launch_opts = {
+                'headless': TIKTOK_PLAYWRIGHT_HEADLESS,
+                'viewport': {'width': 1366, 'height': 900},
+                'locale': 'vi-VN',
+                'args': [
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-first-run',
+                    '--disable-dev-shm-usage',
+                ],
+            }
+            try:
+                context = p.chromium.launch_persistent_context(
+                    TIKTOK_PLAYWRIGHT_USER_DATA_DIR,
+                    channel='chrome',
+                    **launch_opts,
+                )
+            except Exception:
+                context = p.chromium.launch_persistent_context(
+                    TIKTOK_PLAYWRIGHT_USER_DATA_DIR,
+                    **launch_opts,
+                )
+
+            page = context.pages[0] if context.pages else context.new_page()
+            page.set_default_timeout(timeout)
+            page.goto(final_url, wait_until='domcontentloaded', timeout=timeout)
+            page.wait_for_timeout(2500)
+
+            login_markers = [
+                'text=/Log in|Đăng nhập|Sign up|Đăng ký/i',
+                '[data-e2e="login-button"]',
+            ]
+            login_visible = False
+            for selector in login_markers:
+                try:
+                    if page.locator(selector).first.is_visible(timeout=800):
+                        login_visible = True
+                        break
+                except Exception:
+                    continue
+            if login_visible and TIKTOK_PLAYWRIGHT_HEADLESS:
+                return {}, 'Playwright profile chưa đăng nhập TikTok. Chạy local với TIKTOK_PLAYWRIGHT_HEADLESS=false, đăng nhập TikTok trong cửa sổ Chrome mở ra rồi thử lại.'
+
+            for selector in (
+                '[data-e2e="comment-icon"]',
+                'button[aria-label*="comment" i]',
+                'button[aria-label*="bình luận" i]',
+                'div[role="button"][aria-label*="comment" i]',
+            ):
+                _click_first_visible(page.locator(selector))
+                page.wait_for_timeout(500)
+
+            reply_target_found = False
+            if comment_text:
+                try:
+                    reply_target_found = bool(page.evaluate(
+                        """(text) => {
+                          const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                          const needle = normalize(text).slice(0, 120);
+                          if (!needle) return false;
+                          const nodes = Array.from(document.querySelectorAll('div, span, p'));
+                          for (const node of nodes) {
+                            const haystack = normalize(node.innerText || node.textContent);
+                            if (!haystack.includes(needle)) continue;
+                            node.scrollIntoView({ block: 'center', inline: 'nearest' });
+                            let parent = node;
+                            for (let depth = 0; depth < 10 && parent; depth += 1, parent = parent.parentElement) {
+                              const actions = Array.from(parent.querySelectorAll('button, [role="button"], span'));
+                              const reply = actions.find((item) => /reply|trả lời/i.test(item.innerText || item.getAttribute('aria-label') || ''));
+                              if (reply) {
+                                reply.click();
+                                return true;
+                              }
+                            }
+                            return true;
+                          }
+                          return false;
+                        }""",
+                        comment_text,
+                    ))
+                    page.wait_for_timeout(900)
+                except Exception:
+                    reply_target_found = False
+
+            input_clicked = False
+            for selector in (
+                '[data-e2e="comment-input"] [contenteditable="true"]',
+                'div.public-DraftEditor-content[contenteditable="true"]',
+                'div[contenteditable="true"][role="textbox"]',
+                'div[contenteditable="true"]',
+                'textarea[placeholder*="comment" i]',
+                'textarea[placeholder*="bình luận" i]',
+            ):
+                loc = page.locator(selector)
+                try:
+                    if loc.count():
+                        target = loc.first
+                        target.click(timeout=3000)
+                        page.keyboard.insert_text(message)
+                        input_clicked = True
+                        break
+                except Exception:
+                    continue
+            if not input_clicked:
+                return {}, 'Playwright đã mở TikTok nhưng không tìm thấy ô nhập bình luận. Có thể TikTok đổi UI hoặc tài khoản chưa được phép comment.'
+
+            page.wait_for_timeout(600)
+            submitted = False
+            for selector in (
+                '[data-e2e="comment-post"]',
+                'button[data-e2e*="comment-post"]',
+                'button[aria-label*="post" i]',
+                'button[aria-label*="đăng" i]',
+                'button[aria-label*="gửi" i]',
+                'div[role="button"][aria-label*="post" i]',
+            ):
+                if _click_first_visible(page.locator(selector)):
+                    submitted = True
+                    break
+            if not submitted:
+                for key in ('Control+Enter', 'Meta+Enter', 'Enter'):
+                    try:
+                        page.keyboard.press(key)
+                        submitted = True
+                        break
+                    except Exception:
+                        continue
+            if not submitted:
+                return {}, 'Playwright đã nhập bình luận nhưng không bấm được nút gửi.'
+
+            page.wait_for_timeout(1800)
+            return {
+                'ok': True,
+                'method': 'playwright-browser',
+                'url': final_url,
+                'video_id': video_id,
+                'comment_id': f'playwright_{uuid.uuid4().hex}',
+                'reply_target_found': reply_target_found,
+                'message': 'Đã gửi bằng Playwright browser profile.',
+            }, ''
+    except Exception as e:
+        return {}, f'Playwright không gửi được TikTok: {str(e)[:260]}'
+    finally:
+        try:
+            if context:
+                context.close()
+        except Exception:
+            pass
+
+
 def _record_tiktok_extension_comment(body: dict) -> tuple[dict, int]:
     raw_url = str(body.get('url') or body.get('video_url') or body.get('post_url') or '').strip()
     raw_video_id = str(body.get('video_id') or '').strip()
@@ -2191,8 +2392,12 @@ def _record_tiktok_extension_comment(body: dict) -> tuple[dict, int]:
     status = str(body.get('status') or '').strip().lower()
     error = str(body.get('error') or '').strip()
     extension_result = body.get('extension_result') if isinstance(body.get('extension_result'), dict) else {}
-    is_manual = bool(extension_result.get('manual')) or str(extension_result.get('method') or '').startswith('manual')
-    delivery = 'manual_copy_open' if is_manual else 'chrome_extension'
+    result_method = str(extension_result.get('method') or '')
+    is_manual = bool(extension_result.get('manual')) or result_method.startswith('manual')
+    if result_method.startswith('playwright'):
+        delivery = 'browser_automation'
+    else:
+        delivery = 'manual_copy_open' if is_manual else 'chrome_extension'
 
     if post_id.startswith('tiktok_') and not raw_video_id:
         raw_video_id = post_id.replace('tiktok_', '', 1)
@@ -3417,6 +3622,50 @@ def send_tiktok_comment():
         warnings.append(f"Lịch sử comment đã lưu local, Supabase chưa ghi được: {log['storage_warning']}")
     if warnings:
         res['warning'] = ' | '.join(warnings)
+    return jsonify(res)
+
+
+@app.route('/api/tiktok/comment/playwright', methods=['POST'])
+def send_tiktok_comment_playwright():
+    body = request.get_json() or {}
+    payload, error = _run_tiktok_playwright_comment(body)
+    raw_url = str(body.get('url') or body.get('video_url') or body.get('post_url') or '').strip()
+    raw_video_id = str(body.get('video_id') or '').strip()
+    post_id = str(body.get('post_id') or '').strip()
+    if post_id.startswith('tiktok_') and not raw_video_id:
+        raw_video_id = post_id.replace('tiktok_', '', 1)
+    video_id, final_url = _extract_tiktok_video_id(raw_video_id or raw_url)
+    if error:
+        status_code = 409 if 'chưa bật' in error.lower() or 'chưa cài' in error.lower() else 502
+        return jsonify({
+            'ok': False,
+            'source': 'tiktok',
+            'method': 'playwright-browser',
+            'fallback_allowed': True,
+            'error': error,
+        }), status_code
+
+    result_body = {
+        **body,
+        'status': 'success',
+        'post_id': f'tiktok_{video_id}' if video_id else post_id,
+        'post_url': final_url or raw_url or payload.get('url'),
+        'comment_id': payload.get('comment_id'),
+        'extension_result': payload,
+    }
+    recorded, _status = _record_tiktok_extension_comment(result_body)
+    res = {
+        **payload,
+        'ok': True,
+        'source': 'tiktok',
+        'post_id': recorded.get('post_id') or result_body.get('post_id'),
+        'post_url': recorded.get('post_url') or result_body.get('post_url'),
+        'comment_id': recorded.get('comment_id') or payload.get('comment_id'),
+        'storage': recorded.get('storage'),
+        'log_storage': recorded.get('log_storage'),
+    }
+    if recorded.get('warning'):
+        res['warning'] = recorded['warning']
     return jsonify(res)
 
 

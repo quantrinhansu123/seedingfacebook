@@ -22,10 +22,14 @@ type TikTokBridgeResult = {
   comment_id?: string;
   cid?: string;
   id?: string;
+  post_id?: string;
+  post_url?: string;
   url?: string;
   error?: string;
   method?: string;
   manual?: boolean;
+  fallback_allowed?: boolean;
+  warning?: string;
 };
 
 type TikTokOpenCommentResult = {
@@ -631,6 +635,29 @@ export function CommentLeadInboxPanel() {
     return r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
   }
 
+  async function requestTiktokPlaywrightComment(row: StoredPostComment, message: string): Promise<TikTokBridgeResult> {
+    try {
+      const r = await api('/api/tiktok/comment/playwright', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          post_id: row.post_id || '',
+          post_url: row.post_url || row.comment_url || '',
+          comment_url: row.comment_url || '',
+          comment_id: row.comment_id || '',
+          comment_text: row.message || '',
+          author_name: row.author_name || '',
+          channel_name: row.channel_name || '',
+          video_title: row.video_title || '',
+          message,
+        }),
+      });
+      return r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
+    } catch {
+      return { ok: false, error: 'Không kết nối được Playwright backend' };
+    }
+  }
+
   async function prepareManualTikTokReply(row: StoredPostComment, message: string, fallbackReason = '') {
     const targetUrl = row.comment_url || row.post_url || '';
     if (!targetUrl) {
@@ -722,9 +749,19 @@ export function CommentLeadInboxPanel() {
 
     const src = sourceKey(selected);
     setReplyBusy(true);
-    setReplyStatus(src === 'tiktok' ? 'Đang gửi TikTok bằng Chrome đang đăng nhập...' : 'Đang gửi trả lời...');
+    setReplyStatus(src === 'tiktok' ? 'Đang thử gửi TikTok bằng Playwright backend...' : 'Đang gửi trả lời...');
     try {
       if (src === 'tiktok') {
+        const playwrightResult = await requestTiktokPlaywrightComment(selected, message);
+        if (playwrightResult.ok) {
+          setProcessedIds((current) => (current.includes(commentKey(selected)) ? current : [...current, commentKey(selected)]));
+          setReplyText('');
+          setReplyStatus(`✅ Đã gửi comment TikTok bằng Playwright browser${playwrightResult.warning ? ` · ${playwrightResult.warning}` : ''}`);
+          await loadComments();
+          return;
+        }
+
+        setReplyStatus(`Playwright chưa gửi được (${playwrightResult.error || 'không rõ lỗi'}). Đang thử Chrome extension...`);
         const directResult = await sendDirectTikTokReply(selected, message);
         if (directResult.ok) {
           await recordTiktokExtensionResult(selected, 'success', message, directResult).catch(() => null);

@@ -9,6 +9,7 @@ data/ai_config.json
 .env (1)
 data/staff_cookies.json
 data/staff_tokens/
+data/playwright/
 data/comment_logs.json
 data/comment_summaries.json
 data/post_comments.json
