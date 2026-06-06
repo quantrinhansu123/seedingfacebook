@@ -17,13 +17,13 @@ Tao `Web Service` moi tu repo nay, sau do cau hinh:
 
 ```text
 Build Command:
-pip install -r requirements.txt && python -m playwright install chromium
+pip install -r requirements.txt && python -m playwright install chromium chromium-headless-shell
 
 Start Command:
 python tiktok_playwright_worker.py
 ```
 
-Repo da co san `render.yaml`, nen co the tao service bang Blueprint tren Render. Neu tao thu cong thi dung dung command o tren.
+Repo da co san `render.yaml`, nen co the tao service bang Blueprint tren Render. Neu tao thu cong thi dung dung command o tren. Khong them `--with-deps` tren Render Free vi lenh do can quyen root va se fail.
 
 Environment Variables tren Render:
 

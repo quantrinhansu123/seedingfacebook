@@ -3,7 +3,7 @@ services:
     name: lead-hunter-tiktok-worker
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt && python -m playwright install chromium
+    buildCommand: pip install -r requirements.txt && python -m playwright install chromium chromium-headless-shell
     startCommand: python tiktok_playwright_worker.py
     envVars:
       - key: WORKER_API_KEY
