@@ -390,21 +390,21 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
   async function uploadImageFile(file?: File) {
     if (!file) return;
     if (!file.type.startsWith('image/')) {
-      setLocalStatus('Ch? h? tr? ch?n file ?nh JPG/PNG/WebP/GIF.');
+      setLocalStatus('Chỉ hỗ trợ chọn file ảnh JPG/PNG/WebP/GIF.');
       return;
     }
     setUploadingImage(true);
-    setLocalStatus('?ang upload ?nh...');
+    setLocalStatus('Đang upload ảnh...');
     try {
       const form = new FormData();
       form.append('image', file);
       const res = await api('/api/uploads/comment-image', { method: 'POST', body: form });
       const payload = await readPayload(res);
-      if (!res.ok || !payload.ok || !payload.image_url) throw new Error(payload.error || 'Kh?ng upload ???c ?nh');
+      if (!res.ok || !payload.ok || !payload.image_url) throw new Error(payload.error || 'Không upload được ảnh');
       setMediaUrl(payload.image_url);
-      setLocalStatus('?? upload ?nh v? g?n v?o b?i vi?t. B?m ??ng ngay ?? ??ng link ?nh n?y.');
+      setLocalStatus('Đã upload ảnh và gắn vào bài viết. Bấm Đăng ngay để đăng link ảnh này.');
     } catch (err: any) {
-      setLocalStatus(`L?i upload ?nh: ${err?.message || 'Kh?ng g?i ???c backend'}.`);
+      setLocalStatus(`Lỗi upload ảnh: ${err?.message || 'Không gọi được backend'}.`);
     } finally {
       setUploadingImage(false);
     }
