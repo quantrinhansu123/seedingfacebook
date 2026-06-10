@@ -45,6 +45,27 @@ type HistoryRow = {
 
 const HISTORY_KEY = 'seeding-post-history-v2';
 
+const PARTNER_POST_PRESETS = [
+  {
+    title: 'Hướng dẫn điều chỉnh ty đàn guitar xử lý rè dây',
+    content: 'Video bài nói hướng dẫn người mới kiểm tra cần đàn, nhận biết tiếng rè và cách mang đàn tới shop để được cân chỉnh an toàn.',
+    mediaUrl: 'https://www.tiktok.com/@guitarsaithanh/video/7350012345678901234',
+    scheduledAt: '2026-06-11T09:00',
+  },
+  {
+    title: 'Review đàn acoustic tầm 3 triệu – đáng mua không?',
+    content: 'Bài review có hook ngắn, demo âm thanh, điểm mạnh/yếu và CTA inbox để nhận bảng giá/clip test từng cây.',
+    mediaUrl: 'https://example.com/video/review-acoustic-3tr.mp4',
+    scheduledAt: '2026-06-11T19:30',
+  },
+  {
+    title: 'Chương trình Thanh Lý Đàn Tận Xưởng – Acoustic giảm đến 30%',
+    content: 'Bài khuyến mãi ngắn, nêu rõ số lượng còn lại, ưu đãi theo khung giờ và lời kêu gọi đặt lịch đến thử đàn.',
+    mediaUrl: 'https://example.com/images/thanh-ly-dan-acoustic.jpg',
+    scheduledAt: '2026-06-12T10:15',
+  },
+];
+
 function targetKey(target: PublishTarget) {
   return `${target.type}:${target.id}`;
 }
@@ -190,6 +211,14 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
     }
   }
 
+  function loadPreset(item: typeof PARTNER_POST_PRESETS[number]) {
+    setTitle(item.title);
+    setContent(item.content);
+    setMediaUrl(item.mediaUrl);
+    setScheduledAt(item.scheduledAt);
+    setLocalStatus('?? n?p b?i m?u t? ??i t?c v?o form. C? th? ch?nh l?i r?i ??ng ngay ho?c ??t l?ch.');
+  }
+
   function setAllTargets(checked: boolean) {
     setSelectedGroups(Object.fromEntries(groups.map((group) => [group.id, checked])));
     setSelectedPages(Object.fromEntries(pages.map((page) => [page.id, checked])));
@@ -312,30 +341,48 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
     }
   }
 
-  function scheduleDraft() {
+  async function scheduleDraft() {
     const message = buildMessage();
-    if (!message) {
-      setLocalStatus('Nhập nội dung bài viết trước khi đặt lịch.');
+    if (!message || !title.trim() || !content.trim()) {
+      setLocalStatus('Nh?p ?? ti?u ?? v? n?i dung b?i vi?t tr??c khi ??t l?ch.');
       return;
     }
     if (!scheduledAt) {
-      setLocalStatus('Chọn ngày giờ cần đăng.');
+      setLocalStatus('Ch?n ng?y gi? c?n ??ng.');
       return;
     }
     if (!selectedTargets.length) {
-      setLocalStatus('Chọn ít nhất một nhóm hoặc Page để đặt lịch.');
+      setLocalStatus('Ch?n ?t nh?t m?t nh?m ho?c Page ?? ??t l?ch.');
       return;
     }
-    appendHistory({
-      title,
-      content,
-      mediaUrl,
-      hashtags,
-      scheduledAt,
-      targets: selectedTargets,
-      status: 'Đã lưu lịch',
-    });
-    setLocalStatus('Đã lưu lịch đăng trong màn hình. Muốn tự chạy nền cần bật worker/cron phía backend.');
+    setPublishing(true);
+    setLocalStatus('?ang l?u l?ch ??ng l?n backend...');
+    try {
+      const detectedMedia = detectVideoMedia(mediaUrl);
+      const res = await api('/api/content-pipeline/posts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title,
+          content,
+          media_url: detectedMedia.mediaUrl,
+          native_video_url: detectedMedia.nativeVideoUrl,
+          hashtags,
+          scheduled_at: scheduledAt,
+          targets: selectedTargets.map((t) => ({ type: t.type, id: t.id, name: t.name })),
+          status: 'scheduled',
+        }),
+      });
+      const payload = await readPayload(res);
+      if (!res.ok || !payload.ok) throw new Error(payload.error || 'Kh?ng l?u ???c l?ch ??ng');
+      appendHistory({ title, content, mediaUrl, hashtags, scheduledAt, targets: selectedTargets, status: '?? l?u l?ch' });
+      setLocalStatus('?? l?u l?ch ??ng l?n backend. Cron/worker c? th? g?i /api/content-pipeline/scheduled/run ?? t? ??ng khi t?i gi?.');
+      void onReload();
+    } catch (err: any) {
+      setLocalStatus(`L?i ??t l?ch: ${err?.message || 'Kh?ng g?i ???c backend'}.`);
+    } finally {
+      setPublishing(false);
+    }
   }
 
   function checkLinks() {
@@ -434,7 +481,7 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
             <button type="button" className="btn-submit" disabled={publishing} onClick={() => void publishNow()}>
               {publishing ? 'Đang đăng...' : '📣 Đăng ngay'}
             </button>
-            <button type="button" className="btn-cancel" disabled={publishing} onClick={scheduleDraft}>
+            <button type="button" className="btn-cancel" disabled={publishing} onClick={() => void scheduleDraft()}>
               ⏰ Đặt lịch
             </button>
             <button type="button" className="btn-cancel" disabled={generating || !targetCount} onClick={() => void generatePostCaptions()}>
