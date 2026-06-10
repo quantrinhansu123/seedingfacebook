@@ -5326,4 +5326,4 @@ threading.Thread(target=_poll_telegram, daemon=True).start()
 
 if __name__ == '__main__':
     print(f'[server] supabase={"on" if USE_SUPABASE else "off"} | http://localhost:{PORT}')
-    app.run(debug=False, port=PORT)
+    app.run(debug=False, host='0.0.0.0', port=PORT)

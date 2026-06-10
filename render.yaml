@@ -1,18 +1,28 @@
 services:
   - type: web
-    name: lead-hunter-tiktok-worker
+    name: Seeding_Fb
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt && python -m playwright install chromium chromium-headless-shell
-    startCommand: python tiktok_playwright_worker.py
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
     envVars:
-      - key: WORKER_API_KEY
-        sync: false
-      - key: PLAYWRIGHT_HEADLESS
+      - key: WEB_UI_URL
+        value: https://fb-moni.vercel.app
+      - key: CORS_ORIGINS
+        value: https://fb-moni.vercel.app,https://.*\.vercel\.app,http://localhost:3000,http://127.0.0.1:3000
+      - key: SIMPLE_LOGIN_ONLY
         value: "true"
-      - key: PLAYWRIGHT_TIMEOUT_MS
-        value: "90000"
-      - key: PLAYWRIGHT_USER_DATA_DIR
-        value: /opt/render/project/src/data/playwright/tiktok-worker-profile
-      - key: TIKTOK_COOKIE
+      - key: APP_SECRET_KEY
+        generateValue: true
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_PUBLISHABLE_KEY
+        sync: false
+      - key: SUPABASE_STAFF_TABLE
+        value: staff_users
+      - key: SUPABASE_CHANNEL_TABLE
+        value: managed_channels
+      - key: TIKTOK_PLAYWRIGHT_WORKER_URL
+        sync: false
+      - key: TIKTOK_PLAYWRIGHT_WORKER_KEY
         sync: false
