@@ -717,6 +717,22 @@ export function CommentLeadInboxPanel() {
     }
   }
 
+  function openDirectMessage(row: StoredPostComment) {
+    const src = sourceKey(row);
+    const author = (row.author_name || row.author_id || '').trim();
+    let url = row.comment_url || row.post_url || '';
+    if (src === 'tiktok') {
+      url = author
+        ? `https://www.tiktok.com/search/user?q=${encodeURIComponent(author)}`
+        : (row.post_url || row.comment_url || 'https://www.tiktok.com/messages');
+      setReplyStatus('?? m? TikTok ?? t?m t?i kho?n kh?ch. N?u TikTok ch?a m? chat tr?c ti?p, v?o profile kh?ch v? b?m Message.');
+    } else if (src === 'fb-page' || src === 'fb-group') {
+      url = row.comment_url || row.post_url || 'https://www.facebook.com/messages';
+      setReplyStatus('?? m? Facebook theo comment/b?i vi?t ?? nh?n kh?ch th? c?ng n?u c?n.');
+    }
+    if (url) window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
   async function sendDirectTikTokReply(row: StoredPostComment, message: string) {
     if (!tiktokBridgeReady) {
       return { ok: false, error: 'Chưa thấy extension Lead Hunter Bridge' } as TikTokBridgeResult;
