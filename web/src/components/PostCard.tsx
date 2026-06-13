@@ -84,7 +84,7 @@ export function PostCard({
   commentSummary?: CommentSummary;
   onOpenLightbox: (src: string) => void;
   onSuggestReply?: (post: FbPost) => Promise<void>;
-  onSummarizeComments?: (post: FbPost) => Promise<void>;
+  onSummarizeComments?: (post: FbPost) => Promise<string>;
   onExploreComments?: (post: FbPost) => void;
   onCommentSent?: () => Promise<void>;
 }) {
@@ -118,11 +118,14 @@ export function PostCard({
   const [pageId, setPageId] = useState('');
   const [suggestBusy, setSuggestBusy] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
+  const [summaryMsg, setSummaryMsg] = useState('');
   const [imageUrl, setImageUrl] = useState('');
   const [uploadingImage, setUploadingImage] = useState(false);
   const postLeads = leads || [];
   const visibleCommentSummary =
-    commentSummary && !((commentSummary.fetched_comment_count ?? 0) === 0 && cCount > 0)
+    commentSummary &&
+    (Boolean(commentSummary.summary?.trim()) ||
+      !((commentSummary.fetched_comment_count ?? 0) === 0 && cCount > 0))
       ? commentSummary
       : undefined;
 
@@ -389,10 +392,15 @@ export function PostCard({
               disabled={summaryBusy}
               onClick={async () => {
                 setSummaryBusy(true);
+                setSummaryMsg('⏳ Đang đọc comment và gọi AI...');
                 try {
-                  await onSummarizeComments(post);
+                  const msg = await onSummarizeComments(post);
+                  setSummaryMsg(msg || '');
+                } catch {
+                  setSummaryMsg('❌ Lỗi kết nối server');
                 } finally {
                   setSummaryBusy(false);
+                  setTimeout(() => setSummaryMsg(''), 9000);
                 }
               }}
             >
@@ -408,6 +416,7 @@ export function PostCard({
             {cmtOpen ? '✖ Đóng' : '✏️ Bình luận'}
           </button>
         </div>
+        {summaryMsg ? <div className="comment-msg-result">{summaryMsg}</div> : null}
       </div>
       <div className={`comment-box${cmtOpen ? ' open' : ''}`}>
         <textarea className="comment-textarea" rows={2} placeholder="Nhập bình luận..." data-cmt={post.id} />

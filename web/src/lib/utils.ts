@@ -26,6 +26,19 @@ export function escRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+export function socialAuthorProfileUrl(row: {
+  author_id?: string;
+  source?: string;
+}): string {
+  const id = String(row.author_id || '').trim();
+  if (!id) return '';
+  const src = String(row.source || '').toLowerCase();
+  if (src.includes('facebook')) {
+    return `https://www.facebook.com/profile.php?id=${encodeURIComponent(id)}`;
+  }
+  return '';
+}
+
 export function extractSlug(raw: string): string {
   try {
     const url = new URL(raw.includes('://') ? raw : 'https://' + raw);

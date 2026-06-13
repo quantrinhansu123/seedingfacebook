@@ -1,0 +1,634 @@
+'use client';
+
+import { useState } from 'react';
+import { CommentTemplatesSidebar } from '@/components/CommentTemplatesSidebar';
+import { CookieRefreshGuide } from '@/components/CookieRefreshGuide';
+import { PostCard } from '@/components/PostCard';
+import { SaleSetupPanel } from '@/components/SaleSetupPanel';
+import type { StaffPayload } from '@/components/StaffCookiePanel';
+import type { ViewKey } from '@/lib/app-routes';
+import type {
+  CommentSummary,
+  FbPage,
+  FbPost,
+  Lead,
+  ManagedChannel,
+  ReplySuggestion,
+  StaffAccount,
+} from '@/lib/types';
+import './manage-dashboard.css';
+
+type JoinPrompt = { id: string; name: string };
+
+type PostFetchItem = {
+  ok?: boolean;
+  target_type?: string;
+  group_id?: string;
+  group_name?: string;
+  count?: number;
+  error?: string;
+};
+
+export type ManageDashboardProps = {
+  staffName?: string;
+  staffRole?: string;
+  headerSub?: string;
+  onLogout: () => void;
+  onOpenView: (view: ViewKey) => void;
+  onOpenChannels: () => void;
+  groups: string[];
+  groupNames: Record<string, string>;
+  facebookPageChannels: ManagedChannel[];
+  tiktokManagedChannels: ManagedChannel[];
+  groupInp: string;
+  setGroupInp: (v: string) => void;
+  groupBusy: boolean;
+  onAddGroup: () => void;
+  onRemoveGroup: (id: string) => void;
+  joinPrompt: JoinPrompt | null;
+  joinBusy: boolean;
+  joinMsg: string;
+  onDismissJoin: () => void;
+  onJoinGroup: (id: string, name: string) => void;
+  onForceAddGroup: (id: string, name: string) => void;
+  groupMembership: Record<string, boolean | null>;
+  joiningGroupId: string;
+  onSyncFacebookPages: () => void;
+  channelBusy: boolean;
+  keywords: string[];
+  kwInp: string;
+  setKwInp: (v: string) => void;
+  onAddKw: () => void;
+  onRemoveKw: (kw: string) => void;
+  tgIds: string[];
+  tgInp: string;
+  setTgInp: (v: string) => void;
+  onAddTg: () => void;
+  onRemoveTg: (id: string) => void;
+  onTestTg: (id: string) => void;
+  tgStatus: string;
+  limit: number;
+  setLimit: (n: number) => void;
+  loading: boolean;
+  onLoadPosts: () => void;
+  onOpenPostModal: () => void;
+  classifyBusy: boolean;
+  onClassifyAll: () => void;
+  leadsBusy: boolean;
+  onExtractLeads: () => void;
+  onOpenTiktokModal: () => void;
+  onOpenTiktokStats: () => void;
+  catFilter: string;
+  setCatFilter: (v: string) => void;
+  catOptions: string[];
+  autoOn: boolean;
+  onToggleAuto: () => void;
+  intervalMin: number;
+  setIntervalMin: (n: number) => void;
+  onSaveSettings: (auto: boolean, min: number) => void;
+  todayCommentCount: number | null;
+  toolStatus: string;
+  feedError: string;
+  postFetchReport: PostFetchItem[];
+  filteredPosts: FbPost[];
+  allPostsCount: number;
+  classifications: Record<string, string>;
+  pages: FbPage[];
+  leads: Record<string, Lead[]>;
+  replySuggestions: Record<string, ReplySuggestion>;
+  commentSummaries: Record<string, CommentSummary>;
+  onSuggestReply: (post: FbPost) => Promise<void>;
+  onSummarizeComments: (post: FbPost) => Promise<string>;
+  onExploreComments: (post: FbPost) => void;
+  onCommentSent: () => void | Promise<void>;
+  onOpenLightbox: (url: string) => void;
+  saleSetupProps: React.ComponentProps<typeof SaleSetupPanel>;
+};
+
+export function ManageDashboardPanel(props: ManageDashboardProps) {
+  const {
+    staffName,
+    staffRole,
+    headerSub,
+    onLogout,
+    onOpenView,
+    onOpenChannels,
+    groups,
+    groupNames,
+    facebookPageChannels,
+    tiktokManagedChannels,
+    groupInp,
+    setGroupInp,
+    groupBusy,
+    onAddGroup,
+    onRemoveGroup,
+    joinPrompt,
+    joinBusy,
+    joinMsg,
+    onDismissJoin,
+    onJoinGroup,
+    onForceAddGroup,
+    groupMembership,
+    joiningGroupId,
+    onSyncFacebookPages,
+    channelBusy,
+    keywords,
+    kwInp,
+    setKwInp,
+    onAddKw,
+    onRemoveKw,
+    tgIds,
+    tgInp,
+    setTgInp,
+    onAddTg,
+    onRemoveTg,
+    onTestTg,
+    tgStatus,
+    limit,
+    setLimit,
+    loading,
+    onLoadPosts,
+    onOpenPostModal,
+    classifyBusy,
+    onClassifyAll,
+    leadsBusy,
+    onExtractLeads,
+    onOpenTiktokModal,
+    onOpenTiktokStats,
+    catFilter,
+    setCatFilter,
+    catOptions,
+    autoOn,
+    onToggleAuto,
+    intervalMin,
+    setIntervalMin,
+    onSaveSettings,
+    todayCommentCount,
+    toolStatus,
+    feedError,
+    postFetchReport,
+    filteredPosts,
+    allPostsCount,
+    classifications,
+    pages,
+    leads,
+    replySuggestions,
+    commentSummaries,
+    onSuggestReply,
+    onSummarizeComments,
+    onExploreComments,
+    onCommentSent,
+    onOpenLightbox,
+    saleSetupProps,
+  } = props;
+
+  const [cookieOpen, setCookieOpen] = useState(false);
+  const [cookieDetail, setCookieDetail] = useState(false);
+  const [errorDismissed, setErrorDismissed] = useState(false);
+  const [tgOpen, setTgOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
+
+  const roleLabel = staffRole === 'admin' ? 'Administrator' : 'Nhân sự';
+
+  return (
+    <div className="manage-dashboard">
+      <div className="md-main">
+        <header className="md-header">
+          <h2>SocialNexus Enterprise — {headerSub || 'Quản lý'}</h2>
+          <div className="md-header-right">
+            <button type="button" className="md-modules-btn" onClick={() => onOpenView('home')}>
+              <i className="fa-solid fa-table-cells-large" />
+              Module khác
+            </button>
+            <div className="md-date-pill">
+              <i className="fa-regular fa-calendar" />
+              <span>{new Date().toLocaleDateString('vi-VN')}</span>
+            </div>
+            <div className="md-header-divider" />
+            <div className="md-user-block">
+              <p className="md-user-name">{staffName || 'Nhân sự'}</p>
+              <p className="md-user-role">{roleLabel}</p>
+            </div>
+            <div className="md-avatar">
+              <i className="fa-solid fa-user" />
+              <span className="md-online" />
+            </div>
+            <button type="button" className="md-exit-btn" onClick={onLogout}>
+              Thoát
+            </button>
+          </div>
+        </header>
+
+        <div className="md-split">
+          <div className="md-secondary no-scrollbar">
+              <div className="md-secondary-head">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <i className="fa-solid fa-gear" />
+                  <span>Quản lý nguồn &amp; Từ khoá</span>
+                </div>
+              </div>
+
+              <div className="md-secondary-body">
+                <section className="md-source-block md-source-block--group">
+                  <div className="md-source-block-head">
+                    <div className="md-source-block-title">
+                      <i className="fa-solid fa-users" />
+                      <span>Nhóm Facebook</span>
+                    </div>
+                    <span className="md-source-block-count">{groups.length}</span>
+                  </div>
+
+                  {joinPrompt ? (
+                    <div className="md-pending-group">
+                      <div>
+                        <p>{joinPrompt.name}</p>
+                        <small>Chưa tham gia nhóm — cần tham gia để theo dõi bài viết</small>
+                        {joinMsg ? <small className="md-join-inline-msg">{joinMsg}</small> : null}
+                      </div>
+                      <div className="md-source-actions">
+                        <button
+                          type="button"
+                          className="md-join-btn"
+                          disabled={joinBusy}
+                          onClick={() => onJoinGroup(joinPrompt.id, joinPrompt.name)}
+                        >
+                          {joinBusy ? 'Đang tham gia...' : 'Tự tham gia'}
+                        </button>
+                        <button type="button" className="md-ghost-btn" onClick={() => onForceAddGroup(joinPrompt.id, joinPrompt.name)}>
+                          Theo dõi
+                        </button>
+                        <button type="button" className="md-remove-btn" onClick={onDismissJoin} title="Đóng">
+                          <i className="fa-solid fa-xmark" />
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="md-source-list">
+                    {groups.length ? groups.map((gid) => {
+                      const member = groupMembership[gid];
+                      const gname = groupNames[gid] || gid;
+                      return (
+                        <div key={gid} className={`md-source-item group${member === false ? ' not-member' : ''}`}>
+                          <div>
+                            <p>{gname}</p>
+                            {gname !== gid ? <small>{gid}</small> : null}
+                            {member === false ? <span className="md-member-badge warn">Chưa tham gia</span> : null}
+                            {member === true ? <span className="md-member-badge ok">Đã tham gia</span> : null}
+                          </div>
+                          <div className="md-source-actions">
+                            {member === false ? (
+                              <button
+                                type="button"
+                                className="md-join-btn"
+                                disabled={joiningGroupId === gid}
+                                onClick={() => onJoinGroup(gid, gname)}
+                              >
+                                {joiningGroupId === gid ? '...' : 'Tham gia'}
+                              </button>
+                            ) : null}
+                            <button type="button" className="md-remove-btn" onClick={() => onRemoveGroup(gid)} title="Xoá nhóm">
+                              <i className="fa-solid fa-xmark" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }) : (
+                      <span className="md-empty">Chưa có nhóm Facebook</span>
+                    )}
+                  </div>
+                  <div className="md-input-row">
+                    <input
+                      type="text"
+                      placeholder="ID / URL nhóm Facebook..."
+                      value={groupInp}
+                      disabled={groupBusy}
+                      onChange={(e) => setGroupInp(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && onAddGroup()}
+                    />
+                    <button type="button" className="md-btn-icon dark" onClick={onAddGroup} disabled={groupBusy}>
+                      <i className="fa-solid fa-plus" />
+                    </button>
+                  </div>
+                </section>
+
+                <section className="md-source-block md-source-block--page">
+                  <div className="md-source-block-head">
+                    <div className="md-source-block-title">
+                      <i className="fa-brands fa-facebook" />
+                      <span>Fanpage</span>
+                    </div>
+                    <span className="md-source-block-count">{facebookPageChannels.length}</span>
+                  </div>
+                  <div className="md-source-list">
+                    {facebookPageChannels.length ? facebookPageChannels.map((item) => (
+                      <div key={item.id || item.target_id} className="md-source-item page-item">
+                        <a
+                          href={item.link || (item.target_id ? `https://www.facebook.com/${item.target_id}` : '#')}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <i className="fa-brands fa-facebook" />
+                          <span>{item.channel_name || item.target_id || 'Fanpage'}</span>
+                        </a>
+                      </div>
+                    )) : (
+                      <span className="md-empty">Chưa có Fanpage</span>
+                    )}
+                  </div>
+                  <div className="md-source-block-actions">
+                    <button type="button" className="md-btn-dark" disabled={channelBusy} onClick={onSyncFacebookPages}>
+                      {channelBusy ? 'Đang đồng bộ...' : 'Đồng bộ Page'}
+                    </button>
+                    <button type="button" className="md-ghost-btn" onClick={onOpenChannels}>
+                      Thêm Page
+                    </button>
+                  </div>
+                </section>
+
+                <section className="md-source-block md-source-block--tiktok">
+                  <div className="md-source-block-head">
+                    <div className="md-source-block-title">
+                      <i className="fa-brands fa-tiktok" />
+                      <span>TikTok</span>
+                    </div>
+                    <span className="md-source-block-count">{tiktokManagedChannels.length}</span>
+                  </div>
+                  <div className="md-source-list">
+                    {tiktokManagedChannels.length ? tiktokManagedChannels.map((item) => (
+                      <div key={item.id || item.target_id} className="md-source-item tiktok-item">
+                        <a href={item.link || '#'} target="_blank" rel="noreferrer">
+                          <i className="fa-brands fa-tiktok" />
+                          <span>{item.channel_name || item.target_id || 'Kênh TikTok'}</span>
+                        </a>
+                      </div>
+                    )) : (
+                      <span className="md-empty">Chưa có kênh TikTok</span>
+                    )}
+                  </div>
+                  <div className="md-source-block-actions">
+                    <button type="button" className="md-btn-dark" onClick={onOpenChannels}>
+                      Quản lý TikTok
+                    </button>
+                  </div>
+                </section>
+
+                <>
+                  <hr className="md-divider" />
+                  <div>
+                      <div className="md-section-label">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <i className="fa-solid fa-magnifying-glass" />
+                          <span>Từ khoá lọc</span>
+                        </div>
+                      </div>
+                      <div className="md-chip-list" style={{ marginTop: 12 }}>
+                        {keywords.map((kw) => (
+                          <span key={kw} className="md-chip kw">
+                            {kw}
+                            <button type="button" onClick={() => onRemoveKw(kw)} aria-label="Xoá">
+                              <i className="fa-solid fa-xmark" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                      <div className="md-input-row">
+                        <input
+                          className="amber"
+                          type="text"
+                          placeholder="Thêm từ khoá..."
+                          value={kwInp}
+                          onChange={(e) => setKwInp(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && onAddKw()}
+                        />
+                        <button type="button" className="md-btn-icon amber" onClick={onAddKw}>
+                          <i className="fa-solid fa-plus" />
+                        </button>
+                      </div>
+                      {keywords.length ? (
+                        <p className="md-hint">Chỉ hiển thị bài chứa ít nhất 1 từ khoá</p>
+                      ) : null}
+                    </div>
+                  </>
+
+                <>
+                  <hr className="md-divider" />
+                  <div>
+                      <button type="button" className="md-accordion-toggle" onClick={() => setTgOpen((v) => !v)}>
+                        <div className="md-section-label" style={{ margin: 0 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <i className="fa-regular fa-paper-plane" />
+                            <span>Telegram</span>
+                          </div>
+                        </div>
+                        <i className={`fa-solid fa-chevron-${tgOpen ? 'up' : 'down'} text-slate-400 text-sm`} />
+                      </button>
+                      {tgOpen ? (
+                        <div style={{ marginTop: 12 }}>
+                          <div className="md-chip-list">
+                            {tgIds.map((cid) => (
+                              <span key={cid} className="md-chip tg">
+                                {cid}
+                                <span className="md-chip-test" onClick={() => onTestTg(cid)} role="presentation">Test</span>
+                                <button type="button" onClick={() => onRemoveTg(cid)} aria-label="Xoá">
+                                  <i className="fa-solid fa-xmark" />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                          <div className="md-input-row">
+                            <input
+                              type="text"
+                              placeholder="Chat ID"
+                              value={tgInp}
+                              onChange={(e) => setTgInp(e.target.value)}
+                              onKeyDown={(e) => e.key === 'Enter' && onAddTg()}
+                            />
+                            <button type="button" className="md-btn-icon tg" onClick={onAddTg}>
+                              <i className="fa-solid fa-plus" />
+                            </button>
+                          </div>
+                          <p className="md-hint">Nhắn <b>/start</b> cho bot Telegram để nhận Chat ID</p>
+                          {tgStatus ? <p className="md-hint">{tgStatus}</p> : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  </>
+
+                <hr className="md-divider" />
+                <div>
+                  <button type="button" className="md-accordion-toggle" onClick={() => setAiOpen((v) => !v)}>
+                    <div className="md-section-label" style={{ margin: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <i className="fa-solid fa-gear" />
+                        <span>Cấu hình AI</span>
+                      </div>
+                    </div>
+                    <i className={`fa-solid fa-chevron-${aiOpen ? 'up' : 'down'} text-slate-400 text-sm`} />
+                  </button>
+                  {aiOpen ? (
+                    <div className="md-settings-wrap" style={{ marginTop: 12 }}>
+                      <SaleSetupPanel {...saleSetupProps} showStaffManager={false} />
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+          <main className="md-panel no-scrollbar">
+            <div className="md-panel-inner">
+                  {feedError && !errorDismissed ? (
+                    <div className="md-error-banner">
+                      <p>
+                        <i className="fa-solid fa-circle-exclamation" />
+                        Xác thực Facebook không hợp lệ. {feedError}
+                      </p>
+                      <button type="button" className="md-remove-btn" style={{ opacity: 1 }} onClick={() => setErrorDismissed(true)}>
+                        <i className="fa-solid fa-xmark" />
+                      </button>
+                    </div>
+                  ) : null}
+
+                  <div className="md-toolbar-card md-toolbar-compact">
+                    <div className="md-toolbar-row">
+                      <select className="md-select md-select-sm" value={limit} onChange={(e) => setLimit(+e.target.value)}>
+                        <option value={5}>5 bài</option>
+                        <option value={10}>10 bài</option>
+                        <option value={20}>20 bài</option>
+                        <option value={50}>50 bài</option>
+                      </select>
+                      <button type="button" className="md-tool-btn md-tool-btn-sm" onClick={onLoadPosts}>
+                        <i className={`fa-solid fa-rotate-right${loading ? ' fa-spin' : ''}`} />
+                        Tải lại
+                      </button>
+                      <button type="button" className="md-tool-btn md-tool-btn-sm primary" onClick={onOpenPostModal}>
+                        Đăng bài
+                      </button>
+                      <button type="button" className="md-tool-btn md-tool-btn-sm blue" onClick={onOpenTiktokModal}>
+                        TikTok CMT
+                      </button>
+                      <select className="md-select md-select-sm" value={catFilter} onChange={(e) => setCatFilter(e.target.value)}>
+                        <option value="">Tất cả</option>
+                        {catOptions.map((c) => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                      <button type="button" className={`md-tool-btn md-tool-btn-sm pause${autoOn ? ' on' : ''}`} onClick={onToggleAuto}>
+                        <i className={`fa-solid fa-${autoOn ? 'stop' : 'play'}`} />
+                        {autoOn ? 'Dừng' : 'Tự động'}
+                      </button>
+                      <div className="md-interval md-interval-sm">
+                        <input
+                          type="number"
+                          value={intervalMin}
+                          min={1}
+                          max={60}
+                          disabled={autoOn}
+                          onChange={(e) => {
+                            const v = parseInt(e.target.value, 10) || 5;
+                            setIntervalMin(v);
+                            onSaveSettings(autoOn, v);
+                          }}
+                        />
+                        <span>phút</span>
+                      </div>
+                      <button type="button" className="md-tool-btn md-tool-btn-sm" onClick={() => setCookieOpen((v) => !v)} title="Hướng dẫn cookie">
+                        <i className="fa-solid fa-cookie" />
+                      </button>
+                      <div className="md-toolbar-meta">
+                        <span>CMT: <b>{todayCommentCount === null ? '--' : todayCommentCount}</b></span>
+                        {toolStatus ? <span className="md-toolbar-status">{toolStatus}</span> : null}
+                      </div>
+                    </div>
+                  </div>
+
+                  {cookieOpen || feedError ? (
+                  <div className="md-cookie-card md-cookie-card-compact">
+                      <button type="button" className="md-cookie-head" onClick={() => setCookieOpen((v) => !v)}>
+                        <div className="md-cookie-icon">
+                          <i className="fa-solid fa-cookie" />
+                        </div>
+                        <div>
+                          <h3>{feedError ? 'Cookie Facebook cần cập nhật' : 'Hướng dẫn Cookie'}</h3>
+                          <p>{feedError || 'Export cookie từ Chrome và dán vào mục Cooki.'}</p>
+                        </div>
+                        <span className="md-cookie-chevron">
+                          <i className={`fa-solid fa-chevron-${cookieOpen ? 'up' : 'down'}`} />
+                        </span>
+                      </button>
+                      {cookieOpen ? (
+                        <div className="md-cookie-body">
+                          <p style={{ fontSize: 14, color: '#475569', lineHeight: 1.6, margin: '0 0 12px' }}>
+                            Mở Google Chrome và đăng nhập đúng tài khoản Facebook nhân sự. Truy cập Facebook,
+                            xử lý xác minh danh tính hoặc CAPTCHA nếu có, rồi export cookie và dán vào mục Cooki.
+                          </p>
+                          {!cookieDetail ? (
+                            <button type="button" className="md-cookie-detail-btn" onClick={() => setCookieDetail(true)}>
+                              Xem chi tiết
+                            </button>
+                          ) : (
+                            <CookieRefreshGuide />
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {postFetchReport.length ? (
+                    <div className="md-fetch-report">
+                      {postFetchReport.map((item, index) => (
+                        <span
+                          key={`feed-${item.group_id || index}`}
+                          className={`md-fetch-pill ${item.ok ? 'ok' : 'fail'}`}
+                        >
+                          {item.ok ? '✓' : '!'} {item.target_type === 'page' ? 'Page' : 'Nhóm'}{' '}
+                          {item.group_name || item.group_id}: {item.count || 0} bài
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <div className="md-feed">
+                    {loading && !allPostsCount ? (
+                      <div className="md-empty-feed">
+                        <div className="icon">⏳</div>
+                        <h3>Đang tải bài viết...</h3>
+                      </div>
+                    ) : !filteredPosts.length ? (
+                      <div className="md-empty-feed">
+                        <div className="icon">{feedError ? '🍪' : keywords.length || catFilter ? '🔍' : '📭'}</div>
+                        <h3>
+                          {feedError ? 'Lỗi xác thực Facebook' : keywords.length || catFilter ? 'Không có bài khớp bộ lọc' : 'Không có bài viết nào'}
+                        </h3>
+                        {feedError ? <p>{feedError}</p> : null}
+                      </div>
+                    ) : (
+                      filteredPosts.map((p) => (
+                        <PostCard
+                          key={p.id}
+                          post={p}
+                          groupNames={groupNames}
+                          category={classifications[p.id]}
+                          keywords={keywords}
+                          pages={pages}
+                          leads={leads[p.id]}
+                          replySuggestion={replySuggestions[p.id]}
+                          commentSummary={commentSummaries[p.id]}
+                          onSuggestReply={onSuggestReply}
+                          onSummarizeComments={onSummarizeComments}
+                          onExploreComments={onExploreComments}
+                          onCommentSent={async () => { await onCommentSent(); }}
+                          onOpenLightbox={onOpenLightbox}
+                        />
+                      ))
+                    )}
+                  </div>
+            </div>
+          </main>
+
+          <CommentTemplatesSidebar />
+        </div>
+      </div>
+    </div>
+  );
+}

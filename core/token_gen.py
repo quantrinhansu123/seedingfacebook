@@ -141,5 +141,5 @@ class FacebookTokenGenerator:
             return token
 
         except Exception as e:
-            print(f'Lỗi lấy token: {e}')
+            print(f'Loi lay token: {e}')
             return None

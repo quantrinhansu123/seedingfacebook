@@ -38,12 +38,15 @@ def load_cookie(cookie: str = None) -> Optional[str]:
         return f.read().strip() or None
 
 
+_live_api_instances = []
+
+
 def refresh_token(cookie: str = None, token_file: str = None) -> Optional[str]:
     cookie = load_cookie(cookie)
     if not cookie:
-        print('Không tìm thấy cookie.txt — cần cập nhật cookie thủ công')
+        print('Khong tim thay cookie.txt — can cap nhat cookie thu cong')
         return None
-    print('🔄 Token hết hạn, đang lấy token mới từ cookie...')
+    print('Token het han, dang lay token moi tu cookie...')
     return FacebookTokenGenerator(FB_CLIENT_ID, cookie, token_file).GetToken()
 
 
@@ -53,6 +56,23 @@ class FacebookGroupAPI:
         self.cookie = load_cookie(cookie)
         self.token_file = token_file
         self.access_token = load_token(token_file) or refresh_token(self.cookie, token_file)
+        _live_api_instances.append(self)
+
+    def _sync_access_token(self, token: str) -> None:
+        if not token:
+            return
+        self.access_token = token
+        for inst in _live_api_instances:
+            if inst is not self and inst.token_file == self.token_file:
+                inst.access_token = token
+
+    def _refresh_access_token(self) -> bool:
+        new_token = refresh_token(self.cookie, self.token_file)
+        if not new_token:
+            print('Khong the refresh token - kiem tra lai cookie')
+            return False
+        self._sync_access_token(new_token)
+        return True
 
     def _is_expired(self, data: dict) -> bool:
         return data.get('error', {}).get('code') == 190
@@ -63,12 +83,9 @@ class FacebookGroupAPI:
             resp = getattr(requests, method)(url, **kwargs)
             data = resp.json()
             if self._is_expired(data):
-                if attempt == 0:
-                    new_token = refresh_token(self.cookie, self.token_file)
-                    if new_token:
-                        self.access_token = new_token
-                        continue
-                print('Không thể refresh token — kiểm tra lại cookie')
+                if attempt == 0 and self._refresh_access_token():
+                    continue
+                print('Khong the refresh token - kiem tra lai cookie')
                 return None
             return data
         return None
@@ -112,24 +129,36 @@ class FacebookGroupAPI:
         if data.get('shares'):
             post['shares'] = data['shares']
 
+    def _post_graph(self, url: str, params: dict, timeout: int = 30, retry_user_token: bool = True) -> Optional[dict]:
+        clean = {k: v for k, v in params.items() if not k.startswith('_')}
+        for attempt in range(2):
+            resp = requests.post(url, params=clean, timeout=timeout)
+            data = resp.json()
+            if retry_user_token and self._is_expired(data):
+                if attempt == 0 and self._refresh_access_token():
+                    clean['access_token'] = self.access_token
+                    continue
+            return data
+        return None
+
     def create_post(self, message: str, page_token: str = None, link_url: str = '', native_video_url: str = '') -> Optional[dict]:
         token = page_token or self.access_token
         if native_video_url:
-            resp = requests.post(
+            return self._post_graph(
                 f'{GRAPH_URL}/{self.group_id}/videos',
-                params={'access_token': token, 'description': message, 'file_url': native_video_url},
+                {'access_token': token, 'description': message, 'file_url': native_video_url},
                 timeout=120,
+                retry_user_token=not page_token,
             )
-            return resp.json()
         params = {'access_token': token, 'message': message}
         if link_url:
             params['link'] = link_url
-        resp = requests.post(
+        return self._post_graph(
             f'{GRAPH_URL}/{self.group_id}/feed',
-            params=params,
+            params,
             timeout=30,
+            retry_user_token=not page_token,
         )
-        return resp.json()
 
     def create_page_post(self, page_id: str, message: str, page_token: str, link_url: str = '', native_video_url: str = '') -> Optional[dict]:
         if native_video_url:

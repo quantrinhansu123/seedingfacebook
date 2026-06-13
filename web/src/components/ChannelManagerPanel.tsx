@@ -1,7 +1,9 @@
 'use client';
 
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { api } from '@/lib/api';
 import type { ManagedChannel } from '@/lib/types';
+import { extractSlug } from '@/lib/utils';
 
 type Payload = {
   platform: string;
@@ -76,6 +78,16 @@ function defaultPayloadForTab(tab: ChannelTabKey): Payload {
   return EMPTY;
 }
 
+function groupIdFromChannel(item: ManagedChannel): string {
+  const id = String(item.target_id || '').trim();
+  if (id) return id;
+  const link = String(item.link || '').trim();
+  if (!link) return '';
+  const match = link.match(/facebook\.com\/groups\/([^/?#]+)/i);
+  if (match?.[1]) return match[1];
+  return extractSlug(link);
+}
+
 export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, onReload, onSyncFacebookPages }: Props) {
   const [form, setForm] = useState<Payload>(EMPTY);
   const [editingId, setEditingId] = useState('');
@@ -85,6 +97,60 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
   const [query, setQuery] = useState('');
   const [platformFilter, setPlatformFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  const [groupMembership, setGroupMembership] = useState<Record<string, boolean | null>>({});
+  const [joiningGroupId, setJoiningGroupId] = useState('');
+  const [joinMsg, setJoinMsg] = useState('');
+
+  const facebookGroupIds = useMemo(
+    () => [...new Set(channels.filter(isFacebookGroup).map(groupIdFromChannel).filter(Boolean))],
+    [channels],
+  );
+
+  const loadGroupMembership = useCallback(async (ids: string[]) => {
+    const unique = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
+    if (!unique.length) {
+      setGroupMembership({});
+      return;
+    }
+    try {
+      const r = await api(`/api/group-membership?ids=${encodeURIComponent(unique.join(','))}`);
+      const d = await r.json();
+      if (d.ok && d.membership && typeof d.membership === 'object') {
+        setGroupMembership((prev) => ({ ...prev, ...d.membership }));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadGroupMembership(facebookGroupIds);
+  }, [facebookGroupIds, loadGroupMembership]);
+
+  async function joinGroupNow(gid: string, name: string) {
+    if (!gid) return;
+    setJoiningGroupId(gid);
+    setJoinMsg('');
+    try {
+      const r = await api(`/api/groups/${gid}/join`, { method: 'POST' });
+      const d = await r.json();
+      if (d.ok) {
+        if (d.already_member) {
+          setGroupMembership((prev) => ({ ...prev, [gid]: true }));
+          setJoinMsg(`✅ Đã tham gia nhóm "${name || gid}"`);
+        } else {
+          setJoinMsg(`✅ ${d.msg || 'Đã gửi yêu cầu tham gia'} — chờ admin duyệt nếu nhóm kín.`);
+        }
+        void loadGroupMembership([gid]);
+      } else {
+        setJoinMsg(`❌ ${d.error || 'Không tham gia được nhóm'}`);
+      }
+    } catch {
+      setJoinMsg('❌ Lỗi kết nối khi tham gia nhóm');
+    }
+    setJoiningGroupId('');
+    setTimeout(() => setJoinMsg(''), 8000);
+  }
 
   const channelOptions = useMemo(() => {
     const names = channels.map((item) => item.channel_name || '').filter(Boolean);
@@ -280,39 +346,58 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
           </thead>
           <tbody>
             {filtered.length ? (
-              filtered.map((item) => (
-                <tr key={item.id}>
-                  <td className="mono-cell">{item.id}</td>
-                  <td>
-                    <span className="platform-pill">{item.platform || '-'}</span>
-                  </td>
-                  <td>
-                    <b>{item.channel_name || '-'}</b>
-                    {item.note ? <small>{item.note}</small> : null}
-                  </td>
-                  <td>{item.channel_type || '-'}</td>
-                  <td className="link-cell">
-                    {item.link ? (
-                      <a href={item.link} target="_blank" rel="noreferrer">
-                        Mở link
-                      </a>
-                    ) : (
-                      '-'
-                    )}
-                  </td>
-                  <td className="mono-cell">{item.target_id || '-'}</td>
-                  <td>
-                    <div className="table-actions">
-                      <button type="button" title="Sửa" onClick={() => edit(item)}>
-                        ✎
-                      </button>
-                      <button type="button" title="Xoá" className="danger" onClick={() => item.id && void onDelete(item.id)}>
-                        🗑
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))
+              filtered.map((item) => {
+                const gid = groupIdFromChannel(item);
+                const member = gid ? groupMembership[gid] : undefined;
+                return (
+                  <tr key={item.id}>
+                    <td className="mono-cell">{item.id}</td>
+                    <td>
+                      <span className="platform-pill">{item.platform || '-'}</span>
+                    </td>
+                    <td>
+                      <b>{item.channel_name || '-'}</b>
+                      {item.note ? <small>{item.note}</small> : null}
+                      {isFacebookGroup(item) && gid ? (
+                        <small className={`channel-member-tag${member === false ? ' warn' : member ? ' ok' : ''}`}>
+                          {member === false ? 'Chưa tham gia' : member ? 'Đã tham gia' : 'Đang kiểm tra...'}
+                        </small>
+                      ) : null}
+                    </td>
+                    <td>{item.channel_type || '-'}</td>
+                    <td className="link-cell">
+                      {item.link ? (
+                        <a href={item.link} target="_blank" rel="noreferrer">
+                          Mở link
+                        </a>
+                      ) : (
+                        '-'
+                      )}
+                    </td>
+                    <td className="mono-cell">{item.target_id || '-'}</td>
+                    <td>
+                      <div className="table-actions">
+                        {isFacebookGroup(item) && gid && member === false ? (
+                          <button
+                            type="button"
+                            className="btn-join-now"
+                            disabled={joiningGroupId === gid}
+                            onClick={() => void joinGroupNow(gid, item.channel_name || gid)}
+                          >
+                            {joiningGroupId === gid ? 'Đang tham gia...' : 'Tham gia ngay'}
+                          </button>
+                        ) : null}
+                        <button type="button" title="Sửa" onClick={() => edit(item)}>
+                          ✎
+                        </button>
+                        <button type="button" title="Xoá" className="danger" onClick={() => item.id && void onDelete(item.id)}>
+                          🗑
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
             ) : (
               <tr>
                 <td colSpan={7} className="table-empty">
@@ -323,7 +408,7 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
           </tbody>
         </table>
       </div>
-      {status ? <div className="module-status">{status}</div> : null}
+      {(status || joinMsg) ? <div className="module-status">{joinMsg || status}</div> : null}
 
       <div className={`modal-overlay${modalOpen ? ' open' : ''}`} onClick={reset}>
         <form className="modal channel-modal" onSubmit={submit} onClick={(e) => e.stopPropagation()}>

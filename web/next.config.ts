@@ -1,6 +1,8 @@
 import type { NextConfig } from 'next';
+import path from 'path';
 
 const DEFAULT_API_PROXY_BASE_URL = 'https://seeding-fb.onrender.com';
+const webRoot = path.join(__dirname);
 
 function normalizeUrl(value?: string): string {
   return (value || '').trim().replace(/\/$/, '');
@@ -39,6 +41,11 @@ const apiProxyBase = resolveApiProxyBase();
 
 const nextConfig: NextConfig = {
   eslint: { ignoreDuringBuilds: true },
+  // Tránh Next chọn nhầm root D:\Seeding_Fb (package-lock.json ở repo gốc).
+  outputFileTracingRoot: webRoot,
+  turbopack: {
+    root: webRoot,
+  },
   async rewrites() {
     return [
       {

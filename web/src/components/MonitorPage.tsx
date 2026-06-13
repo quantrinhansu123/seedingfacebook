@@ -1,18 +1,21 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
 import { AuthPanel } from '@/components/AuthPanel';
 import { ChannelManagerPanel } from '@/components/ChannelManagerPanel';
 import { CommentLeadInboxPanel } from '@/components/CommentLeadInboxPanel';
 import { ConsoleHome } from '@/components/ConsoleHome';
-import { CookieRefreshGuide } from '@/components/CookieRefreshGuide';
 import { HistoryPanel } from '@/components/HistoryPanel';
 import { LeadManagerPanel } from '@/components/LeadManagerPanel';
+import { ManageDashboardPanel } from '@/components/ManageDashboardPanel';
 import { MarketingPipelinePanel } from '@/components/MarketingPipelinePanel';
-import { PostCard } from '@/components/PostCard';
-import { SaleSetupPanel } from '@/components/SaleSetupPanel';
+import '@/components/standard-post-panel.css';
 import { StaffCookiePanel, type StaffPayload } from '@/components/StaffCookiePanel';
 import { api } from '@/lib/api';
+import { pathToView, viewToPath, type ViewKey } from '@/lib/app-routes';
+import { CONSOLE_NAV_ITEMS } from '@/lib/console-nav';
+import { ConsoleRail } from '@/components/ConsoleRail';
 import type {
   CommentLog,
   CommentSummary,
@@ -28,6 +31,7 @@ import type {
   StoredPostComment,
   TikTokCommentStat,
 } from '@/lib/types';
+import { CommentAuthorLink } from '@/components/CommentAuthorLink';
 import { extractSlug } from '@/lib/utils';
 
 type AiProviders = Record<string, { default_model?: string }>;
@@ -39,7 +43,6 @@ type AiConfig = {
 };
 
 type JoinPrompt = { id: string; name: string };
-type ViewKey = 'home' | 'staff' | 'channels' | 'comments' | 'manage' | 'cookies' | 'history' | 'leads' | 'marketing';
 type ContentPipelineData = {
   articles?: ContentPipelineArticle[];
   posts?: ContentPipelinePost[];
@@ -112,6 +115,18 @@ export function MonitorPage() {
   const [canManageStaff, setCanManageStaff] = useState(false);
   const [staffStatus, setStaffStatus] = useState('');
   const [activeView, setActiveView] = useState<ViewKey>('home');
+  const pathname = usePathname();
+  const router = useRouter();
+
+  const openView = useCallback((view: ViewKey) => {
+    const nextPath = viewToPath(view);
+    if (pathname !== nextPath) router.push(nextPath);
+    setActiveView(view);
+  }, [pathname, router]);
+
+  useEffect(() => {
+    setActiveView(pathToView(pathname));
+  }, [pathname]);
   const [channels, setChannels] = useState<ManagedChannel[]>([]);
   const [channelStatus, setChannelStatus] = useState('');
   const [channelBusy, setChannelBusy] = useState(false);
@@ -138,6 +153,8 @@ export function MonitorPage() {
   const [joinPrompt, setJoinPrompt] = useState<JoinPrompt | null>(null);
   const [joinMsg, setJoinMsg] = useState('');
   const [joinBusy, setJoinBusy] = useState(false);
+  const [joiningGroupId, setJoiningGroupId] = useState('');
+  const [groupMembership, setGroupMembership] = useState<Record<string, boolean | null>>({});
 
   const [postModal, setPostModal] = useState(false);
   const [postSelected, setPostSelected] = useState<Record<string, boolean>>({});
@@ -250,11 +267,16 @@ export function MonitorPage() {
       setAuthenticated(!!d.authenticated);
       setCurrentStaff(d.staff || null);
       setAuthStatus('');
-    } catch {
+    } catch (err: unknown) {
       setSetupRequired(false);
       setAuthenticated(false);
       setCurrentStaff(null);
-      setAuthStatus('Không kết nối được server');
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
+      setAuthStatus(
+        aborted
+          ? 'Backend không phản hồi. Hãy chạy Flask (port 5000) rồi tải lại trang.'
+          : 'Không kết nối được server',
+      );
     } finally {
       setAuthChecked(true);
     }
@@ -307,17 +329,29 @@ export function MonitorPage() {
   }, []);
 
   const loadContentPipeline = useCallback(async () => {
+    setPipelineBusy(true);
+    setPipelineStatus('Đang tải lịch sử bài viết...');
     try {
       const r = await api('/api/content-pipeline');
       const d = await r.json();
       if (d.ok) {
+        const postCount = Array.isArray(d.posts) ? d.posts.length : 0;
         setPipelineData({ articles: d.articles || [], posts: d.posts || [], stats: d.stats || {} });
-        setPipelineStatus('');
+        setPipelineStatus(postCount ? `Đã tải ${postCount} bản ghi lịch sử.` : '');
+      } else if (d.auth_required) {
+        setPipelineStatus('❌ Phiên đăng nhập hết hạn. Hãy đăng nhập lại.');
       } else {
         setPipelineStatus('❌ ' + (d.error || 'Không tải được pipeline content'));
       }
-    } catch {
-      setPipelineStatus('❌ Lỗi kết nối khi tải pipeline content');
+    } catch (err: unknown) {
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
+      setPipelineStatus(
+        aborted
+          ? '❌ Backend không phản hồi khi tải lịch sử. Kiểm tra Flask (port 5000).'
+          : '❌ Lỗi kết nối khi tải pipeline content',
+      );
+    } finally {
+      setPipelineBusy(false);
     }
   }, []);
 
@@ -403,6 +437,23 @@ export function MonitorPage() {
       }
     } catch {
       setChannelStatus('❌ Lỗi kết nối khi xoá kênh');
+    }
+  }, []);
+
+  const loadGroupMembership = useCallback(async (gIds: string[]) => {
+    const ids = [...new Set(gIds.map((id) => String(id || '').trim()).filter(Boolean))];
+    if (!ids.length) {
+      setGroupMembership({});
+      return;
+    }
+    try {
+      const r = await api(`/api/group-membership?ids=${encodeURIComponent(ids.join(','))}`);
+      const d = await r.json();
+      if (d.ok && d.membership && typeof d.membership === 'object') {
+        setGroupMembership((prev) => ({ ...prev, ...d.membership }));
+      }
+    } catch {
+      /* ignore */
     }
   }, []);
 
@@ -640,6 +691,7 @@ export function MonitorPage() {
       groupsRef.current = gIds;
       setGroups(gIds);
       setGroupNames((prev) => ({ ...prev, ...gn }));
+      void loadGroupMembership(gIds);
 
       await Promise.allSettled(gIds.map((g) => loadGroupName(g)));
       await Promise.allSettled(
@@ -758,6 +810,7 @@ export function MonitorPage() {
           });
           setGroups((g) => (g.includes(d.id) ? g : [...g, d.id]));
           setToolStatus(`✅ Đã thêm: ${d.name || d.id}`);
+          void loadGroupMembership([d.id]);
           setTimeout(() => setToolStatus(prev), 5000);
         }
       } else {
@@ -786,9 +839,11 @@ export function MonitorPage() {
     setGroupNames((prev) => ({ ...prev, [gid]: gname }));
     setJoinPrompt(null);
     setJoinMsg('');
+    void loadGroupMembership([gid]);
   }
 
   async function joinGroupAct(gid: string, gname: string) {
+    setJoiningGroupId(gid);
     setJoinBusy(true);
     setJoinMsg('');
     try {
@@ -802,10 +857,13 @@ export function MonitorPage() {
             body: JSON.stringify({ id: gid, name: gname }),
           });
           setGroups((g) => (g.includes(gid) ? g : [...g, gid]));
+          setGroupMembership((prev) => ({ ...prev, [gid]: true }));
           setJoinPrompt(null);
+          setJoinMsg('✅ Đã tham gia nhóm');
         } else {
-          setJoinMsg('✅ ' + d.msg + ' — Chờ admin duyệt rồi thêm lại nhóm.');
+          setJoinMsg('✅ ' + d.msg + ' — Chờ admin duyệt rồi bấm Tham gia lại.');
         }
+        void loadGroupMembership([gid]);
       } else {
         setJoinMsg('❌ ' + (d.error || 'Lỗi không xác định'));
       }
@@ -813,6 +871,7 @@ export function MonitorPage() {
       setJoinMsg('❌ Lỗi kết nối');
     }
     setJoinBusy(false);
+    setJoiningGroupId('');
   }
 
   async function removeGroup(gid: string) {
@@ -1384,6 +1443,7 @@ export function MonitorPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ post }),
+        timeoutMs: 120000,
       });
       const d = await r.json();
       if (d.ok && post.id) {
@@ -1401,13 +1461,16 @@ export function MonitorPage() {
     setTimeout(() => setAiStatus(''), 7000);
   }, []);
 
-  const summarizeComments = useCallback(async (post: FbPost) => {
-    setAiStatus('AI đang đọc toàn bộ bình luận của bài viết...');
+  const summarizeComments = useCallback(async (post: FbPost): Promise<string> => {
+    const working = 'AI đang đọc toàn bộ bình luận của bài viết...';
+    setAiStatus(working);
+    setToolStatus(working);
     try {
       const r = await api('/api/ai/summarize-comments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ post, force: true }),
+        timeoutMs: 120000,
       });
       const d = await r.json();
       if (d.ok && post.id) {
@@ -1417,18 +1480,32 @@ export function MonitorPage() {
         }));
         const count = d.summary?.comment_count ?? 0;
         const fetched = d.summary?.fetched_comment_count ?? 0;
-        setAiStatus(
+        const msg =
           d.storage === 'supabase'
-            ? `✅ Đã đọc ${fetched}/${count} comment và lưu Supabase`
-            : `✅ Đã đọc ${fetched}/${count} comment, lưu local`,
-        );
-      } else {
-        setAiStatus(`❌ ${d.error || 'AI chưa tóm tắt được bình luận'}`);
+            ? `✅ Đã tóm tắt ${fetched}/${count} comment · lưu Supabase`
+            : `✅ Đã tóm tắt ${fetched}/${count} comment · lưu local`;
+        setAiStatus(msg);
+        setToolStatus(msg);
+        return msg;
       }
-    } catch {
-      setAiStatus('❌ Lỗi kết nối server');
+      const err = `❌ ${d.error || 'AI chưa tóm tắt được bình luận'}`;
+      setAiStatus(err);
+      setToolStatus(err);
+      return err;
+    } catch (err: unknown) {
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
+      const msg = aborted
+        ? '⏱️ Tóm tắt quá lâu — kiểm tra API key AI hoặc thử lại'
+        : '❌ Lỗi kết nối server';
+      setAiStatus(msg);
+      setToolStatus(msg);
+      return msg;
+    } finally {
+      setTimeout(() => {
+        setAiStatus('');
+        setToolStatus(statusBaseRef.current || '');
+      }, 9000);
     }
-    setTimeout(() => setAiStatus(''), 9000);
   }, []);
 
   async function extractLeadsAll() {
@@ -1704,17 +1781,6 @@ export function MonitorPage() {
     return platform === 'facebook' && ['page', 'fanpage', 'trang'].includes(type);
   });
   const tiktokManagedChannels = channels.filter((item) => (item.platform || '').trim().toLowerCase() === 'tiktok');
-  const navItems: { key: ViewKey; icon: string; label: string }[] = [
-    { key: 'home', icon: '⌂', label: 'Trang chủ' },
-    { key: 'staff', icon: '👥', label: 'Nhân sự' },
-    { key: 'channels', icon: '📋', label: 'Quản lý nhóm' },
-    { key: 'comments', icon: '💬', label: 'Bình luận' },
-    { key: 'manage', icon: '☑', label: 'Quản lý' },
-    { key: 'cookies', icon: '🍪', label: 'Cooki' },
-    { key: 'history', icon: '🗓', label: 'Lịch thử thao tác' },
-    { key: 'leads', icon: '◎', label: 'Lead' },
-    { key: 'marketing', icon: '✦', label: 'Bài viết' },
-  ];
 
   useEffect(() => {
     if (!authenticated) return;
@@ -1728,7 +1794,7 @@ export function MonitorPage() {
       <main className="auth-page">
         <div className="auth-loading">
           <img src="/st-real-logo.jpg" alt="Seeding Fsolution" />
-          <div>
+          <div className="auth-loading-text">
             <b>Seeding Fsolution</b>
             <span>Đang kiểm tra phiên đăng nhập...</span>
           </div>
@@ -1753,30 +1819,22 @@ export function MonitorPage() {
   return (
     <>
       <div className="console-shell">
-        <aside className="console-rail">
-          <img className="console-logo" src="/st-real-logo.jpg" alt="Seeding Fsolution" />
-          {navItems.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              className={`rail-button${activeView === item.key ? ' active' : ''}`}
-              title={item.label}
-              onClick={() => setActiveView(item.key)}
-            >
-              <span>{item.icon}</span>
-            </button>
-          ))}
-        </aside>
+        <ConsoleRail activeView={activeView} onNavigate={openView} />
 
-        <main className="console-content">
+        <main
+          className={`console-content${
+            activeView === 'manage' ? ' manage-active' : ''
+          }${activeView === 'marketing' ? ' marketing-active' : ''}`}
+        >
+          {activeView !== 'manage' && activeView !== 'marketing' ? (
           <div className="console-topbar">
             <button type="button" className="rail-collapse" title="Menu">
               ☰
             </button>
             <div>
-              <div className="console-page-title">{navItems.find((item) => item.key === activeView)?.label || 'Trang chủ'}</div>
+              <div className="console-page-title">{CONSOLE_NAV_ITEMS.find((item) => item.key === activeView)?.label || 'Trang chủ'}</div>
               <div className="console-page-sub" title={groups.length === 1 ? `ID: ${groups[0]}` : ''}>
-                {activeView === 'manage' ? headerSub : 'Seeding Fsolution'}
+                Seeding Fsolution
               </div>
             </div>
             <div className="header-spacer" />
@@ -1788,8 +1846,9 @@ export function MonitorPage() {
               Đăng xuất
             </button>
           </div>
+          ) : null}
 
-          {activeView === 'home' ? <ConsoleHome staffName={currentStaff?.name || currentStaff?.username} onOpen={setActiveView} /> : null}
+          {activeView === 'home' ? <ConsoleHome staffName={currentStaff?.name || currentStaff?.username} onOpen={openView} /> : null}
           {activeView === 'channels' ? (
             <ChannelManagerPanel
               channels={channels}
@@ -1811,6 +1870,8 @@ export function MonitorPage() {
               status={pipelineStatus}
               onReload={loadContentPipeline}
               onResearch={runContentPipelineResearch}
+              initialGroups={groups.map((id) => ({ id, name: groupNames[id] || id }))}
+              initialPages={pages}
             />
           ) : null}
           {activeView === 'staff' ? (
@@ -1887,362 +1948,103 @@ export function MonitorPage() {
           ) : null}
 
       {activeView === 'manage' ? (
-      <div className="workspace">
-        <aside className="workspace-sidebar">
-        <div className="panel source-manager-panel">
-          <div className="panel-label">📋 Nguồn</div>
-          <div className="source-manager-content">
-            <div className="source-tabs">
-              <span className="source-tab-pill">
-                <b>{groups.length}</b> Nhóm FB
-              </span>
-              <span className="source-tab-pill page">
-                <b>{facebookPageChannels.length}</b> Page FB
-              </span>
-              <span className="source-tab-pill tiktok">
-                <b>{tiktokManagedChannels.length}</b> TikTok
-              </span>
-              <button type="button" className="source-manage-link" onClick={() => setActiveView('channels')}>
-                Quản lý Page/TikTok
-              </button>
-            </div>
-
-            <div className="source-chip-section">
-              <div className="source-chip-heading">Nhóm Facebook</div>
-              <div className="chips">
-                {groups.length ? (
-                  groups.map((gid) => (
-                    <div key={gid} className="chip chip-group" title={`${groupNames[gid] || gid}\nID: ${gid}`}>
-                      <span className="chip-text">{groupNames[gid] || gid}</span>
-                      <span className="chip-remove" onClick={() => void removeGroup(gid)} role="presentation">
-                        ✕
-                      </span>
-                    </div>
-                  ))
-                ) : (
-                  <span className="source-empty">Chưa có nhóm Facebook</span>
-                )}
-              </div>
-            </div>
-
-            <div className="source-chip-section">
-              <div className="source-chip-heading">Page Facebook</div>
-              <div className="chips">
-                {facebookPageChannels.length ? (
-                  facebookPageChannels.map((item) => (
-                    <a
-                      key={item.id || item.target_id || item.link}
-                      className="chip chip-page chip-link"
-                      href={item.link || (item.target_id ? `https://www.facebook.com/${item.target_id}` : '#')}
-                      target="_blank"
-                      rel="noreferrer"
-                      title={`${item.channel_name || item.target_id || 'Page Facebook'}\nID: ${item.target_id || '-'}`}
-                    >
-                      <span className="chip-text">{item.channel_name || item.target_id || 'Page Facebook'}</span>
-                    </a>
-                  ))
-                ) : (
-                  <span className="source-empty">Chưa có Page Facebook</span>
-                )}
-              </div>
-            </div>
-
-            <div className="source-chip-section">
-              <div className="source-chip-heading">TikTok</div>
-              <div className="chips">
-                {tiktokManagedChannels.length ? (
-                  tiktokManagedChannels.map((item) => {
-                    const handle = (item.target_id || item.channel_name || '').replace(/^@/, '');
-                    const href = item.link || (handle ? `https://www.tiktok.com/@${handle}` : '#');
-                    return (
-                      <a
-                        key={item.id || item.target_id || item.link}
-                        className="chip chip-tiktok-source chip-link"
-                        href={href}
-                        target="_blank"
-                        rel="noreferrer"
-                        title={`${item.channel_name || item.target_id || 'TikTok'}\nID: ${item.target_id || '-'}`}
-                      >
-                        <span className="chip-text">{item.channel_name || item.target_id || 'TikTok'}</span>
-                      </a>
-                    );
-                  })
-                ) : (
-                  <span className="source-empty">Chưa có kênh TikTok</span>
-                )}
-              </div>
-            </div>
-
-            <div className="input-row source-group-input">
-              <input
-                type="text"
-                placeholder="ID / URL nhóm"
-                value={groupInp}
-                disabled={groupBusy}
-                onChange={(e) => setGroupInp(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && void addGroup()}
-              />
-              <button type="button" className="btn-add btn-add-blue" title="Thêm nhóm Facebook nhanh" onClick={() => void addGroup()}>
-                +
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {joinPrompt ? (
-          <div className="join-prompt">
-            <div className="join-prompt-icon">⚠️</div>
-            <div className="join-prompt-body">
-              <div className="join-prompt-title">Bạn chưa là thành viên của nhóm &quot;{joinPrompt.name}&quot;</div>
-              <div className="join-prompt-sub">Cần tham gia nhóm trước thì mới theo dõi được bài viết.</div>
-              <div className="join-prompt-actions">
-                <button
-                  type="button"
-                  className="btn-join"
-                  disabled={joinBusy}
-                  onClick={() => void joinGroupAct(joinPrompt.id, joinPrompt.name)}
-                >
-                  🚀 Gửi yêu cầu tham gia
-                </button>
-                <a className="btn-join-fb" href={`https://www.facebook.com/groups/${joinPrompt.id}`} target="_blank" rel="noreferrer">
-                  🔗 Mở trên Facebook
-                </a>
-                <button type="button" className="btn-join-fb" onClick={() => void forceAddGroup(joinPrompt.id, joinPrompt.name)}>
-                  📋 Thêm theo dõi
-                </button>
-              </div>
-              {joinMsg ? <div className="join-msg">{joinMsg}</div> : null}
-            </div>
-            <span className="join-prompt-close" onClick={() => setJoinPrompt(null)} role="presentation">
-              ✕
-            </span>
-          </div>
-        ) : null}
-
-        <div className="panel">
-          <div className="panel-label">🔍 Từ khoá</div>
-          <div className="chips">
-            {keywords.map((kw) => (
-              <div key={kw} className="chip chip-kw">
-                <span className="chip-text">{kw}</span>
-                <span className="chip-remove" onClick={() => removeKw(kw)} role="presentation">
-                  ✕
-                </span>
-              </div>
-            ))}
-          </div>
-          <div className="input-row">
-            <input
-              type="text"
-              placeholder="Nhập từ khoá"
-              value={kwInp}
-              onChange={(e) => setKwInp(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && addKw()}
-            />
-            <button type="button" className="btn-add btn-add-orange" title="Thêm từ khoá" onClick={addKw}>
-              +
-            </button>
-          </div>
-          <div className="panel-hint">{keywords.length ? 'Chỉ hiển thị bài chứa ít nhất 1 từ khoá' : ''}</div>
-        </div>
-
-        <div className="panel">
-          <div className="panel-label">✈️ Telegram</div>
-          <div className="chips">
-            {tgIds.map((cid) => (
-              <div key={cid} className="chip chip-tg">
-                <span className="chip-text">{cid}</span>
-                <span className="chip-action" onClick={() => void testTg(cid)} role="presentation">
-                  Test
-                </span>
-                <span className="chip-remove" onClick={() => void removeTg(cid)} role="presentation">
-                  ✕
-                </span>
-              </div>
-            ))}
-          </div>
-          <div className="input-row">
-            <input
-              type="text"
-              placeholder="Chat ID"
-              value={tgInp}
-              onChange={(e) => setTgInp(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && void addTg()}
-            />
-            <button type="button" className="btn-add btn-add-tg" title="Thêm chat ID" onClick={() => void addTg()}>
-              +
-            </button>
-          </div>
-          <div className="panel-hint">
-            Nhắn <b>/start</b> cho bot Telegram của bạn để nhận Chat ID
-          </div>
-          <div style={{ fontSize: 12, color: '#65676b', width: '100%' }}>{tgStatus}</div>
-        </div>
-
-        <SaleSetupPanel
-          aiProvider={aiProvider}
-          onProviderChange={(v) => {
-            setAiProvider(v);
-            void onProviderChange(v);
+        <ManageDashboardPanel
+          staffName={currentStaff?.name || currentStaff?.username}
+          staffRole={currentStaff?.role}
+          headerSub={headerSub}
+          onLogout={() => void logout()}
+          onOpenView={openView}
+          onOpenChannels={() => openView('channels')}
+          groups={groups}
+          groupNames={groupNames}
+          facebookPageChannels={facebookPageChannels}
+          tiktokManagedChannels={tiktokManagedChannels}
+          groupInp={groupInp}
+          setGroupInp={setGroupInp}
+          groupBusy={groupBusy}
+          onAddGroup={() => void addGroup()}
+          onRemoveGroup={(id) => void removeGroup(id)}
+          joinPrompt={joinPrompt}
+          joinBusy={joinBusy}
+          joinMsg={joinMsg}
+          onDismissJoin={() => setJoinPrompt(null)}
+          onJoinGroup={(id, name) => void joinGroupAct(id, name)}
+          onForceAddGroup={(id, name) => void forceAddGroup(id, name)}
+          groupMembership={groupMembership}
+          joiningGroupId={joiningGroupId}
+          onSyncFacebookPages={() => void syncFacebookPages()}
+          channelBusy={channelBusy}
+          keywords={keywords}
+          kwInp={kwInp}
+          setKwInp={setKwInp}
+          onAddKw={addKw}
+          onRemoveKw={removeKw}
+          tgIds={tgIds}
+          tgInp={tgInp}
+          setTgInp={setTgInp}
+          onAddTg={() => void addTg()}
+          onRemoveTg={(id) => void removeTg(id)}
+          onTestTg={(id) => void testTg(id)}
+          tgStatus={tgStatus}
+          limit={limit}
+          setLimit={setLimit}
+          loading={loading}
+          onLoadPosts={() => void loadPosts()}
+          onOpenPostModal={openPostModal}
+          classifyBusy={classifyBusy}
+          onClassifyAll={() => void classifyAll()}
+          leadsBusy={leadsBusy}
+          onExtractLeads={() => void extractLeadsAll()}
+          onOpenTiktokModal={() => { setTiktokModal(true); setTiktokStatus(''); }}
+          onOpenTiktokStats={() => { setTiktokStatsModal(true); void loadTiktokStats(); }}
+          catFilter={catFilter}
+          setCatFilter={setCatFilter}
+          catOptions={catOptions}
+          autoOn={autoOn}
+          onToggleAuto={toggleAuto}
+          intervalMin={intervalMin}
+          setIntervalMin={setIntervalMin}
+          onSaveSettings={saveSettings}
+          todayCommentCount={todayCommentCount}
+          toolStatus={toolStatus}
+          feedError={feedError}
+          postFetchReport={postFetchReport}
+          filteredPosts={filteredPosts}
+          allPostsCount={allPosts.length}
+          classifications={classifications}
+          pages={pages}
+          leads={leads}
+          replySuggestions={replySuggestions}
+          commentSummaries={commentSummaries}
+          onSuggestReply={suggestReply}
+          onSummarizeComments={summarizeComments}
+          onExploreComments={openFbCommentExplorer}
+          onCommentSent={loadTodayCommentStats}
+          onOpenLightbox={setLightbox}
+          saleSetupProps={{
+            aiProvider,
+            onProviderChange: (v) => { setAiProvider(v); void onProviderChange(v); },
+            aiAutoClassify,
+            onAutoClassifyChange: (v) => void saveAiAuto(v),
+            aiStatus,
+            maskedKey: masked,
+            hasKey,
+            aiKeyEdit,
+            aiKeyInput,
+            onAiKeyInput: setAiKeyInput,
+            onToggleKeyEdit: () => setAiKeyEdit((e) => !e),
+            onTestAi: testAi,
+            onSaveKey: saveAiKey,
+            onDeleteKey: deleteAiKey,
+            staff: staffRows,
+            currentStaff,
+            canManageStaff,
+            staffStatus,
+            showStaffManager: false,
+            onSaveStaff: saveStaffCookie,
+            onDeleteStaff: deleteStaffCookie,
           }}
-          aiAutoClassify={aiAutoClassify}
-          onAutoClassifyChange={(v) => void saveAiAuto(v)}
-          aiStatus={aiStatus}
-          maskedKey={masked}
-          hasKey={hasKey}
-          aiKeyEdit={aiKeyEdit}
-          aiKeyInput={aiKeyInput}
-          onAiKeyInput={setAiKeyInput}
-          onToggleKeyEdit={() => setAiKeyEdit((e) => !e)}
-          onTestAi={testAi}
-          onSaveKey={saveAiKey}
-          onDeleteKey={deleteAiKey}
-          staff={staffRows}
-          currentStaff={currentStaff}
-          canManageStaff={canManageStaff}
-          staffStatus={staffStatus}
-          showStaffManager={false}
-          onSaveStaff={saveStaffCookie}
-          onDeleteStaff={deleteStaffCookie}
         />
-        </aside>
-
-        <div className="workspace-main">
-        <div className="toolbar">
-          <select value={limit} onChange={(e) => setLimit(+e.target.value)}>
-            <option value={5}>5 bài</option>
-            <option value={10}>10 bài</option>
-            <option value={20}>20 bài</option>
-            <option value={50}>50 bài</option>
-          </select>
-          <button type="button" className="btn btn-primary" onClick={() => void loadPosts()}>
-            <span className={loading ? 'ref-spin' : ''}>🔄</span> Tải lại
-          </button>
-          <button type="button" className="btn btn-success" onClick={openPostModal}>
-            ✍️ Đăng bài
-          </button>
-          <button type="button" className="btn btn-classify" disabled={classifyBusy} onClick={() => void classifyAll()}>
-            🤖 Phân loại
-          </button>
-          <button type="button" className="btn btn-leads" disabled={leadsBusy} onClick={() => void extractLeadsAll()}>
-            🧲 Tách lead
-          </button>
-          <button
-            type="button"
-            className="btn btn-tiktok"
-            onClick={() => {
-              setTiktokModal(true);
-              setTiktokStatus('');
-            }}
-          >
-            🎵 TikTok CMT
-          </button>
-          <button
-            type="button"
-            className="btn btn-tiktok-stats"
-            onClick={() => {
-              setTiktokStatsModal(true);
-              void loadTiktokStats();
-            }}
-          >
-            📊 Thống kê kênh
-          </button>
-          <select className="cat-filter" value={catFilter} onChange={(e) => setCatFilter(e.target.value)}>
-            <option value="">🏷️ Tất cả</option>
-            {catOptions.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-          <div className="interval-wrap">
-            <button type="button" className={`btn btn-auto${autoOn ? ' on' : ''}`} onClick={toggleAuto}>
-              {autoOn ? '⏹ Dừng' : '⏱ Tự động'}
-            </button>
-            <input
-              type="number"
-              value={intervalMin}
-              min={1}
-              max={60}
-              disabled={autoOn}
-              onChange={(e) => {
-                const v = parseInt(e.target.value, 10) || 5;
-                setIntervalMin(v);
-                saveSettings(autoOn, v);
-              }}
-            />
-            <span className="unit">phút</span>
-          </div>
-          <div className="toolbar-spacer" />
-          <span className="toolbar-status">
-            ✅ Comment hôm nay: {todayCommentCount === null ? '--' : todayCommentCount}
-          </span>
-          <span className="toolbar-status">{toolStatus}</span>
-        </div>
-
-        {postFetchReport.length ? (
-          <div className="post-fetch-report">
-            <div className="post-fetch-report-head">Nguồn bài viết: Facebook Graph API thật</div>
-            <div className="post-fetch-report-list">
-              {postFetchReport.map((item, index) => (
-                <span
-                  key={`${item.target_type || 'source'}-${item.group_id || item.group_name || 'unknown'}-${index}`}
-                  className={`post-fetch-pill ${item.ok ? 'ok' : 'fail'}`}
-                >
-                  {item.ok ? '✅' : '⚠️'} {item.target_type === 'page' ? 'Page' : 'Nhóm'} {item.group_name || item.group_id}: {item.count || 0} bài
-                  {item.error ? ` · ${item.error}` : ''}
-                </span>
-              ))}
-            </div>
-          </div>
-        ) : null}
-
-        <div className="feed">
-          {loading && !allPosts.length ? (
-            <>
-              <div className="skeleton">
-                <div className="skel" style={{ width: '38%', height: 13, marginBottom: 10 }} />
-                <div className="skel" style={{ width: '100%', height: 11, marginBottom: 7 }} />
-                <div className="skel" style={{ width: '78%', height: 11 }} />
-              </div>
-              <div className="skeleton">
-                <div className="skel" style={{ width: '45%', height: 13, marginBottom: 10 }} />
-                <div className="skel" style={{ width: '100%', height: 11, marginBottom: 7 }} />
-                <div className="skel" style={{ width: '85%', height: 11 }} />
-              </div>
-            </>
-          ) : !filteredPosts.length ? (
-            <div className="empty">
-              <div className="empty-icon">{feedError ? '🍪' : keywords.length || catFilter ? '🔍' : '📭'}</div>
-              <div className="empty-title">
-                {feedError ? 'Lỗi xác thực Facebook' : keywords.length || catFilter ? 'Không có bài khớp bộ lọc' : 'Không có bài viết nào'}
-              </div>
-              {feedError ? <div className="empty-sub">{feedError}</div> : null}
-              {feedError ? <CookieRefreshGuide /> : null}
-            </div>
-          ) : (
-            filteredPosts.map((p) => (
-              <PostCard
-                key={p.id}
-                post={p}
-                groupNames={groupNames}
-                category={classifications[p.id]}
-                keywords={keywords}
-                pages={pages}
-                leads={leads[p.id]}
-                replySuggestion={replySuggestions[p.id]}
-                commentSummary={commentSummaries[p.id]}
-                onSuggestReply={suggestReply}
-                onSummarizeComments={summarizeComments}
-                onExploreComments={openFbCommentExplorer}
-                onCommentSent={loadTodayCommentStats}
-                onOpenLightbox={setLightbox}
-              />
-            ))
-          )}
-        </div>
-        </div>
-      </div>
       ) : null}
         </main>
       </div>
@@ -2359,7 +2161,7 @@ export function MonitorPage() {
             {(fbMatchedRows.length ? fbMatchedRows : fbCommentRows).slice(0, 100).map((row) => (
               <div key={row.comment_id} className="stored-comment">
                 <div className="stored-comment-head">
-                  <b>{row.author_name || 'Ẩn danh'}</b>
+                  <CommentAuthorLink row={row} />
                   <span>{row.created_time ? new Date(row.created_time).toLocaleString('vi-VN') : ''}</span>
                 </div>
                 <div className="stored-comment-message">{row.message || '[Không có nội dung chữ]'}</div>
@@ -2458,7 +2260,7 @@ export function MonitorPage() {
             {(tiktokMatchedRows.length ? tiktokMatchedRows : tiktokRows).slice(0, 100).map((row) => (
               <div key={row.comment_id} className="stored-comment">
                 <div className="stored-comment-head">
-                  <b>{row.author_name || 'Ẩn danh'}</b>
+                  <CommentAuthorLink row={row} />
                   <span>{row.created_time ? new Date(row.created_time).toLocaleString('vi-VN') : ''}</span>
                 </div>
                 <div className="stored-comment-message">{row.message || '[Không có nội dung chữ]'}</div>
@@ -2599,7 +2401,7 @@ export function MonitorPage() {
                       selectedTiktokComments.map((row) => (
                         <tr key={row.comment_id}>
                           <td>
-                            <b>{row.author_name || 'Ẩn danh'}</b>
+                            <CommentAuthorLink row={row} />
                             <small>{formatDateTime(row.created_time)}</small>
                           </td>
                           <td className="comment-message-cell">

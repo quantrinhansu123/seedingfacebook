@@ -1,27 +1,23 @@
 'use client';
 
-type ModuleKey = 'home' | 'staff' | 'channels' | 'comments' | 'manage' | 'cookies' | 'history' | 'leads' | 'marketing';
+import { CONSOLE_MODULE_ICONS } from '@/lib/console-nav-icons';
+import { CONSOLE_NAV_ITEMS } from '@/lib/console-nav';
+import type { ViewKey } from '@/lib/app-routes';
 
-type Card = {
-  key: ModuleKey;
-  icon: string;
-  title: string;
-  desc: string;
-  tone: string;
+const MODULE_DESCS: Partial<Record<ViewKey, string>> = {
+  staff: 'Quản lý tài khoản sale và quyền thao tác.',
+  channels: 'Lưu nền tảng, kênh, page, video và nhóm.',
+  comments: 'Inbox comment đa kênh, lọc tag và tách lead.',
+  manage: 'Theo dõi bài viết, phân loại và vận hành.',
+  cookies: 'Quản lý phiên đăng nhập và cookie nhân sự.',
+  history: 'Xem lịch sử comment và trạng thái thao tác.',
+  leads: 'Theo dõi khách hàng tiềm năng và nhu cầu.',
+  marketing: 'Soạn bài viết chuẩn, lên lịch và chọn nơi đăng.',
 };
 
-const CARDS: Card[] = [
-  { key: 'staff', icon: '👥', title: 'Nhân sự', desc: 'Quản lý tài khoản sale và quyền thao tác.', tone: 'green' },
-  { key: 'channels', icon: '📋', title: 'Quản lý nhóm', desc: 'Lưu nền tảng, kênh, page, video và nhóm.', tone: 'orange' },
-  { key: 'comments', icon: '💬', title: 'Bình luận', desc: 'Inbox comment đa kênh, lọc tag và tách lead.', tone: 'purple' },
-  { key: 'manage', icon: '☑', title: 'Quản lý', desc: 'Theo dõi bài viết, phân loại và vận hành.', tone: 'blue' },
-  { key: 'cookies', icon: '🍪', title: 'Cooki', desc: 'Quản lý phiên đăng nhập và cookie nhân sự.', tone: 'purple' },
-  { key: 'history', icon: '🗓', title: 'Lịch thử thao tác', desc: 'Xem lịch sử comment và trạng thái thao tác.', tone: 'red' },
-  { key: 'leads', icon: '◎', title: 'Lead', desc: 'Theo dõi khách hàng tiềm năng và nhu cầu.', tone: 'yellow' },
-  { key: 'marketing', icon: '✦', title: 'Bài viết', desc: 'Soạn bài viết chuẩn, lên lịch và chọn nơi đăng.', tone: 'blue' },
-];
+const HOME_MODULES = CONSOLE_NAV_ITEMS.filter((item) => item.key !== 'home');
 
-export function ConsoleHome({ staffName, onOpen }: { staffName?: string; onOpen: (key: ModuleKey) => void }) {
+export function ConsoleHome({ staffName, onOpen }: { staffName?: string; onOpen: (key: ViewKey) => void }) {
   return (
     <section className="home-view">
       <div className="home-title">
@@ -36,13 +32,20 @@ export function ConsoleHome({ staffName, onOpen }: { staffName?: string; onOpen:
         <button type="button">Tất cả</button>
       </div>
       <div className="module-card-grid">
-        {CARDS.map((item) => (
-          <button key={item.key} type="button" className="module-card" onClick={() => onOpen(item.key)}>
-            <span className={`module-card-icon tone-${item.tone}`}>{item.icon}</span>
-            <b>{item.title}</b>
-            <small>{item.desc}</small>
-          </button>
-        ))}
+        {HOME_MODULES.map((item) => {
+          const Icon = CONSOLE_MODULE_ICONS[item.key];
+          return (
+            <button key={item.key} type="button" className="module-card" onClick={() => onOpen(item.key)}>
+              <span className={`module-card-icon rail-tone-${item.tone}`} aria-hidden="true">
+                <Icon strokeWidth={2.1} />
+              </span>
+              <div className="module-card-body">
+                <b>{item.label}</b>
+                <small>{MODULE_DESCS[item.key]}</small>
+              </div>
+            </button>
+          );
+        })}
       </div>
     </section>
   );

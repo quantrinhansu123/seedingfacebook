@@ -7,7 +7,7 @@ import hashlib
 import secrets
 import requests as _req
 from html import unescape
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 from xml.etree import ElementTree as ET
@@ -23,6 +23,21 @@ from core import supabase_store as sb
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
+
+
+def _configure_stdio_utf8() -> None:
+    """Windows console defaults to cp1252; unicode logs must not crash requests."""
+    import sys
+    for stream_name in ('stdout', 'stderr'):
+        stream = getattr(sys, stream_name, None)
+        if stream and hasattr(stream, 'reconfigure'):
+            try:
+                stream.reconfigure(encoding='utf-8', errors='replace')
+            except Exception:
+                pass
+
+
+_configure_stdio_utf8()
 load_dotenv(os.path.join(BASE_DIR, '.env'), override=True)
 RUNTIME_DATA_DIR = os.environ.get('RUNTIME_DATA_DIR') or ('/tmp/fb-moni' if os.environ.get('VERCEL') else DATA_DIR)
 
@@ -46,6 +61,7 @@ CONTENT_PIPELINE_FILE = os.path.join(DATA_DIR, 'content_pipeline.json')
 COMMENT_TEMPLATES_FILE = os.path.join(DATA_DIR, 'comment_templates.json')
 COMMENT_TAGS_FILE = os.path.join(DATA_DIR, 'comment_tags.json')
 COMMENT_TAG_ASSIGNMENTS_FILE = os.path.join(DATA_DIR, 'comment_tag_assignments.json')
+COMMENT_INBOX_WORKFLOW_FILE = os.path.join(DATA_DIR, 'comment_inbox_workflow.json')
 
 BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '')
 DEFAULT_GROUP = os.environ.get('DEFAULT_GROUP', '3809441172650624')
@@ -68,6 +84,17 @@ SUPABASE_STAFF_TABLE = os.environ.get('SUPABASE_STAFF_TABLE', 'staff_users')
 SUPABASE_CHANNEL_TABLE = os.environ.get('SUPABASE_CHANNEL_TABLE', 'managed_channels')
 SUPABASE_COMMENT_IMAGE_BUCKET = os.environ.get('SUPABASE_COMMENT_IMAGE_BUCKET', 'comment-images')
 APP_TIMEZONE = os.environ.get('APP_TIMEZONE', 'Asia/Ho_Chi_Minh')
+
+
+def _app_timezone():
+    try:
+        return ZoneInfo(APP_TIMEZONE)
+    except Exception:
+        try:
+            return ZoneInfo('Asia/Ho_Chi_Minh')
+        except Exception:
+            return timezone(timedelta(hours=7))
+
 TIKTOK_COOKIE = os.environ.get('TIKTOK_COOKIE', '')
 TIKTOK_PLAYWRIGHT_ENABLED = os.environ.get('TIKTOK_PLAYWRIGHT_ENABLED', '').lower() in ('1', 'true', 'yes', 'on')
 TIKTOK_PLAYWRIGHT_HEADLESS = os.environ.get('TIKTOK_PLAYWRIGHT_HEADLESS', 'false').lower() in ('1', 'true', 'yes', 'on')
@@ -123,6 +150,7 @@ _content_pipeline: dict = {}
 _comment_templates: list = []
 _comment_tags: list = []
 _comment_tag_assignments: dict = {}
+_comment_inbox_workflow: dict = {}
 
 
 def _default_business_profile() -> dict:
@@ -246,7 +274,7 @@ def _verify_password(password: str, salt: str, digest: str) -> bool:
 
 
 def _load_state():
-    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _tiktok_config, _content_pipeline, _comment_templates, _comment_tags, _comment_tag_assignments
+    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _tiktok_config, _content_pipeline, _comment_templates, _comment_tags, _comment_tag_assignments, _comment_inbox_workflow
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
     except OSError as e:
@@ -354,6 +382,7 @@ def _load_state():
     loaded_templates = _read_json(COMMENT_TEMPLATES_FILE, [])
     loaded_tags = _read_json(COMMENT_TAGS_FILE, [])
     loaded_tag_assignments = _read_json(COMMENT_TAG_ASSIGNMENTS_FILE, {})
+    loaded_inbox_workflow = _read_json(COMMENT_INBOX_WORKFLOW_FILE, {})
     if USE_SUPABASE:
         try:
             loaded_templates = sb.kv_get('comment_templates', loaded_templates) or loaded_templates
@@ -367,9 +396,14 @@ def _load_state():
             loaded_tag_assignments = sb.kv_get('comment_tag_assignments', loaded_tag_assignments) or loaded_tag_assignments
         except Exception as e:
             print(f'[supabase] load comment_tag_assignments failed, fallback file: {e}')
+        try:
+            loaded_inbox_workflow = sb.kv_get('comment_inbox_workflow', loaded_inbox_workflow) or loaded_inbox_workflow
+        except Exception as e:
+            print(f'[supabase] load comment_inbox_workflow failed, fallback file: {e}')
     _comment_templates = _merge_system_rows(_default_comment_templates(), loaded_templates if isinstance(loaded_templates, list) else [])
     _comment_tags = _merge_system_rows(_default_comment_tags(), loaded_tags if isinstance(loaded_tags, list) else [])
     _comment_tag_assignments = loaded_tag_assignments if isinstance(loaded_tag_assignments, dict) else {}
+    _comment_inbox_workflow = loaded_inbox_workflow if isinstance(loaded_inbox_workflow, dict) else {}
 
 
 def _save_seen(new_posts=None):
@@ -468,6 +502,31 @@ def _save_comment_tag_assignments():
             print(f'[supabase] save comment_tag_assignments failed: {e}')
 
 
+def _save_comment_inbox_workflow():
+    _write_json(COMMENT_INBOX_WORKFLOW_FILE, _comment_inbox_workflow)
+    if USE_SUPABASE:
+        try:
+            sb.kv_set('comment_inbox_workflow', _comment_inbox_workflow)
+        except Exception as e:
+            print(f'[supabase] save comment_inbox_workflow failed: {e}')
+
+
+def _workflow_lists() -> tuple[list[str], list[str]]:
+    processed: list[str] = []
+    starred: list[str] = []
+    for comment_id, state in (_comment_inbox_workflow or {}).items():
+        if not isinstance(state, dict):
+            continue
+        cid = str(comment_id or '').strip()
+        if not cid:
+            continue
+        if state.get('processed'):
+            processed.append(cid)
+        if state.get('starred'):
+            starred.append(cid)
+    return processed, starred
+
+
 def _strip_html(text: str, limit: int = 600) -> str:
     text = re.sub(r'<[^>]+>', ' ', text or '')
     text = unescape(re.sub(r'\s+', ' ', text)).strip()
@@ -492,7 +551,7 @@ def _parse_iso_datetime(value: str):
             value = value[:-1] + '+00:00'
         dt = datetime.fromisoformat(value)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo('Asia/Ho_Chi_Minh'))
+            dt = dt.replace(tzinfo=_app_timezone())
         return dt.astimezone(timezone.utc)
     except Exception:
         return None
@@ -584,7 +643,8 @@ def _publish_content_pipeline_post(post: dict, targets: list[dict], dry_run: boo
                     'native_video_error': (result or {}).get('_native_video_error'),
                 })
             else:
-                err = (result or {}).get('error', {}).get('message') or 'Lỗi không xác định'
+                fb_error = (result or {}).get('error') or {}
+                err = fb_error.get('error_user_msg') or fb_error.get('message') or 'Lỗi không xác định'
                 results.append({
                     'ok': False,
                     'type': target_type or 'group',
@@ -596,7 +656,6 @@ def _publish_content_pipeline_post(post: dict, targets: list[dict], dry_run: boo
                 })
         except Exception as e:
             results.append({'ok': False, 'type': target_type or 'group', 'id': target_id, 'name': target_name, 'error': str(e), 'delivery': delivery})
-    return {'ok': ok_count > 0, 'success_count': ok_count, 'failed_count': len(results) - ok_count, 'results': results}
     return {'ok': ok_count > 0, 'success_count': ok_count, 'failed_count': len(results) - ok_count, 'results': results}
 
 
@@ -1651,6 +1710,29 @@ def _iso_from_unix(value) -> str:
         return ''
 
 
+def _facebook_comment_url(post_url: str, comment_id: str) -> str:
+    post_url = str(post_url or '').strip()
+    comment_id = str(comment_id or '').strip()
+    if not comment_id:
+        return post_url
+    if post_url:
+        anchor = comment_id.split('_')[-1] if '_' in comment_id else comment_id
+        joiner = '&' if '?' in post_url else '?'
+        return f'{post_url}{joiner}comment_id={anchor}'
+    return f'https://www.facebook.com/{comment_id}'
+
+
+def _comment_url_for_row(source: str, post_url: str, comment_id: str) -> str:
+    src = str(source or '').lower()
+    cid = str(comment_id or '').strip()
+    post_url = str(post_url or '').strip()
+    if 'tiktok' in src:
+        return f'{post_url}?comment={cid.replace("tiktok_", "")}' if post_url and cid else post_url
+    if 'facebook' in src:
+        return _facebook_comment_url(post_url, cid)
+    return post_url
+
+
 def _flatten_facebook_comment_rows(post: dict, comments: list, keywords: list[str], fetched_at: str, staff: dict) -> list[dict]:
     rows: list[dict] = []
     post_id = str(post.get('id') or '')
@@ -1674,6 +1756,7 @@ def _flatten_facebook_comment_rows(post: dict, comments: list, keywords: list[st
                 'post_id': post_id,
                 'group_id': group_id,
                 'post_url': post_url,
+                'comment_url': _facebook_comment_url(post_url, cid),
                 'comment_id': cid,
                 'parent_comment_id': parent_id,
                 'depth': depth,
@@ -1777,7 +1860,7 @@ def _load_post_comment_rows(source: str = '', post_id: str = '', limit: int = 10
                 'order=fetched_at.desc',
                 f'limit={limit}',
             ]
-            if source:
+            if source and source != 'facebook':
                 filters.append(f'source=eq.{quote(source, safe="")}')
             if post_id:
                 filters.append(f'post_id=eq.{quote(post_id, safe="")}')
@@ -1792,7 +1875,10 @@ def _load_post_comment_rows(source: str = '', post_id: str = '', limit: int = 10
                     remote_rows = []
                 by_id = {str(row.get('comment_id') or ''): row for row in remote_rows if row.get('comment_id')}
                 for row in _post_comments:
-                    if source and str(row.get('source') or 'facebook').lower() != source:
+                    if source == 'facebook':
+                        if 'facebook' not in str(row.get('source') or '').lower():
+                            continue
+                    elif source and str(row.get('source') or 'facebook').lower() != source:
                         continue
                     if post_id and str(row.get('post_id') or '') != post_id:
                         continue
@@ -1800,13 +1886,17 @@ def _load_post_comment_rows(source: str = '', post_id: str = '', limit: int = 10
                     if cid and cid not in by_id:
                         by_id[cid] = row
                 rows = list(by_id.values())
+                if source == 'facebook':
+                    rows = [row for row in rows if 'facebook' in str(row.get('source') or '').lower()]
                 rows.sort(key=lambda row: row.get('fetched_at') or row.get('created_time') or '', reverse=True)
                 return rows[:limit], ''
             return [], resp.text[:300]
         except Exception as e:
             return [], str(e)[:300]
     rows = list(_post_comments)
-    if source:
+    if source == 'facebook':
+        rows = [row for row in rows if 'facebook' in str(row.get('source') or '').lower()]
+    elif source:
         rows = [row for row in rows if str(row.get('source') or 'facebook').lower() == source]
     if post_id:
         rows = [row for row in rows if str(row.get('post_id') or '') == post_id]
@@ -1825,7 +1915,7 @@ def _public_comment_row(row: dict) -> dict:
         'post_id': row.get('post_id') or '',
         'group_id': row.get('group_id') or '',
         'post_url': post_url,
-        'comment_url': f'{post_url}?comment={cid.replace("tiktok_", "")}' if post_url and cid else post_url,
+        'comment_url': _comment_url_for_row(str(row.get('source') or ''), post_url, cid),
         'comment_id': cid,
         'parent_comment_id': row.get('parent_comment_id') or '',
         'depth': row.get('depth') or 0,
@@ -1842,6 +1932,8 @@ def _public_comment_row(row: dict) -> dict:
         'channel_name': meta.get('channel_name') or _derive_tiktok_channel_name(post_url),
         'video_title': meta.get('video_title') or '',
         'fetched_at': row.get('fetched_at'),
+        'processed': bool((_comment_inbox_workflow.get(cid) or {}).get('processed')),
+        'starred': bool((_comment_inbox_workflow.get(cid) or {}).get('starred')),
     }
 
 
@@ -2674,10 +2766,7 @@ def _upload_comment_image_to_supabase(file_storage) -> tuple[str, str]:
         ext = '.jpg'
 
     staff_id = _current_staff_id() or 'anonymous'
-    try:
-        tz = ZoneInfo(APP_TIMEZONE)
-    except Exception:
-        tz = ZoneInfo('Asia/Ho_Chi_Minh')
+    tz = _app_timezone()
     today = datetime.now(tz).strftime('%Y/%m/%d')
     object_path = f'{today}/{staff_id}/{uuid.uuid4().hex}{ext}'
     upload_url = f"{SUPABASE_URL.rstrip('/')}/storage/v1/object/{SUPABASE_COMMENT_IMAGE_BUCKET}/{object_path}"
@@ -2740,10 +2829,7 @@ def _record_comment_log(post_id: str, group_id: str, post_url: str, message: str
 
 
 def _today_utc_bounds() -> tuple[datetime, datetime]:
-    try:
-        tz = ZoneInfo(APP_TIMEZONE)
-    except Exception:
-        tz = ZoneInfo('Asia/Ho_Chi_Minh')
+    tz = _app_timezone()
     today = datetime.now(tz).date()
     start_local = datetime.combine(today, time.min, tzinfo=tz)
     end_local = datetime.combine(today, time.max, tzinfo=tz)
@@ -3378,21 +3464,24 @@ def comment_logs_get():
 
 @app.route('/api/comment-stats/today', methods=['GET'])
 def comment_stats_today():
-    staff_id = '' if _is_admin() else _current_staff_id()
-    count, warning = _count_today_success_supabase(staff_id)
-    storage = 'supabase'
-    if count is None:
-        count = _count_today_success_local(staff_id)
-        storage = 'local'
-    payload = {
-        'ok': True,
-        'success_count': count,
-        'storage': storage,
-        'scope': 'all' if _is_admin() else 'self',
-    }
-    if warning and storage == 'local':
-        payload['warning'] = warning
-    return jsonify(payload)
+    try:
+        staff_id = '' if _is_admin() else _current_staff_id()
+        count, warning = _count_today_success_supabase(staff_id)
+        storage = 'supabase'
+        if count is None:
+            count = _count_today_success_local(staff_id)
+            storage = 'local'
+        payload = {
+            'ok': True,
+            'success_count': count,
+            'storage': storage,
+            'scope': 'all' if _is_admin() else 'self',
+        }
+        if warning and storage == 'local':
+            payload['warning'] = warning
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e), 'success_count': 0}), 500
 
 
 @app.route('/api/post-comments/fetch', methods=['POST'])
@@ -4043,6 +4132,40 @@ def post_comment_tags_save():
     return jsonify({'ok': True, 'comment_id': comment_id, 'tags': tags, 'storage': 'supabase' if USE_SUPABASE else 'local'})
 
 
+@app.route('/api/post-comments/workflow', methods=['GET', 'POST'])
+def post_comment_workflow():
+    global _comment_inbox_workflow
+    if request.method == 'GET':
+        processed, starred = _workflow_lists()
+        return jsonify({'ok': True, 'processed': processed, 'starred': starred})
+
+    body = request.get_json() or {}
+    comment_id = str(body.get('comment_id') or '').strip()
+    if not comment_id:
+        return jsonify({'ok': False, 'error': 'Thiếu comment_id'}), 400
+
+    current = dict(_comment_inbox_workflow.get(comment_id) or {})
+    if 'processed' in body:
+        current['processed'] = bool(body.get('processed'))
+    if 'starred' in body:
+        current['starred'] = bool(body.get('starred'))
+
+    if not current.get('processed') and not current.get('starred'):
+        _comment_inbox_workflow.pop(comment_id, None)
+    else:
+        _comment_inbox_workflow[comment_id] = current
+    _save_comment_inbox_workflow()
+    processed, starred = _workflow_lists()
+    return jsonify({
+        'ok': True,
+        'comment_id': comment_id,
+        'state': current,
+        'processed': processed,
+        'starred': starred,
+        'storage': 'supabase' if USE_SUPABASE else 'local',
+    })
+
+
 @app.route('/api/ai/caption-variants', methods=['POST'])
 def ai_caption_variants():
     body = request.get_json() or {}
@@ -4200,6 +4323,26 @@ def api_resolve_group():
             }), 401
         err = (data or {}).get('error', {}).get('message', 'Không tìm thấy group')
         return jsonify({'ok': False, 'error': err})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@app.route('/api/group-membership', methods=['GET'])
+@app.route('/api/groups/membership', methods=['GET'])
+def api_groups_membership():
+    ids_raw = str(request.args.get('ids') or '').strip()
+    ids = [item.strip() for item in ids_raw.split(',') if item.strip()]
+    if not ids:
+        return jsonify({'ok': True, 'membership': {}})
+    try:
+        api = get_api(DEFAULT_GROUP)
+        membership = {}
+        for gid in ids[:80]:
+            try:
+                membership[gid] = bool(api.check_membership(gid))
+            except Exception:
+                membership[gid] = None
+        return jsonify({'ok': True, 'membership': membership})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
@@ -5054,7 +5197,12 @@ def ai_summarize_comments():
 
         if page_id:
             page_token = _page_token_from_cache(page_id)
-            loaded = get_api(DEFAULT_GROUP).get_post_comments(post_id, limit=500, access_token=page_token or None)
+            if not page_token:
+                return jsonify({
+                    'ok': False,
+                    'error': 'Chưa có token Page. Bấm Tải lại bài viết hoặc kiểm tra cookie nhân sự và quyền quản trị Page.',
+                }), 502
+            loaded = get_api(DEFAULT_GROUP).get_post_comments(post_id, limit=500, access_token=page_token)
         else:
             loaded = get_api(group_id).get_post_comments(post_id, limit=500)
         if loaded is None:
@@ -5354,7 +5502,18 @@ def content_pipeline_post_update(post_id):
     changed = False
     for post in _content_pipeline.get('posts') or []:
         if str(post.get('id')) == str(post_id):
-            for key in ('content', 'hashtags', 'status', 'scheduled_at', 'scheduled_targets', 'publish_results', 'published_at'):
+            for key in (
+                'content',
+                'hashtags',
+                'status',
+                'scheduled_at',
+                'scheduled_targets',
+                'publish_results',
+                'published_at',
+                'article_title',
+                'media_url',
+                'article_url',
+            ):
                 if key in body:
                     post[key] = body.get(key)
                     changed = True

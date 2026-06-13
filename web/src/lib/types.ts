@@ -185,6 +185,8 @@ export type StoredPostComment = {
   comment_url?: string;
   channel_name?: string;
   video_title?: string;
+  processed?: boolean;
+  starred?: boolean;
   fetched_at?: string;
 };
 

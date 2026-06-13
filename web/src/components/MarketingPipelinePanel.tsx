@@ -14,6 +14,8 @@ type Props = {
   status: string;
   onReload: () => Promise<void>;
   onResearch: (sourceFilter: string) => Promise<void>;
+  initialGroups?: GroupRow[];
+  initialPages?: FbPage[];
 };
 
 type PublishTarget = {
@@ -78,11 +80,67 @@ function detectVideoMedia(url: string) {
   const cleanUrl = url.trim();
   if (!cleanUrl) return { mediaUrl: '', nativeVideoUrl: '' };
   const isDirectVideo = /\.(mp4|mov|m4v|webm|avi|mkv|flv|wmv|3gp|ogv)(\?|$)/i.test(cleanUrl);
-  // Only direct video files can be uploaded as native video. YouTube/TikTok URLs
-  // must be posted as normal link preview so Graph API does not reject file_url.
   return isDirectVideo
     ? { mediaUrl: '', nativeVideoUrl: cleanUrl }
     : { mediaUrl: cleanUrl, nativeVideoUrl: '' };
+}
+
+function youtubeVideoId(url: string) {
+  try {
+    const parsed = new URL(url.trim());
+    if (parsed.hostname.includes('youtu.be')) return parsed.pathname.replace(/^\//, '').split('/')[0] || '';
+    if (parsed.hostname.includes('youtube.com')) return parsed.searchParams.get('v') || '';
+  } catch {
+    return '';
+  }
+  return '';
+}
+
+function isImageMediaUrl(url: string) {
+  const clean = url.trim();
+  if (!clean) return false;
+  return /\.(jpg|jpeg|png|gif|webp|bmp|svg)(\?|$)/i.test(clean)
+    || /comment-images|uploads|supabase\.co\/storage/i.test(clean);
+}
+
+type MediaPreviewKind = 'image' | 'video' | 'youtube' | 'link' | 'none';
+
+type MediaPreviewState = {
+  kind: MediaPreviewKind;
+  src: string;
+  embedUrl?: string;
+  label?: string;
+};
+
+function resolveMediaPreview(url: string, localBlob = ''): MediaPreviewState {
+  const candidate = (localBlob || url || '').trim();
+  if (!candidate) return { kind: 'none', src: '' };
+  if (localBlob) return { kind: 'image', src: localBlob, label: 'Ảnh vừa chọn từ máy' };
+
+  const ytId = youtubeVideoId(candidate);
+  if (ytId) {
+    return {
+      kind: 'youtube',
+      src: `https://img.youtube.com/vi/${ytId}/hqdefault.jpg`,
+      embedUrl: `https://www.youtube.com/embed/${ytId}`,
+      label: 'Preview YouTube',
+    };
+  }
+
+  if (/\.(mp4|mov|m4v|webm|avi|mkv)(\?|$)/i.test(candidate)) {
+    return { kind: 'video', src: candidate, label: 'Preview video file' };
+  }
+
+  if (isImageMediaUrl(candidate)) {
+    return { kind: 'image', src: candidate, label: 'Preview ảnh' };
+  }
+
+  try {
+    const parsed = new URL(candidate);
+    return { kind: 'link', src: candidate, label: parsed.hostname };
+  } catch {
+    return { kind: 'none', src: '' };
+  }
 }
 
 function formatDateTime(value?: string) {
@@ -100,7 +158,47 @@ async function readPayload(res: Response) {
   }
 }
 
-export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) {
+function apiErrorMessage(res: Response, payload: Record<string, unknown>): string {
+  if (payload.auth_required) return 'Phiên đăng nhập hết hạn. Hãy tải lại trang và đăng nhập lại.';
+  if (payload.error) return String(payload.error);
+  if (!res.ok) return `Lỗi server (${res.status})`;
+  return '';
+}
+
+function applyTargetRows(
+  groupRows: GroupRow[],
+  pageRows: FbPage[],
+  setGroups: (rows: GroupRow[]) => void,
+  setPages: (rows: FbPage[]) => void,
+  setSelectedGroups: (updater: (prev: Record<string, boolean>) => Record<string, boolean>) => void,
+  setSelectedPages: (updater: (prev: Record<string, boolean>) => Record<string, boolean>) => void,
+) {
+  setGroups(groupRows);
+  setPages(pageRows);
+  setSelectedGroups((prev) => {
+    const next: Record<string, boolean> = {};
+    groupRows.forEach((group) => {
+      next[group.id] = prev[group.id] ?? true;
+    });
+    return next;
+  });
+  setSelectedPages((prev) => {
+    const next: Record<string, boolean> = {};
+    pageRows.forEach((page) => {
+      next[page.id] = prev[page.id] ?? false;
+    });
+    return next;
+  });
+}
+
+export function MarketingPipelinePanel({
+  data,
+  busy,
+  status,
+  onReload,
+  initialGroups = [],
+  initialPages = [],
+}: Props) {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [mediaUrl, setMediaUrl] = useState('');
@@ -117,6 +215,8 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
   const [publishing, setPublishing] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [localPreviewUrl, setLocalPreviewUrl] = useState('');
+  const [dragActive, setDragActive] = useState(false);
 
   useEffect(() => {
     try {
@@ -126,6 +226,18 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
       setHistory([]);
     }
   }, []);
+
+  useEffect(() => {
+    if (!initialGroups.length && !initialPages.length) return;
+    applyTargetRows(
+      initialGroups.filter((item) => item?.id),
+      initialPages.filter((item) => item?.id),
+      setGroups,
+      setPages,
+      setSelectedGroups,
+      setSelectedPages,
+    );
+  }, [initialGroups, initialPages]);
 
   useEffect(() => {
     void loadTargets();
@@ -179,34 +291,73 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
   async function loadTargets() {
     setLoadingTargets(true);
     setLocalStatus('');
+    const errors: string[] = [];
+    let groupRows: GroupRow[] = [];
+    let pageRows: FbPage[] = [];
+
     try {
-      const [groupRes, pageRes] = await Promise.all([api('/api/groups'), api('/api/pages')]);
-      const groupPayload = await readPayload(groupRes);
-      const pagePayload = await readPayload(pageRes);
-      const groupRows = safeList<GroupRow>(groupPayload).filter((item) => item?.id);
-      const pageRows = safeList<FbPage>(pagePayload).filter((item) => item?.id);
-      setGroups(groupRows);
-      setPages(pageRows);
-      setSelectedGroups((prev) => {
-        const next: Record<string, boolean> = {};
-        groupRows.forEach((group) => {
-          next[group.id] = prev[group.id] ?? true;
-        });
-        return next;
-      });
-      setSelectedPages((prev) => {
-        const next: Record<string, boolean> = {};
-        pageRows.forEach((page) => {
-          next[page.id] = prev[page.id] ?? false;
-        });
-        return next;
-      });
-      if (!pageRows.length && !Array.isArray(pagePayload) && pagePayload?.error) {
-        setLocalStatus(`Không đồng bộ được Page: ${pagePayload.error}`);
+      const [groupResult, pageResult] = await Promise.allSettled([
+        api('/api/groups'),
+        api('/api/pages', { timeoutMs: 30000 }),
+      ]);
+
+      if (groupResult.status === 'fulfilled') {
+        const groupRes = groupResult.value;
+        const groupPayload = await readPayload(groupRes);
+        if (!groupRes.ok || groupPayload.auth_required) {
+          const msg = apiErrorMessage(groupRes, groupPayload);
+          if (msg) errors.push(`Nhóm: ${msg}`);
+        } else {
+          groupRows = safeList<GroupRow>(groupPayload).filter((item) => item?.id);
+        }
+      } else {
+        const aborted = groupResult.reason instanceof DOMException && groupResult.reason.name === 'AbortError';
+        errors.push(aborted ? 'Nhóm: backend không phản hồi (timeout).' : 'Nhóm: lỗi kết nối.');
+      }
+
+      if (pageResult.status === 'fulfilled') {
+        const pageRes = pageResult.value;
+        const pagePayload = await readPayload(pageRes);
+        if (!pageRes.ok || pagePayload.auth_required) {
+          const msg = apiErrorMessage(pageRes, pagePayload);
+          if (msg) errors.push(`Page: ${msg}`);
+        } else {
+          pageRows = safeList<FbPage>(pagePayload).filter((item) => item?.id);
+          if (!pageRows.length && !Array.isArray(pagePayload) && pagePayload?.error) {
+            errors.push(`Page: ${pagePayload.error}`);
+          }
+        }
+      } else {
+        const aborted = pageResult.reason instanceof DOMException && pageResult.reason.name === 'AbortError';
+        errors.push(aborted ? 'Page: backend không phản hồi (timeout).' : 'Page: lỗi kết nối.');
+      }
+
+      if (groupRows.length || pageRows.length) {
+        applyTargetRows(groupRows, pageRows, setGroups, setPages, setSelectedGroups, setSelectedPages);
+        const parts = [
+          groupRows.length ? `${groupRows.length} nhóm` : '',
+          pageRows.length ? `${pageRows.length} Page` : '',
+        ].filter(Boolean);
+        setLocalStatus(parts.length ? `Đã tải ${parts.join(', ')}.` : '');
+      } else if (initialGroups.length || initialPages.length) {
+        applyTargetRows(
+          initialGroups.filter((item) => item?.id),
+          initialPages.filter((item) => item?.id),
+          setGroups,
+          setPages,
+          setSelectedGroups,
+          setSelectedPages,
+        );
+      }
+
+      if (errors.length) {
+        setLocalStatus(errors.join(' '));
       }
     } catch {
-      setGroups([]);
-      setPages([]);
+      if (!initialGroups.length && !initialPages.length) {
+        setGroups([]);
+        setPages([]);
+      }
       setLocalStatus('Lỗi kết nối khi tải danh sách nhóm/Page.');
     } finally {
       setLoadingTargets(false);
@@ -319,6 +470,9 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
         }));
         const okCount = results.filter((item) => item.ok).length;
         const failCount = results.length - okCount;
+        const errorLines = results
+          .filter((item) => !item.ok)
+          .map((item) => `${item.target.name || item.target.id}: ${item.error || 'Lỗi không xác định'}`);
         appendHistory({
           title,
           content,
@@ -330,7 +484,9 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
           results,
         });
         setLocalStatus(
-          `Đã đăng ${okCount}/${results.length} nơi${failCount ? `, lỗi ${failCount}` : ''}.`
+          failCount
+            ? `Đã đăng ${okCount}/${results.length} nơi, lỗi ${failCount}. ${errorLines.join(' · ')}`
+            : `Đã đăng ${okCount}/${results.length} nơi.`
         );
       } else {
         setLocalStatus(payload.error || 'Lỗi không xác định từ server.');
@@ -402,6 +558,8 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
       const payload = await readPayload(res);
       if (!res.ok || !payload.ok || !payload.image_url) throw new Error(payload.error || 'Không upload được ảnh');
       setMediaUrl(payload.image_url);
+      if (localPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(localPreviewUrl);
+      setLocalPreviewUrl('');
       setLocalStatus('Đã upload ảnh và gắn vào bài viết. Bấm Đăng ngay để đăng link ảnh này.');
     } catch (err: any) {
       setLocalStatus(`Lỗi upload ảnh: ${err?.message || 'Không gọi được backend'}.`);
@@ -430,6 +588,34 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
   }
 
   const targetCount = selectedTargets.length;
+  const mediaPreview = useMemo(
+    () => resolveMediaPreview(mediaUrl, localPreviewUrl),
+    [mediaUrl, localPreviewUrl],
+  );
+
+  useEffect(() => () => {
+    if (localPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(localPreviewUrl);
+  }, [localPreviewUrl]);
+
+  function setLocalPreviewFromFile(file: File) {
+    if (localPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(localPreviewUrl);
+    setLocalPreviewUrl(URL.createObjectURL(file));
+  }
+
+  async function handleMediaFile(file?: File) {
+    if (!file) return;
+    if (file.type.startsWith('image/')) {
+      setLocalPreviewFromFile(file);
+      await uploadImageFile(file);
+      return;
+    }
+    if (file.type.startsWith('video/') || /\.(mp4|mov|m4v|webm)$/i.test(file.name)) {
+      setLocalPreviewFromFile(file);
+      setLocalStatus('Video từ máy cần upload lên host có link .mp4 trước khi đăng native. Hiện chỉ preview file local.');
+      return;
+    }
+    setLocalStatus('Chỉ hỗ trợ ảnh JPG/PNG/WebP/GIF hoặc video MP4/MOV/WebM.');
+  }
 
   return (
     <section className="module-panel marketing-panel seeding-studio">
@@ -474,21 +660,92 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
             />
           </label>
 
-          <label className="seeding-field">
-            <span>Ảnh từ máy hoặc link video/link ảnh</span>
-            <input
-              type="file"
-              accept="image/*"
-              disabled={uploadingImage}
-              onChange={(event) => void uploadImageFile(event.target.files?.[0])}
-            />
-            <input
-              value={mediaUrl}
-              onChange={(event) => setMediaUrl(event.target.value)}
-              placeholder="Dán YouTube/TikTok/link ảnh nếu không chọn ảnh từ máy"
-            />
-            {mediaUrl ? <small className="seeding-media-hint">Media hiện tại: <a href={mediaUrl} target="_blank" rel="noreferrer">Mở link</a></small> : null}
-          </label>
+          <div className="seeding-field">
+            <span>Ảnh từ máy hoặc link video / link ảnh</span>
+            <div className="seeding-media-grid">
+              <label
+                className={`seeding-dropzone${dragActive ? ' active' : ''}`}
+                onDragOver={(event) => { event.preventDefault(); setDragActive(true); }}
+                onDragLeave={() => setDragActive(false)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setDragActive(false);
+                  void handleMediaFile(event.dataTransfer.files?.[0]);
+                }}
+              >
+                <input
+                  type="file"
+                  accept="image/*,video/mp4,video/webm,video/quicktime"
+                  disabled={uploadingImage}
+                  onChange={(event) => void handleMediaFile(event.target.files?.[0])}
+                />
+                <div className="seeding-dropzone-inner">
+                  <span className="seeding-dropzone-icon" aria-hidden>📤</span>
+                  <b>{uploadingImage ? 'Đang upload...' : 'Kéo thả / chọn ảnh'}</b>
+                  <small>JPG, PNG, MP4 · tối đa 50MB</small>
+                </div>
+              </label>
+              <div className="seeding-media-link-col">
+                <input
+                  value={mediaUrl}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setMediaUrl(next);
+                    if (next.trim() && localPreviewUrl.startsWith('blob:')) {
+                      URL.revokeObjectURL(localPreviewUrl);
+                      setLocalPreviewUrl('');
+                    }
+                  }}
+                  placeholder="Dán YouTube/TikTok/link ảnh..."
+                />
+                <small>Link .mp4/.mov sẽ đăng native video; YouTube/TikTok đăng dạng link preview.</small>
+              </div>
+            </div>
+
+            {mediaPreview.kind !== 'none' ? (
+              <div className="seeding-media-preview">
+                <div className="seeding-media-preview-head">
+                  <b>{mediaPreview.label || 'Preview media'}</b>
+                  <button
+                    type="button"
+                    className="seeding-media-preview-clear"
+                    onClick={() => {
+                      setMediaUrl('');
+                      if (localPreviewUrl.startsWith('blob:')) URL.revokeObjectURL(localPreviewUrl);
+                      setLocalPreviewUrl('');
+                    }}
+                  >
+                    Xóa preview
+                  </button>
+                </div>
+                <div className="seeding-media-preview-body">
+                  {mediaPreview.kind === 'image' ? (
+                    <img src={mediaPreview.src} alt="Preview ảnh bài viết" />
+                  ) : null}
+                  {mediaPreview.kind === 'video' ? (
+                    <video src={mediaPreview.src} controls playsInline />
+                  ) : null}
+                  {mediaPreview.kind === 'youtube' && mediaPreview.embedUrl ? (
+                    <iframe
+                      src={mediaPreview.embedUrl}
+                      title="YouTube preview"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                    />
+                  ) : null}
+                  {mediaPreview.kind === 'link' ? (
+                    <div className="seeding-media-link-card">
+                      <span>🔗</span>
+                      <div>
+                        <b>{mediaPreview.label}</b>
+                        <a href={mediaPreview.src} target="_blank" rel="noreferrer">{mediaPreview.src}</a>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
+          </div>
 
           <div className="seeding-form-grid">
             <label className="seeding-field">
@@ -583,9 +840,12 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
                 </span>
               </label>
             ))}
-            {!groups.length && !pages.length ? (
+            {loadingTargets && !groups.length && !pages.length ? (
+              <div className="seeding-empty-target">Đang tải nhóm/Page...</div>
+            ) : null}
+            {!loadingTargets && !groups.length && !pages.length ? (
               <div className="seeding-empty-target">
-                Chưa có nhóm/Page. Vào Quản lý nhóm để thêm nhóm hoặc bấm Đồng bộ Page FB.
+                Chưa có nhóm/Page. Vào Quản lý nhóm để thêm nhóm hoặc bấm Tải nhóm/Page.
               </div>
             ) : null}
           </div>
@@ -625,6 +885,11 @@ export function MarketingPipelinePanel({ data, busy, status, onReload }: Props) 
                     <span className={row.status.includes('lỗi') || row.status.includes('failed') ? 'pill-danger' : 'pill-ok'}>
                       {row.status}
                     </span>
+                    {row.results?.some((item) => !item.ok) ? (
+                      <small className="publish-error-detail">
+                        {row.results.filter((item) => !item.ok).map((item) => `${item.target.name}: ${item.error || 'lỗi'}`).join(' · ')}
+                      </small>
+                    ) : null}
                   </td>
                 </tr>
               )) : (

@@ -1,11 +1,14 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { CommentAuthorHeading, CommentAuthorLink } from '@/components/CommentAuthorLink';
 import { api } from '@/lib/api';
 import type { StoredPostComment } from '@/lib/types';
+import './omni-inbox.css';
 
 type TabKey = 'inbox' | 'customers' | 'stats' | 'templates';
-type SourceKey = 'all' | 'fb-page' | 'fb-group' | 'tiktok' | 'instagram';
+type ChannelFilter = 'all' | 'facebook' | 'tiktok' | 'instagram';
+type SourceKey = 'fb-page' | 'fb-group' | 'tiktok' | 'instagram';
 type TagKey = string;
 type WorkflowFilter = 'all' | 'open' | 'done' | 'starred';
 
@@ -57,12 +60,17 @@ type ReplyTemplate = {
   system?: boolean;
 };
 
-const SOURCE_META: Record<SourceKey, { label: string; icon: string; className: string }> = {
-  all: { label: 'Tất cả', icon: '●', className: 'src-all' },
-  'fb-page': { label: 'FB Page', icon: '📘', className: 'src-page' },
-  'fb-group': { label: 'FB Group', icon: '👥', className: 'src-group' },
-  tiktok: { label: 'TikTok', icon: '🎵', className: 'src-tiktok' },
-  instagram: { label: 'Instagram', icon: '📷', className: 'src-instagram' },
+const CHANNEL_FILTERS: { key: ChannelFilter; label: string; materialIcon: string }[] = [
+  { key: 'all', label: 'Tất cả kênh', materialIcon: 'apps' },
+  { key: 'facebook', label: 'Facebook', materialIcon: 'public' },
+  { key: 'tiktok', label: 'TikTok', materialIcon: 'movie' },
+];
+
+const SOURCE_META: Record<SourceKey, { label: string; icon: string; materialIcon: string; className: string; chipClass: string }> = {
+  'fb-page': { label: 'Facebook', icon: '📘', materialIcon: 'public', className: 'src-page', chipClass: 'facebook' },
+  'fb-group': { label: 'Facebook', icon: '👥', materialIcon: 'public', className: 'src-group', chipClass: 'facebook' },
+  tiktok: { label: 'TikTok', icon: '🎵', materialIcon: 'movie', className: 'src-tiktok', chipClass: 'tiktok' },
+  instagram: { label: 'Instagram', icon: '📷', materialIcon: 'photo_camera', className: 'src-instagram', chipClass: 'instagram' },
 };
 
 const TAGS: TagMeta[] = [
@@ -168,6 +176,30 @@ function sourceKey(row: StoredPostComment): SourceKey {
   return 'fb-group';
 }
 
+function channelFilterKey(row: StoredPostComment): ChannelFilter {
+  const key = sourceKey(row);
+  if (key === 'tiktok') return 'tiktok';
+  if (key === 'instagram') return 'instagram';
+  return 'facebook';
+}
+
+function matchesChannelFilter(row: StoredPostComment, filter: ChannelFilter) {
+  if (filter === 'all') return true;
+  return channelFilterKey(row) === filter;
+}
+
+function workflowId(row: StoredPostComment) {
+  return row.comment_id || commentKey(row);
+}
+
+function isRowProcessed(row: StoredPostComment, processedSet: Set<string>) {
+  return Boolean(row.processed) || processedSet.has(workflowId(row)) || processedSet.has(commentKey(row));
+}
+
+function isRowStarred(row: StoredPostComment, starredSet: Set<string>) {
+  return Boolean(row.starred) || starredSet.has(workflowId(row)) || starredSet.has(commentKey(row));
+}
+
 function sourceLabel(row: StoredPostComment) {
   const key = sourceKey(row);
   return SOURCE_META[key];
@@ -217,6 +249,43 @@ function commentTime(row: StoredPostComment) {
   }
 }
 
+function commentTimeShort(row: StoredPostComment) {
+  const raw = row.created_time || row.fetched_at;
+  if (!raw) return '-';
+  try {
+    const date = new Date(raw);
+    const diff = Date.now() - date.getTime();
+    if (diff > 86400000 * 2) return date.toLocaleDateString('vi-VN');
+    if (diff > 86400000) return 'Hôm qua';
+    return date.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch {
+    return raw;
+  }
+}
+
+function authorInitials(name?: string) {
+  const parts = (name || '?').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+  return `${parts[0]![0]}${parts[parts.length - 1]![0]}`.toUpperCase();
+}
+
+function tagMaterialIcon(key: string) {
+  const map: Record<string, { icon: string; filled?: boolean; color?: string }> = {
+    hot: { icon: 'local_fire_department', filled: true, color: '#ef4444' },
+    closed: { icon: 'verified', color: '#16a34a' },
+    need: { icon: 'stars', filled: true, color: '#f97316' },
+    price: { icon: 'payments', color: '#3b82f6' },
+    review: { icon: 'search', color: '#64748b' },
+    vip: { icon: 'workspace_premium', color: '#9333ea' },
+  };
+  return map[key] || { icon: 'label', color: '#64748b' };
+}
+
+function MaterialIcon({ name, filled, className, style }: { name: string; filled?: boolean; className?: string; style?: CSSProperties }) {
+  return <span className={`material-symbols-outlined${filled ? ' filled' : ''}${className ? ` ${className}` : ''}`} style={style}>{name}</span>;
+}
+
 function channelName(row: StoredPostComment) {
   if (row.channel_name) return row.channel_name;
   if (row.video_title) return row.video_title;
@@ -228,7 +297,7 @@ export function CommentLeadInboxPanel() {
   const [tab, setTab] = useState<TabKey>('inbox');
   const [comments, setComments] = useState<StoredPostComment[]>([]);
   const [selectedId, setSelectedId] = useState('');
-  const [sourceFilter, setSourceFilter] = useState<SourceKey>('all');
+  const [sourceFilter, setSourceFilter] = useState<ChannelFilter>('all');
   const [tagFilter, setTagFilter] = useState<TagKey | ''>('');
   const [workflowFilter, setWorkflowFilter] = useState<WorkflowFilter>('all');
   const [query, setQuery] = useState('');
@@ -250,31 +319,92 @@ export function CommentLeadInboxPanel() {
   const processedSet = useMemo(() => new Set(processedIds), [processedIds]);
   const starredSet = useMemo(() => new Set(starredIds), [starredIds]);
 
-  const loadComments = async () => {
+  const loadWorkflow = useCallback(async () => {
+    try {
+      const r = await api('/api/post-comments/workflow');
+      if (!r.ok) return;
+      const data = await r.json().catch(() => ({}));
+      if (!data.ok) return;
+      const processed = Array.isArray(data.processed) ? data.processed.filter(Boolean) : [];
+      const starred = Array.isArray(data.starred) ? data.starred.filter(Boolean) : [];
+      setProcessedIds(processed);
+      setStarredIds(starred);
+    } catch {
+      const local = readWorkflowStore();
+      setProcessedIds(local.processed);
+      setStarredIds(local.starred);
+    }
+  }, []);
+
+  const persistWorkflow = async (row: StoredPostComment, patch: { processed?: boolean; starred?: boolean }) => {
+    const commentId = row.comment_id || '';
+    if (!commentId) return;
+    try {
+      const r = await api('/api/post-comments/workflow', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ comment_id: commentId, ...patch }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (data.ok) {
+        setProcessedIds(Array.isArray(data.processed) ? data.processed : []);
+        setStarredIds(Array.isArray(data.starred) ? data.starred : []);
+      }
+    } catch {
+      // localStorage fallback handled by useEffect
+    }
+  };
+
+  const loadComments = useCallback(async () => {
     setBusy(true);
     setStatus('Đang tải inbox bình luận...');
     try {
-      const r = await api('/api/post-comments?limit=1000');
-      const data: CommentPayload = await r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
-      if (data.ok) {
-        const rows = Array.isArray(data.comments) ? data.comments : [];
-        setComments(rows);
-        setSelectedId((current) => current || (rows[0] ? commentKey(rows[0]) : ''));
-        setStatus(data.warning ? `⚠️ ${data.warning}` : rows.length ? `✅ Đã tải ${rows.length} bình luận thật` : 'Chưa có bình luận. Hãy lấy CMT từ bài Facebook/TikTok trước.');
-      } else {
-        setStatus(`❌ ${data.error || 'Không tải được bình luận'}`);
+      const params = new URLSearchParams({ limit: '1000' });
+      if (sourceFilter === 'tiktok') params.set('source', 'tiktok');
+      else if (sourceFilter === 'instagram') params.set('source', 'instagram');
+      else if (sourceFilter === 'facebook') params.set('source', 'facebook');
+
+      const r = await api(`/api/post-comments?${params.toString()}`);
+      if (r.status === 401) {
+        setStatus('❌ Phiên đăng nhập hết hạn. Vui lòng đăng nhập lại.');
+        setComments([]);
+        return;
       }
+      const data: CommentPayload = await r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
+      if (!r.ok || data.ok === false) {
+        setStatus(`❌ ${data.error || `Không tải được bình luận (${r.status})`}`);
+        return;
+      }
+      const rows = Array.isArray(data.comments) ? data.comments : [];
+      setComments(rows);
+
+      const tagMap: Record<string, string[]> = {};
+      const processedFromRows: string[] = [];
+      const starredFromRows: string[] = [];
+      rows.forEach((row) => {
+        const key = commentKey(row);
+        if (Array.isArray(row.manual_tags) && row.manual_tags.length) {
+          tagMap[key] = row.manual_tags;
+        }
+        const wid = workflowId(row);
+        if (row.processed) processedFromRows.push(wid);
+        if (row.starred) starredFromRows.push(wid);
+      });
+      setManualTagsByComment((current) => ({ ...current, ...tagMap }));
+      setProcessedIds((current) => Array.from(new Set([...current, ...processedFromRows])));
+      setStarredIds((current) => Array.from(new Set([...current, ...starredFromRows])));
+
+      setSelectedId((current) => {
+        if (current && rows.some((row) => commentKey(row) === current)) return current;
+        return rows[0] ? commentKey(rows[0]) : '';
+      });
+      setStatus(data.warning ? `⚠️ ${data.warning}` : rows.length ? `✅ Đã tải ${rows.length} bình luận` : 'Chưa có bình luận. Hãy lấy CMT từ bài Facebook/TikTok trước.');
     } catch {
       setStatus('❌ Lỗi kết nối khi tải bình luận');
     } finally {
       setBusy(false);
     }
-  };
-
-  useEffect(() => {
-    void loadComments();
-    void loadTemplateConfig();
-  }, []);
+  }, [sourceFilter]);
 
   async function loadTemplateConfig() {
     try {
@@ -290,6 +420,25 @@ export function CommentLeadInboxPanel() {
       // Giữ bộ mặc định nếu backend chưa sẵn sàng.
     }
   }
+
+  const reloadInbox = useCallback(async () => {
+    await loadWorkflow();
+    await loadComments();
+  }, [loadComments, loadWorkflow]);
+
+  useEffect(() => {
+    void loadWorkflow();
+    void loadTemplateConfig();
+  }, [loadWorkflow]);
+
+  useEffect(() => {
+    if (tab !== 'inbox') return;
+    void loadComments();
+  }, [sourceFilter, tab, loadComments]);
+
+  useEffect(() => {
+    if (tab === 'stats' && !comments.length && !busy) void reloadInbox();
+  }, [tab, comments.length, busy, reloadInbox]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -353,10 +502,10 @@ export function CommentLeadInboxPanel() {
     const kw = normalizeText(query);
     return comments.filter((row) => {
       const key = commentKey(row);
-      if (sourceFilter !== 'all' && sourceKey(row) !== sourceFilter) return false;
-      if (workflowFilter === 'open' && processedSet.has(key)) return false;
-      if (workflowFilter === 'done' && !processedSet.has(key)) return false;
-      if (workflowFilter === 'starred' && !starredSet.has(key)) return false;
+      if (!matchesChannelFilter(row, sourceFilter)) return false;
+      if (workflowFilter === 'open' && isRowProcessed(row, processedSet)) return false;
+      if (workflowFilter === 'done' && !isRowProcessed(row, processedSet)) return false;
+      if (workflowFilter === 'starred' && !isRowStarred(row, starredSet)) return false;
       const tags = tagsForRow(row);
       if (tagFilter && !tags.some((tag) => tag.key === tagFilter)) return false;
       if (!kw) return true;
@@ -372,18 +521,17 @@ export function CommentLeadInboxPanel() {
     let done = 0;
     let starred = 0;
     comments.forEach((row) => {
-      const key = commentKey(row);
-      if (processedSet.has(key)) done += 1;
-      if (starredSet.has(key)) starred += 1;
+      if (isRowProcessed(row, processedSet)) done += 1;
+      if (isRowStarred(row, starredSet)) starred += 1;
     });
     return { all: comments.length, done, open: Math.max(comments.length - done, 0), starred };
   }, [comments, processedSet, starredSet]);
 
-  const sourceCounts = useMemo(() => {
-    const counts: Record<SourceKey, number> = { all: comments.length, 'fb-page': 0, 'fb-group': 0, tiktok: 0, instagram: 0 };
+  const channelCounts = useMemo(() => {
+    const counts: Record<ChannelFilter, number> = { all: comments.length, facebook: 0, tiktok: 0, instagram: 0 };
     comments.forEach((row) => {
-        counts[sourceKey(row)] += 1;
-      });
+      counts[channelFilterKey(row)] += 1;
+    });
     return counts;
   }, [comments]);
 
@@ -406,6 +554,77 @@ export function CommentLeadInboxPanel() {
       return isLead ? { row, tags, phones } : null;
     })
     .filter(Boolean) as { row: StoredPostComment; tags: TagMeta[]; phones: string[] }[], [comments, tagsForRow]);
+
+  const statsDashboard = useMemo(() => {
+    const withPhone = customers.filter((item) => item.phones.length).length;
+    const hotCount = comments.filter((row) => tagsForRow(row).some((tag) => tag.key === 'hot')).length;
+    const processRate = comments.length ? Math.round((workflowCounts.done / comments.length) * 100) : 0;
+    const leadRate = comments.length ? Math.round((customers.length / comments.length) * 100) : 0;
+
+    const channelRows = CHANNEL_FILTERS
+      .filter((channel) => channel.key !== 'all')
+      .map((channel) => ({
+        ...channel,
+        count: channelCounts[channel.key],
+        pct: comments.length ? Math.round((channelCounts[channel.key] / comments.length) * 100) : 0,
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    const tagRows = tagOptions
+      .map((tag) => ({
+        tag,
+        count: tagCounts[tag.key] || 0,
+        pct: comments.length ? Math.round(((tagCounts[tag.key] || 0) / comments.length) * 100) : 0,
+        meta: tagMaterialIcon(tag.key),
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    const dailyMap: Record<string, number> = {};
+    comments.forEach((row) => {
+      const raw = row.created_time || row.fetched_at;
+      if (!raw) return;
+      try {
+        const label = new Date(raw).toLocaleDateString('vi-VN');
+        dailyMap[label] = (dailyMap[label] || 0) + 1;
+      } catch {
+        /* ignore */
+      }
+    });
+    const parseViDate = (value: string) => {
+      const [d, m, y] = value.split('/').map((part) => Number(part));
+      return new Date(y || 1970, (m || 1) - 1, d || 1).getTime();
+    };
+    const dailyRows = Object.entries(dailyMap)
+      .map(([date, count]) => ({ date, count }))
+      .sort((a, b) => parseViDate(b.date) - parseViDate(a.date))
+      .slice(0, 7);
+    const dailyMax = dailyRows.reduce((max, row) => Math.max(max, row.count), 1);
+
+    const authorMap: Record<string, number> = {};
+    comments.forEach((row) => {
+      const name = row.author_name || 'Ẩn danh';
+      authorMap[name] = (authorMap[name] || 0) + 1;
+    });
+    const topAuthors = Object.entries(authorMap)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+    const authorMax = topAuthors.reduce((max, row) => Math.max(max, row.count), 1);
+
+    return {
+      withPhone,
+      hotCount,
+      processRate,
+      leadRate,
+      channelRows,
+      tagRows,
+      dailyRows,
+      dailyMax,
+      topAuthors,
+      authorMax,
+      workflow: workflowCounts,
+    };
+  }, [comments, customers, channelCounts, tagCounts, tagOptions, workflowCounts, tagsForRow]);
 
   const syncLead = async (row?: StoredPostComment | null) => {
     const body = row?.post_id ? { source: row.source || '', post_id: row.post_id } : {};
@@ -440,6 +659,15 @@ export function CommentLeadInboxPanel() {
       return `${prefix}${template.text}`.trimStart();
     });
     setReplyStatus(`Đã chèn /${template.trigger}`);
+  };
+
+  const copyTemplate = async (template: ReplyTemplate) => {
+    try {
+      await navigator.clipboard.writeText(template.text);
+      setStatus(`✅ Đã sao chép mẫu /${template.trigger}`);
+    } catch {
+      setStatus('❌ Không sao chép được. Hãy thử lại.');
+    }
   };
 
   const createTemplate = async () => {
@@ -520,15 +748,34 @@ export function CommentLeadInboxPanel() {
     setStatus(next.includes(tagKey) ? '✅ Đã gắn tag cho comment' : 'Đã bỏ tag khỏi comment');
   };
 
+  const markProcessed = useCallback((row: StoredPostComment) => {
+    const key = commentKey(row);
+    const wid = workflowId(row);
+    setProcessedIds((current) => Array.from(new Set([...current, wid, key])));
+    setComments((current) => current.map((item) => (commentKey(item) === key ? { ...item, processed: true } : item)));
+    void persistWorkflow(row, { processed: true });
+  }, []);
+
   const toggleWorkflow = (row: StoredPostComment, type: 'processed' | 'starred') => {
     const key = commentKey(row);
+    const wid = workflowId(row);
     if (type === 'processed') {
-      setProcessedIds((current) => (current.includes(key) ? current.filter((item) => item !== key) : [...current, key]));
-      setStatus(processedSet.has(key) ? 'Đã chuyển comment về trạng thái chưa xử lý' : '✅ Đã đánh dấu comment đã xử lý');
+      const next = !isRowProcessed(row, processedSet);
+      setProcessedIds((current) => (next ? Array.from(new Set([...current, wid, key])) : current.filter((item) => item !== wid && item !== key)));
+      setComments((current) => current.map((item) => (commentKey(item) === key ? { ...item, processed: next } : item)));
+      void persistWorkflow(row, { processed: next });
+      setStatus(next ? '✅ Đã đánh dấu comment đã xử lý' : 'Đã chuyển comment về trạng thái chưa xử lý');
       return;
     }
-    setStarredIds((current) => (current.includes(key) ? current.filter((item) => item !== key) : [...current, key]));
-    setStatus(starredSet.has(key) ? 'Đã bỏ ghim/VIP comment' : '⭐ Đã ghim/VIP comment để ưu tiên xử lý');
+    const next = !isRowStarred(row, starredSet);
+    setStarredIds((current) => (next ? Array.from(new Set([...current, wid, key])) : current.filter((item) => item !== wid && item !== key)));
+    setComments((current) => current.map((item) => (commentKey(item) === key ? { ...item, starred: next } : item)));
+    void persistWorkflow(row, { starred: next });
+    if (next) {
+      const tags = manualTagsByComment[key] || row.manual_tags || [];
+      if (!tags.includes('vip')) void toggleManualTag(row, 'vip');
+    }
+    setStatus(next ? '⭐ Đã ghim/VIP comment để ưu tiên xử lý' : 'Đã bỏ ghim/VIP comment');
   };
 
   function requestTiktokExtensionComment(payload: Record<string, unknown>): Promise<TikTokBridgeResult> {
@@ -706,7 +953,7 @@ export function CommentLeadInboxPanel() {
       comment_id: `manual_${row.comment_id || Date.now()}`,
     };
     await recordTiktokExtensionResult(row, 'success', message, result).catch(() => null);
-    setProcessedIds((current) => (current.includes(commentKey(row)) ? current : [...current, commentKey(row)]));
+    markProcessed(row);
     const prefix = fallbackReason ? `TikTok chưa nhận gửi trực tiếp (${fallbackReason}). ` : '';
     if (openResult.ok && openResult.target_found) {
       setReplyStatus(`✅ ${prefix}Đã copy câu trả lời, mở video, tô xanh comment đang hiển thị và ghim bảng xử lý. Dán Ctrl+V rồi gửi thủ công.`);
@@ -770,7 +1017,7 @@ export function CommentLeadInboxPanel() {
       if (src === 'tiktok') {
         const playwrightResult = await requestTiktokPlaywrightComment(selected, message);
         if (playwrightResult.ok) {
-          setProcessedIds((current) => (current.includes(commentKey(selected)) ? current : [...current, commentKey(selected)]));
+          markProcessed(selected);
           setReplyText('');
           setReplyStatus(`✅ Đã gửi comment TikTok bằng Playwright browser${playwrightResult.warning ? ` · ${playwrightResult.warning}` : ''}`);
           await loadComments();
@@ -781,7 +1028,7 @@ export function CommentLeadInboxPanel() {
         const directResult = await sendDirectTikTokReply(selected, message);
         if (directResult.ok) {
           await recordTiktokExtensionResult(selected, 'success', message, directResult).catch(() => null);
-          setProcessedIds((current) => (current.includes(commentKey(selected)) ? current : [...current, commentKey(selected)]));
+          markProcessed(selected);
           setReplyText('');
           setReplyStatus('✅ Đã gửi comment TikTok trực tiếp từ UI qua Chrome extension và lưu lịch sử.');
           await loadComments();
@@ -841,239 +1088,296 @@ export function CommentLeadInboxPanel() {
     setStatus('✅ Đã xuất danh sách lead comment');
   };
 
+  const selectedMeta = selected ? sourceLabel(selected) : null;
+  const selectedSrc = selected ? sourceKey(selected) : null;
+
   return (
-    <section className="comment-studio module-panel">
-      <div className="comment-studio-head">
-        <div>
-          <div className="module-kicker">Bình luận & Lead</div>
-          <h2>Inbox đa kênh</h2>
-          <p>Gom comment Facebook Page, Facebook Group, TikTok và các lead có SĐT vào một màn hình xử lý.</p>
+    <section className="omni-inbox module-panel">
+      <header className="omni-topbar">
+        <div className="omni-topbar-left">
+          <span className="omni-brand">OmniInbox</span>
+          <nav className="omni-nav">
+            <button type="button" className={tab === 'inbox' ? 'active' : ''} onClick={() => setTab('inbox')}>Inbox</button>
+            <button type="button" className={tab === 'customers' ? 'active' : ''} onClick={() => setTab('customers')}>Khách hàng</button>
+            <button type="button" className={tab === 'stats' ? 'active' : ''} onClick={() => setTab('stats')}>Thống kê</button>
+            <button type="button" className={tab === 'templates' ? 'active' : ''} onClick={() => setTab('templates')}>Mẫu câu</button>
+          </nav>
         </div>
-        <div className="module-actions">
-          <button type="button" className="btn-cancel" onClick={() => void loadComments()} disabled={busy}>
+        <div className="omni-topbar-right">
+          <div className="omni-search">
+            <MaterialIcon name="search" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Tìm lead, SĐT, nội dung..." type="text" />
+          </div>
+          <button type="button" className="omni-btn-ghost" onClick={() => void reloadInbox()} disabled={busy}>
             {busy ? 'Đang tải...' : 'Tải lại'}
           </button>
-          <button type="button" className="btn-submit" onClick={() => void syncLead(selected)}>
-            Tách lead
-          </button>
+          <button type="button" className="omni-btn-primary" onClick={() => void syncLead(selected)}>Tách lead</button>
         </div>
-      </div>
-
-      <div className="comment-tabs">
-        <button type="button" className={tab === 'inbox' ? 'active' : ''} onClick={() => setTab('inbox')}>
-          💬 Inbox <span>{filtered.length}</span>
-        </button>
-        <button type="button" className={tab === 'customers' ? 'active' : ''} onClick={() => setTab('customers')}>
-          👤 Khách hàng
-        </button>
-        <button type="button" className={tab === 'stats' ? 'active' : ''} onClick={() => setTab('stats')}>
-          📊 Thống kê
-        </button>
-        <button type="button" className={tab === 'templates' ? 'active' : ''} onClick={() => setTab('templates')}>
-          ⚡ Mẫu câu
-        </button>
-      </div>
+      </header>
 
       {tab === 'inbox' ? (
-        <div className="comment-inbox-layout">
-          <aside className="comment-filter-pane">
-            <div className="comment-filter-title">Kênh</div>
-            {(Object.keys(SOURCE_META) as SourceKey[]).map((key) => (
-              <button key={key} type="button" className={`comment-filter-row ${sourceFilter === key ? 'active' : ''}`} onClick={() => setSourceFilter(key)}>
-                <span className={`source-dot ${SOURCE_META[key].className}`} />
-                <span>{SOURCE_META[key].icon} {SOURCE_META[key].label}</span>
-                <b>{sourceCounts[key]}</b>
-              </button>
-            ))}
-
-            <div className="comment-filter-title tag-title">Tags</div>
-            {tagOptions.map((tag) => (
-              <button
-                key={tag.key}
-                type="button"
-                className={`comment-filter-row ${tagFilter === tag.key ? 'active' : ''}`}
-                onClick={() => setTagFilter((current) => (current === tag.key ? '' : tag.key))}
-              >
-                <span className={`comment-tag ${tag.className}`}>{tag.icon} {tag.label}</span>
-                <b>{tagCounts[tag.key]}</b>
+        <div className="omni-body">
+          <aside className="omni-sidebar">
+            <div className="omni-sidebar-head">
+              <p>OmniChannel</p>
+              <p>Bộ lọc đang dùng</p>
+            </div>
+            <div className="omni-sidebar-scroll">
+              <p className="omni-section-label">Kênh</p>
+              {CHANNEL_FILTERS.map((channel) => (
+                <button
+                  key={channel.key}
+                  type="button"
+                  className={`omni-filter-btn ${sourceFilter === channel.key ? 'active' : ''}`}
+                  onClick={() => setSourceFilter(channel.key)}
+                >
+                  <MaterialIcon name={channel.materialIcon} />
+                  <span>{channel.label}</span>
+                  <b>{channelCounts[channel.key]}</b>
                 </button>
               ))}
-            <div className="comment-add-tag">
-              <input value={newTagLabel} onChange={(e) => setNewTagLabel(e.target.value)} placeholder="+ Tag mới" />
-              <button type="button" onClick={() => void createTag()}>+</button>
+
+              <p className="omni-section-label" style={{ marginTop: 24 }}>Tags</p>
+              {tagOptions.map((tag) => {
+                const meta = tagMaterialIcon(tag.key);
+                return (
+                  <button
+                    key={tag.key}
+                    type="button"
+                    className={`omni-filter-btn ${tagFilter === tag.key ? 'active' : ''}`}
+                    onClick={() => setTagFilter((current) => (current === tag.key ? '' : tag.key))}
+                  >
+                    <MaterialIcon name={meta.icon} filled={meta.filled} style={{ color: meta.color, fontSize: 16 }} />
+                    <span>{tag.label}</span>
+                    <b>{tagCounts[tag.key] || 0}</b>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="omni-sidebar-foot">
+              <div className="omni-add-filter">
+                <MaterialIcon name="add_circle" style={{ fontSize: 16 }} />
+                <input value={newTagLabel} onChange={(e) => setNewTagLabel(e.target.value)} placeholder="Thêm tag mới" onKeyDown={(e) => { if (e.key === 'Enter') void createTag(); }} />
+                <button type="button" onClick={() => void createTag()} aria-label="Thêm tag">+</button>
+              </div>
+              <div className="omni-workflow-icons">
+                <button type="button" className={workflowFilter === 'open' ? 'active' : ''} title="Chưa xử lý" onClick={() => setWorkflowFilter((c) => (c === 'open' ? 'all' : 'open'))}>
+                  <MaterialIcon name="pending_actions" />
+                </button>
+                <button type="button" className={workflowFilter === 'starred' ? 'active' : ''} title="VIP" onClick={() => setWorkflowFilter((c) => (c === 'starred' ? 'all' : 'starred'))}>
+                  <MaterialIcon name="stars" />
+                </button>
+                <button type="button" className={workflowFilter === 'done' ? 'active' : ''} title="Đã xử lý" onClick={() => setWorkflowFilter((c) => (c === 'done' ? 'all' : 'done'))}>
+                  <MaterialIcon name="done_all" />
+                </button>
+              </div>
             </div>
           </aside>
 
-          <div className="comment-list-pane">
-            <div className="comment-list-toolbar">
-              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="🔍 Tìm tên, SĐT, nội dung..." />
-              <button
-                type="button"
-                className={!tagFilter && workflowFilter === 'all' ? 'active' : ''}
-                onClick={() => {
-                  setTagFilter('');
-                  setWorkflowFilter('all');
-                }}
-              >
-                Tất cả
-              </button>
-              <button type="button" className={workflowFilter === 'open' ? 'active' : ''} onClick={() => setWorkflowFilter((current) => (current === 'open' ? 'all' : 'open'))}>
-                Chưa xử lý {workflowCounts.open}
-              </button>
-              <button type="button" className={workflowFilter === 'done' ? 'active' : ''} onClick={() => setWorkflowFilter((current) => (current === 'done' ? 'all' : 'done'))}>
-                Đã xử lý {workflowCounts.done}
-              </button>
-              <button type="button" className={workflowFilter === 'starred' ? 'active' : ''} onClick={() => setWorkflowFilter((current) => (current === 'starred' ? 'all' : 'starred'))}>
-                ⭐ {workflowCounts.starred}
-              </button>
-            </div>
-
-            <div className="comment-list">
-              {filtered.length ? filtered.map((row) => {
-                const meta = sourceLabel(row);
-                const tags = tagsForRow(row);
-                const key = commentKey(row);
-                const isProcessed = processedSet.has(key);
-                const isStarred = starredSet.has(key);
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`comment-card ${selected && commentKey(selected) === key ? 'active' : ''} ${isProcessed ? 'processed' : ''}`}
-                    onClick={() => setSelectedId(key)}
-                  >
-                    <div className="comment-avatar">{(row.author_name || '?').trim().charAt(0).toUpperCase()}</div>
-                    <div className="comment-card-body">
-                      <div className="comment-card-top">
-                        <b>{row.author_name || 'Ẩn danh'}</b>
-                        <small>{commentTime(row)}</small>
+          <div className="omni-main">
+            <section className="omni-stream">
+              <div className="omni-stream-head">
+                <div className="omni-stream-head-top">
+                  <h2>Inbox Stream</h2>
+                  <span className="omni-unread-badge">{workflowCounts.open} chưa xử lý</span>
+                </div>
+                <div className="omni-pills">
+                  <button type="button" className={!tagFilter && workflowFilter === 'all' ? 'active' : ''} onClick={() => { setTagFilter(''); setWorkflowFilter('all'); }}>Tất cả</button>
+                  <button type="button" className={workflowFilter === 'open' ? 'active' : ''} onClick={() => setWorkflowFilter((c) => (c === 'open' ? 'all' : 'open'))}>Chưa xử lý</button>
+                  <button type="button" className={workflowFilter === 'starred' ? 'active' : ''} onClick={() => setWorkflowFilter((c) => (c === 'starred' ? 'all' : 'starred'))}>VIP</button>
+                </div>
+              </div>
+              <div className="omni-stream-list">
+                {filtered.length ? filtered.map((row) => {
+                  const meta = sourceLabel(row);
+                  const tags = tagsForRow(row);
+                  const key = commentKey(row);
+                  const isProcessed = isRowProcessed(row, processedSet);
+                  const isStarred = isRowStarred(row, starredSet);
+                  const hotTag = tags.find((t) => t.key === 'hot');
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      className={`omni-stream-item ${selected && commentKey(selected) === key ? 'active' : ''}`}
+                      onClick={() => setSelectedId(key)}
+                    >
+                      <div className="omni-stream-item-top">
+                        <CommentAuthorLink row={row} className="omni-author-link" />
+                        <small>{commentTimeShort(row)}</small>
                       </div>
-                      <span className={`source-pill ${meta.className}`}>{meta.icon} {meta.label}</span>
-                      <p>{commentText(row) || '(Không có nội dung chữ)'}</p>
-                      <div className="comment-tags">
-                        {isStarred ? <span className="comment-state-pill starred">⭐ VIP</span> : null}
-                        <span className={`comment-state-pill ${isProcessed ? 'done' : 'open'}`}>{isProcessed ? 'Đã xử lý' : 'Chưa xử lý'}</span>
-                        {tags.map((tag) => <span key={tag.key} className={`comment-tag ${tag.className}`}>{tag.icon} {tag.label}</span>)}
-                      </div>
-                      {sourceKey(row) === 'tiktok' ? (
+                      <span className={`omni-channel-chip ${meta.chipClass}`}>
+                        <MaterialIcon name={meta.materialIcon} style={{ fontSize: 10 }} />
+                        {meta.label}
+                      </span>
+                      <p>{commentText(row) || '(Không có nội dung)'}</p>
+                      <div className="omni-stream-item-foot">
+                        {isStarred ? (
+                          <span className="omni-status-chip vip">VIP</span>
+                        ) : hotTag ? (
+                          <span className="omni-status-chip hot">{hotTag.label}</span>
+                        ) : (
+                          <span className={`omni-status-chip ${isProcessed ? 'done' : 'open'}`}>{isProcessed ? 'Đã xử lý' : 'Chưa xử lý'}</span>
+                        )}
                         <span
                           role="button"
                           tabIndex={0}
-                          className="comment-card-dm"
+                          className="omni-dm-link"
                           onClick={(event) => { event.stopPropagation(); openDirectMessage(row); }}
                           onKeyDown={(event) => { if (event.key === 'Enter') { event.stopPropagation(); openDirectMessage(row); } }}
                         >
-                          Nhắn tin trực tiếp
+                          <MaterialIcon name="chat_bubble" style={{ fontSize: 14 }} />
+                          Nhắn tin
                         </span>
-                      ) : null}
-                    </div>
-                  </button>
-                );
-              }) : (
-                <div className="comment-empty">Chưa có bình luận phù hợp bộ lọc.</div>
-              )}
-            </div>
-          </div>
+                      </div>
+                    </button>
+                  );
+                }) : (
+                  <div className="omni-empty">Chưa có bình luận phù hợp bộ lọc.</div>
+                )}
+              </div>
+            </section>
 
-          <div className="comment-detail-pane">
-            {selected ? (
-              <>
-                <div className="comment-detail-title">
-                  <div>
-                    <b>{selected.author_name || 'Ẩn danh'}</b>
-                    <small>{channelName(selected)}</small>
-                  </div>
-                  <span className={`source-pill ${sourceLabel(selected).className}`}>{sourceLabel(selected).icon} {sourceLabel(selected).label}</span>
-                </div>
-                <div className="comment-detail-message">{selected.message || '(Không có nội dung chữ)'}</div>
-                <div className="comment-detail-tags">
-                  {starredSet.has(commentKey(selected)) ? <span className="comment-state-pill starred">⭐ VIP</span> : null}
-                  <span className={`comment-state-pill ${processedSet.has(commentKey(selected)) ? 'done' : 'open'}`}>
-                    {processedSet.has(commentKey(selected)) ? 'Đã xử lý' : 'Chưa xử lý'}
-                  </span>
-                  {tagsForRow(selected).map((tag) => <span key={tag.key} className={`comment-tag ${tag.className}`}>{tag.icon} {tag.label}</span>)}
-                </div>
-                <div className="comment-manual-tags">
-                  {tagOptions.map((tag) => {
-                    const active = (manualTagsByComment[commentKey(selected)] || selected.manual_tags || []).includes(tag.key);
-                    return (
-                      <button
-                        key={tag.key}
-                        type="button"
-                        className={active ? 'active' : ''}
-                        onClick={() => void toggleManualTag(selected, tag.key)}
-                      >
-                        {tag.icon} {tag.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="comment-detail-grid">
-                  <span>Bài viết</span><b className="mono-cell">{selected.post_id || '-'}</b>
-                  <span>Comment ID</span><b className="mono-cell">{selected.comment_id || '-'}</b>
-                  <span>SĐT</span><b>{(selected.phones || (selected.phone ? [selected.phone] : [])).join(', ') || '-'}</b>
-                  <span>Thời gian</span><b>{commentTime(selected)}</b>
-                </div>
-                <div className="comment-detail-actions">
-                  {(selected.comment_url || selected.post_url) ? <a className="btn-cancel" href={selected.comment_url || selected.post_url} target="_blank" rel="noreferrer">Mở link</a> : null}
-                  <button type="button" className="btn-submit" onClick={() => void syncLead(selected)}>Đưa vào Lead</button>
-                  <button type="button" className="btn-cancel" onClick={() => toggleWorkflow(selected, 'processed')}>
-                    {processedSet.has(commentKey(selected)) ? 'Bỏ xử lý' : 'Đã xử lý'}
-                  </button>
-                  <button type="button" className="btn-cancel" onClick={() => toggleWorkflow(selected, 'starred')}>
-                    {starredSet.has(commentKey(selected)) ? 'Bỏ VIP' : 'Ghim VIP'}
-                  </button>
-                </div>
-                <div className="reply-box">
-                  <label>Trả lời comment ngay tại đây</label>
-                  {sourceKey(selected) === 'tiktok' ? (
-                    <div className="reply-hint">
-                      Hệ thống sẽ thử gửi trực tiếp qua Chrome extension đang đăng nhập TikTok. Nếu TikTok chặn phiên tự động, web sẽ tự copy câu trả lời và mở video để sale gửi thủ công.
+            <section className="omni-thread">
+              {selected && selectedMeta ? (
+                <>
+                  <header className="omni-thread-head">
+                    <div className="omni-thread-user">
+                      <div className="omni-avatar">{authorInitials(selected.author_name)}</div>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
+                          <CommentAuthorHeading row={selected} />
+                          <span className="omni-thread-channel">
+                            <MaterialIcon name={selectedMeta.materialIcon} style={{ fontSize: 12 }} />
+                            {selectedMeta.label}
+                          </span>
+                        </div>
+                        <p>{channelName(selected)}</p>
+                      </div>
                     </div>
-                  ) : (
-                    <div className="reply-hint">Facebook sẽ reply trực tiếp vào Comment ID đang chọn.</div>
-                  )}
-                  <div className="reply-template-row">
-                    {templates.slice(0, 6).map((item) => (
-                      <button key={item.id} type="button" onClick={() => insertTemplate(item)}>/{item.trigger || item.title}</button>
-                    ))}
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button type="button" className="omni-btn-ghost" style={{ padding: 8, borderRadius: 999 }} onClick={() => void loadComments()} title="Tải lại">
+                        <MaterialIcon name="history" />
+                      </button>
+                    </div>
+                  </header>
+
+                  <div className="omni-thread-scroll">
+                    <div className="omni-message-card">
+                      <p className="omni-message-text">{selected.message || '(Không có nội dung)'}</p>
+                      <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
+                        <span className={`omni-status-chip ${isRowProcessed(selected, processedSet) ? 'done' : 'open'}`}>
+                          {isRowProcessed(selected, processedSet) ? 'ĐÃ XỬ LÝ' : 'CHƯA XỬ LÝ'}
+                        </span>
+                        {isRowStarred(selected, starredSet) ? <span className="omni-status-chip vip">VIP</span> : null}
+                      </div>
+
+                      <div className="omni-tag-row">
+                        {tagOptions.map((tag) => {
+                          const meta = tagMaterialIcon(tag.key);
+                          const active = (manualTagsByComment[commentKey(selected)] || selected.manual_tags || []).includes(tag.key);
+                          return (
+                            <button
+                              key={tag.key}
+                              type="button"
+                              className={`omni-tag-pill ${active ? 'active' : ''}`}
+                              onClick={() => void toggleManualTag(selected, tag.key)}
+                            >
+                              <MaterialIcon name={meta.icon} filled={meta.filled} style={{ fontSize: 14, color: meta.color }} />
+                              {tag.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="omni-meta-grid">
+                        <div><span>Post ID</span><b className="mono">{selected.post_id || '-'}</b></div>
+                        <div><span>Comment ID</span><b className="mono">{selected.comment_id || '-'}</b></div>
+                        <div><span>SĐT</span><b>{(selected.phones || (selected.phone ? [selected.phone] : [])).join(', ') || '-- Chưa có --'}</b></div>
+                        <div><span>Thời gian</span><b>{commentTime(selected)}</b></div>
+                      </div>
+
+                      <div className="omni-action-row">
+                        {(selected.comment_url || selected.post_url) ? (
+                          <a className="omni-btn-ghost" href={selected.comment_url || selected.post_url} target="_blank" rel="noreferrer" style={{ textAlign: 'center', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>Mở link</a>
+                        ) : (
+                          <button type="button" className="omni-btn-ghost" disabled>Mở link</button>
+                        )}
+                        <button type="button" className="omni-btn-primary" onClick={() => void syncLead(selected)}>Đưa vào Lead</button>
+                        <button type="button" className="omni-btn-ghost" onClick={() => toggleWorkflow(selected, 'processed')}>
+                          {isRowProcessed(selected, processedSet) ? 'Bỏ xử lý' : 'Đã xử lý'}
+                        </button>
+                        <button type="button" className="omni-btn-ghost" onClick={() => toggleWorkflow(selected, 'starred')}>
+                          <MaterialIcon name="stars" filled style={{ fontSize: 16, color: '#9333ea' }} />
+                          {isRowStarred(selected, starredSet) ? 'Bỏ VIP' : 'Ghim VIP'}
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                  <div className="reply-textarea-wrap">
-                    <textarea value={replyText} onChange={(e) => setReplyText(e.target.value)} placeholder="Gõ / để chèn mẫu câu, ví dụ /baogia hoặc /diachi..." />
-                    {templateSuggestions.length ? (
-                      <div className="slash-template-menu">
-                        {templateSuggestions.map((item) => (
-                          <button key={item.id} type="button" onClick={() => insertTemplate(item)}>
-                            <b>/{item.trigger}</b><span>{item.title}</span>
-                          </button>
+
+                  <footer className="omni-composer">
+                    <div className="omni-composer-inner">
+                      <div className="omni-quick-replies">
+                        <label>Trả lời nhanh</label>
+                        {templates.slice(0, 6).map((item) => (
+                          <button key={item.id} type="button" onClick={() => insertTemplate(item)}>/{item.trigger || item.title}</button>
                         ))}
                       </div>
-                    ) : null}
-                  </div>
-                  <div className="reply-send-row">
-                    <button type="button" className="btn-submit" disabled={replyBusy || !replyText.trim()} onClick={() => void sendReply()}>
-                      {replyBusy ? 'Đang gửi...' : sourceKey(selected) === 'tiktok' ? 'Gửi CMT TikTok' : 'Gửi trả lời'}
-                    </button>
-                    <span>{replyStatus}</span>
-                  </div>
+                      <div className="omni-textarea-wrap">
+                        <textarea
+                          value={replyText}
+                          onChange={(e) => setReplyText(e.target.value)}
+                          placeholder="Nhập tin nhắn hoặc gõ / để chèn mẫu câu..."
+                        />
+                        {templateSuggestions.length ? (
+                          <div className="omni-slash-menu">
+                            {templateSuggestions.map((item) => (
+                              <button key={item.id} type="button" onClick={() => insertTemplate(item)}>
+                                <b>/{item.trigger}</b>
+                                <span>{item.title}</span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="omni-composer-foot">
+                        <p>
+                          {selectedSrc === 'tiktok'
+                            ? (tiktokBridgeReady ? 'Gửi qua TikTok extension hoặc Playwright' : 'Cần Chrome extension để gửi TikTok tự động')
+                            : 'Trả lời trực tiếp vào comment Facebook'}
+                          {replyStatus ? ` · ${replyStatus}` : ''}
+                        </p>
+                        <button type="button" className="omni-send-btn" disabled={replyBusy || !replyText.trim()} onClick={() => void sendReply()}>
+                          {replyBusy ? 'Đang gửi...' : selectedSrc === 'tiktok' ? 'Gửi TikTok Reply' : 'Gửi trả lời'}
+                          <MaterialIcon name="send" style={{ fontSize: 18 }} />
+                        </button>
+                      </div>
+                    </div>
+                  </footer>
+                </>
+              ) : (
+                <div className="omni-empty">
+                  <MaterialIcon name="forum" style={{ fontSize: 48, marginBottom: 12 }} />
+                  <div>Chọn bình luận để xem chi tiết</div>
                 </div>
-              </>
-            ) : (
-              <div className="comment-empty detail-empty">💬<br />Chọn bình luận</div>
-            )}
+              )}
+            </section>
           </div>
         </div>
       ) : null}
 
       {tab === 'customers' ? (
-        <div className="comment-tab-panel">
-          <div className="table-toolbar">
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Tìm khách hàng, SĐT, nội dung..." />
-            <button type="button" className="btn-cancel" onClick={exportCustomers}>Xuất CSV</button>
-            <button type="button" className="btn-submit" onClick={() => void syncLead(null)}>Đồng bộ Lead</button>
+        <div className="omni-tab-panel">
+          <div className="omni-topbar-right" style={{ marginBottom: 16 }}>
+            <div className="omni-search" style={{ display: 'block' }}>
+              <MaterialIcon name="search" />
+              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Tìm khách hàng, SĐT..." type="text" />
+            </div>
+            <button type="button" className="omni-btn-ghost" onClick={exportCustomers}>Xuất CSV</button>
+            <button type="button" className="omni-btn-primary" onClick={() => void syncLead(null)}>Đồng bộ Lead</button>
           </div>
-          <div className="data-table-wrap">
-            <table className="data-table">
+          <div className="omni-table-wrap">
+            <table className="omni-table">
               <thead>
                 <tr>
                   <th>Khách hàng</th>
@@ -1087,15 +1391,15 @@ export function CommentLeadInboxPanel() {
               <tbody>
                 {customers.length ? customers.map(({ row, tags, phones }) => (
                   <tr key={row.comment_id || `${row.post_id}-${row.author_name}`}>
-                    <td><b>{row.author_name || 'Ẩn danh'}</b><small>{channelName(row)}</small></td>
-                    <td><span className={`source-pill ${sourceLabel(row).className}`}>{sourceLabel(row).icon} {sourceLabel(row).label}</span></td>
+                    <td><CommentAuthorLink row={row} /><br /><small>{channelName(row)}</small></td>
+                    <td>{sourceLabel(row).label}</td>
                     <td>{phones.join(', ') || '-'}</td>
-                    <td><div className="comment-tags">{tags.map((tag) => <span key={tag.key} className={`comment-tag ${tag.className}`}>{tag.icon} {tag.label}</span>)}</div></td>
+                    <td>{tags.map((tag) => tag.label).join(', ') || '-'}</td>
                     <td>{row.message || '-'}</td>
                     <td>{(row.comment_url || row.post_url) ? <a href={row.comment_url || row.post_url} target="_blank" rel="noreferrer">Mở</a> : '-'}</td>
                   </tr>
                 )) : (
-                  <tr><td colSpan={6} className="table-empty">Chưa có khách hàng/lead từ comment.</td></tr>
+                  <tr><td colSpan={6} className="omni-empty">Chưa có khách hàng/lead từ comment.</td></tr>
                 )}
               </tbody>
             </table>
@@ -1104,51 +1408,206 @@ export function CommentLeadInboxPanel() {
       ) : null}
 
       {tab === 'stats' ? (
-        <div className="comment-tab-panel">
-          <div className="comment-stats-grid">
-            <div className="comment-stat-card"><b>{comments.length}</b><span>Tổng comment</span></div>
-            <div className="comment-stat-card"><b>{customers.length}</b><span>Comment có tín hiệu lead</span></div>
-            <div className="comment-stat-card"><b>{customers.filter((item) => item.phones.length).length}</b><span>Có SĐT</span></div>
-            <div className="comment-stat-card"><b>{sourceCounts['fb-page'] + sourceCounts['fb-group']}</b><span>Facebook</span></div>
-          </div>
-          <div className="comment-stats-columns">
+        <div className="omni-tab-panel omni-stats-page">
+          <div className="omni-stats-hero">
             <div>
-              <h3>Kênh</h3>
-              {(Object.keys(SOURCE_META) as SourceKey[]).filter((key) => key !== 'all').map((key) => (
-                <div key={key} className="stat-line"><span>{SOURCE_META[key].icon} {SOURCE_META[key].label}</span><b>{sourceCounts[key]}</b></div>
-              ))}
+              <p className="omni-stats-kicker">Báo cáo Inbox</p>
+              <h2>Thống kê đa kênh</h2>
+              <p>Tổng hợp comment Facebook, TikTok và tín hiệu lead từ dữ liệu thật đang lưu trong hệ thống.</p>
             </div>
-            <div>
-              <h3>Tags</h3>
-              {tagOptions.map((tag) => <div key={tag.key} className="stat-line"><span className={`comment-tag ${tag.className}`}>{tag.icon} {tag.label}</span><b>{tagCounts[tag.key] || 0}</b></div>)}
+            <button type="button" className="omni-btn-ghost" onClick={() => void reloadInbox()} disabled={busy}>
+              <MaterialIcon name="refresh" style={{ fontSize: 18 }} />
+              {busy ? 'Đang tải...' : 'Làm mới'}
+            </button>
+          </div>
+
+          <div className="omni-stats-kpi-grid">
+            <div className="omni-stat-card omni-stat-primary">
+              <MaterialIcon name="forum" />
+              <b>{comments.length}</b>
+              <span>Tổng comment</span>
+            </div>
+            <div className="omni-stat-card omni-stat-warn">
+              <MaterialIcon name="pending_actions" />
+              <b>{statsDashboard.workflow.open}</b>
+              <span>Chưa xử lý</span>
+            </div>
+            <div className="omni-stat-card omni-stat-success">
+              <MaterialIcon name="done_all" />
+              <b>{statsDashboard.workflow.done}</b>
+              <span>Đã xử lý ({statsDashboard.processRate}%)</span>
+            </div>
+            <div className="omni-stat-card omni-stat-vip">
+              <MaterialIcon name="stars" filled />
+              <b>{statsDashboard.workflow.starred}</b>
+              <span>Ghim VIP</span>
+            </div>
+            <div className="omni-stat-card">
+              <MaterialIcon name="person_search" />
+              <b>{customers.length}</b>
+              <span>Lead tiềm năng ({statsDashboard.leadRate}%)</span>
+            </div>
+            <div className="omni-stat-card omni-stat-hot">
+              <MaterialIcon name="local_fire_department" filled />
+              <b>{statsDashboard.hotCount}</b>
+              <span>Comment nóng</span>
+            </div>
+            <div className="omni-stat-card">
+              <MaterialIcon name="call" />
+              <b>{statsDashboard.withPhone}</b>
+              <span>Có SĐT</span>
             </div>
           </div>
+
+          <div className="omni-stats-columns">
+            <section className="omni-stats-panel">
+              <div className="omni-stats-panel-head">
+                <h3>Phân bổ kênh</h3>
+                <span>{comments.length} comment</span>
+              </div>
+              {statsDashboard.channelRows.length ? statsDashboard.channelRows.map((channel) => (
+                <div key={channel.key} className="omni-bar-row">
+                  <div className="omni-bar-label">
+                    <MaterialIcon name={channel.materialIcon} style={{ fontSize: 16 }} />
+                    <span>{channel.label}</span>
+                    <b>{channel.count}</b>
+                  </div>
+                  <div className="omni-bar-track">
+                    <div className="omni-bar-fill" style={{ width: `${channel.pct}%` }} />
+                  </div>
+                  <small>{channel.pct}%</small>
+                </div>
+              )) : (
+                <div className="omni-empty">Chưa có dữ liệu kênh.</div>
+              )}
+            </section>
+
+            <section className="omni-stats-panel">
+              <div className="omni-stats-panel-head">
+                <h3>Trạng thái xử lý</h3>
+                <span>{statsDashboard.processRate}% hoàn thành</span>
+              </div>
+              <div
+                className="omni-workflow-ring"
+                style={{ background: `conic-gradient(#059669 0 ${statsDashboard.processRate}%, #fef3c7 ${statsDashboard.processRate}% 100%)` }}
+              >
+                <div className="omni-workflow-ring-center">
+                  <b>{statsDashboard.processRate}%</b>
+                  <small>đã xử lý</small>
+                </div>
+              </div>
+              <div className="omni-workflow-legend">
+                <div><i className="dot open" /> Chưa xử lý <b>{statsDashboard.workflow.open}</b></div>
+                <div><i className="dot done" /> Đã xử lý <b>{statsDashboard.workflow.done}</b></div>
+                <div><i className="dot vip" /> VIP <b>{statsDashboard.workflow.starred}</b></div>
+              </div>
+            </section>
+          </div>
+
+          <div className="omni-stats-columns">
+            <section className="omni-stats-panel">
+              <div className="omni-stats-panel-head">
+                <h3>Tags phổ biến</h3>
+                <span>{tagOptions.length} tag</span>
+              </div>
+              {statsDashboard.tagRows.filter((row) => row.count > 0).length ? statsDashboard.tagRows.filter((row) => row.count > 0).map(({ tag, count, pct, meta }) => (
+                <div key={tag.key} className="omni-bar-row">
+                  <div className="omni-bar-label">
+                    <MaterialIcon name={meta.icon} filled={meta.filled} style={{ fontSize: 16, color: meta.color }} />
+                    <span>{tag.label}</span>
+                    <b>{count}</b>
+                  </div>
+                  <div className="omni-bar-track">
+                    <div className="omni-bar-fill tag" style={{ width: `${pct}%` }} />
+                  </div>
+                  <small>{pct}%</small>
+                </div>
+              )) : (
+                <div className="omni-empty">Chưa có tag nào được gắn.</div>
+              )}
+            </section>
+
+            <section className="omni-stats-panel">
+              <div className="omni-stats-panel-head">
+                <h3>7 ngày gần nhất</h3>
+                <span>Theo ngày comment</span>
+              </div>
+              {statsDashboard.dailyRows.length ? statsDashboard.dailyRows.map((row) => (
+                <div key={row.date} className="omni-bar-row">
+                  <div className="omni-bar-label">
+                    <MaterialIcon name="calendar_today" style={{ fontSize: 16 }} />
+                    <span>{row.date}</span>
+                    <b>{row.count}</b>
+                  </div>
+                  <div className="omni-bar-track">
+                    <div
+                      className="omni-bar-fill daily"
+                      style={{ width: `${Math.round((row.count / statsDashboard.dailyMax) * 100)}%` }}
+                    />
+                  </div>
+                </div>
+              )) : (
+                <div className="omni-empty">Chưa có dữ liệu theo ngày.</div>
+              )}
+            </section>
+          </div>
+
+          <section className="omni-stats-panel omni-stats-wide">
+            <div className="omni-stats-panel-head">
+              <h3>Top khách hàng comment nhiều nhất</h3>
+              <span>Top 5</span>
+            </div>
+            {statsDashboard.topAuthors.length ? (
+              <div className="omni-top-authors">
+                {statsDashboard.topAuthors.map((row, index) => (
+                  <div key={row.name} className="omni-top-author-row">
+                    <span className="omni-top-rank">#{index + 1}</span>
+                    <div className="omni-avatar sm">{authorInitials(row.name)}</div>
+                    <div className="omni-top-author-meta">
+                      <b>{row.name}</b>
+                      <small>{row.count} comment</small>
+                    </div>
+                    <div className="omni-bar-track compact">
+                      <div
+                        className="omni-bar-fill"
+                        style={{ width: `${Math.round((row.count / statsDashboard.authorMax) * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="omni-empty">Chưa có dữ liệu khách hàng.</div>
+            )}
+          </section>
         </div>
       ) : null}
 
       {tab === 'templates' ? (
-        <div className="comment-tab-panel template-manager">
-          <div className="template-editor">
+        <div className="omni-tab-panel">
+          <div className="omni-template-editor">
             <input value={templateForm.title} onChange={(e) => setTemplateForm((s) => ({ ...s, title: e.target.value }))} placeholder="Tên mẫu câu" />
-            <input value={templateForm.trigger} onChange={(e) => setTemplateForm((s) => ({ ...s, trigger: e.target.value }))} placeholder="Lệnh /, ví dụ diachi" />
-            <textarea value={templateForm.text} onChange={(e) => setTemplateForm((s) => ({ ...s, text: e.target.value }))} placeholder="Nội dung trả lời nhanh..." />
-            <button type="button" className="btn-submit" onClick={() => void createTemplate()}>+ Thêm mẫu câu</button>
+            <input value={templateForm.trigger} onChange={(e) => setTemplateForm((s) => ({ ...s, trigger: e.target.value }))} placeholder="Lệnh /, ví dụ baogia" />
+            <textarea value={templateForm.text} onChange={(e) => setTemplateForm((s) => ({ ...s, text: e.target.value }))} placeholder="Nội dung trả lời nhanh..." rows={4} />
+            <button type="button" className="omni-btn-primary" onClick={() => void createTemplate()}>+ Thêm mẫu câu</button>
           </div>
-          <div className="template-grid">
-          {templates.map((item) => (
-            <div key={item.id} className="template-card">
-              <b>{item.title}</b>
-              <small>/{item.trigger}</small>
-              <p>{item.text}</p>
-              <button type="button" className="btn-cancel" onClick={() => insertTemplate(item)}>Chèn thử</button>
-              {!item.system ? <button type="button" className="btn-danger-soft" onClick={() => void deleteTemplate(item.id)}>Xoá</button> : null}
-            </div>
-          ))}
+          <div className="omni-template-grid">
+            {templates.map((item) => (
+              <div key={item.id} className="omni-template-card">
+                <b>{item.title}</b>
+                <small>/{item.trigger}</small>
+                <p style={{ margin: '12px 0', fontSize: 13, color: 'var(--omni-on-surface-variant)' }}>{item.text}</p>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="button" className="omni-btn-ghost" onClick={() => void copyTemplate(item)}>Sao chép</button>
+                  {!item.system ? <button type="button" className="omni-btn-ghost" onClick={() => void deleteTemplate(item.id)}>Xoá</button> : null}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       ) : null}
 
-      {status ? <div className="comment-studio-status">{status}</div> : null}
+      {status ? <div className="omni-status-bar">{status}</div> : null}
     </section>
   );
 }

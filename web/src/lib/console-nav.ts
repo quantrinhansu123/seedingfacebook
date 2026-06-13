@@ -1,0 +1,31 @@
+import type { ViewKey } from '@/lib/app-routes';
+
+export type ConsoleNavTone =
+  | 'blue'
+  | 'violet'
+  | 'indigo'
+  | 'cyan'
+  | 'sky'
+  | 'amber'
+  | 'slate'
+  | 'emerald'
+  | 'rose';
+
+export type ConsoleNavItem = {
+  key: ViewKey;
+  label: string;
+  shortLabel: string;
+  tone: ConsoleNavTone;
+};
+
+export const CONSOLE_NAV_ITEMS: ConsoleNavItem[] = [
+  { key: 'home', label: 'Trang chủ', shortLabel: 'Trang chủ', tone: 'blue' },
+  { key: 'staff', label: 'Nhân sự', shortLabel: 'Nhân sự', tone: 'violet' },
+  { key: 'channels', label: 'Quản lý nhóm', shortLabel: 'Kênh', tone: 'indigo' },
+  { key: 'comments', label: 'Bình luận', shortLabel: 'Bình luận', tone: 'cyan' },
+  { key: 'manage', label: 'Quản lý', shortLabel: 'Quản lý', tone: 'sky' },
+  { key: 'cookies', label: 'Cooki', shortLabel: 'Cookie', tone: 'amber' },
+  { key: 'history', label: 'Lịch thử thao tác', shortLabel: 'Lịch sử', tone: 'slate' },
+  { key: 'leads', label: 'Lead', shortLabel: 'Lead', tone: 'emerald' },
+  { key: 'marketing', label: 'Bài viết', shortLabel: 'Bài viết', tone: 'rose' },
+];
