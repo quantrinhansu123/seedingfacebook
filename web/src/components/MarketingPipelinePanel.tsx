@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { api } from '@/lib/api';
+import { api, AI_TIMEOUT_MS, PUBLISH_TIMEOUT_MS, UPLOAD_TIMEOUT_MS, formatFetchError } from '@/lib/api';
 import type { ContentPipelinePost, FbPage, GroupRow } from '@/lib/types';
+import { PostPublishPreview } from '@/components/PostPublishPreview';
 
 type PipelinePayload = {
   posts?: ContentPipelinePost[];
@@ -172,18 +173,6 @@ export function MarketingPipelinePanel({
   }, []);
 
   useEffect(() => {
-    if (!initialGroups.length && !initialPages.length) return;
-    applyTargetRows(
-      initialGroups.filter((item) => item?.id),
-      initialPages.filter((item) => item?.id),
-      setGroups,
-      setPages,
-      setSelectedGroups,
-      setSelectedPages,
-    );
-  }, [initialGroups, initialPages]);
-
-  useEffect(() => {
     void loadTargets();
   }, []);
 
@@ -241,40 +230,21 @@ export function MarketingPipelinePanel({
     let pageRows: FbPage[] = [];
 
     try {
-      const [groupResult, pageResult] = await Promise.allSettled([
-        api('/api/groups'),
-        api('/api/pages', { timeoutMs: 30000 }),
-      ]);
-
-      if (groupResult.status === 'fulfilled') {
-        const groupRes = groupResult.value;
-        const groupPayload = await readPayload(groupRes);
-        if (!groupRes.ok || groupPayload.auth_required) {
-          const msg = apiErrorMessage(groupRes, groupPayload);
-          if (msg) errors.push(`Nhóm: ${msg}`);
-        } else {
-          groupRows = safeList<GroupRow>(groupPayload).filter((item) => item?.id);
-        }
+      const res = await api('/api/channels/publish-targets', { timeoutMs: 30000 });
+      const payload = await readPayload(res);
+      let storageLabel = '';
+      if (!res.ok || payload.auth_required) {
+        const msg = apiErrorMessage(res, payload);
+        errors.push(msg || 'Không tải được nhóm/Page từ DB.');
+      } else if (payload.ok === false) {
+        errors.push(String(payload.error || 'Không tải được nhóm/Page từ DB.'));
       } else {
-        const aborted = groupResult.reason instanceof DOMException && groupResult.reason.name === 'AbortError';
-        errors.push(aborted ? 'Nhóm: backend không phản hồi (timeout).' : 'Nhóm: lỗi kết nối.');
-      }
-
-      if (pageResult.status === 'fulfilled') {
-        const pageRes = pageResult.value;
-        const pagePayload = await readPayload(pageRes);
-        if (!pageRes.ok || pagePayload.auth_required) {
-          const msg = apiErrorMessage(pageRes, pagePayload);
-          if (msg) errors.push(`Page: ${msg}`);
-        } else {
-          pageRows = safeList<FbPage>(pagePayload).filter((item) => item?.id);
-          if (!pageRows.length && !Array.isArray(pagePayload) && pagePayload?.error) {
-            errors.push(`Page: ${pagePayload.error}`);
-          }
+        groupRows = safeList<GroupRow>(payload.groups).filter((item) => item?.id);
+        pageRows = safeList<FbPage>(payload.pages).filter((item) => item?.id);
+        storageLabel = payload.storage === 'supabase' ? 'Supabase' : 'local';
+        if (payload.storage === 'local' && !groupRows.length && !pageRows.length) {
+          errors.push('Chưa có kênh trong DB. Vào Quản lý nhóm để thêm nhóm/Page.');
         }
-      } else {
-        const aborted = pageResult.reason instanceof DOMException && pageResult.reason.name === 'AbortError';
-        errors.push(aborted ? 'Page: backend không phản hồi (timeout).' : 'Page: lỗi kết nối.');
       }
 
       if (groupRows.length || pageRows.length) {
@@ -283,7 +253,7 @@ export function MarketingPipelinePanel({
           groupRows.length ? `${groupRows.length} nhóm` : '',
           pageRows.length ? `${pageRows.length} Page` : '',
         ].filter(Boolean);
-        setLocalStatus(parts.length ? `Đã tải ${parts.join(', ')}.` : '');
+        setLocalStatus(parts.length && storageLabel ? `Đã tải ${parts.join(', ')} từ ${storageLabel}.` : parts.length ? `Đã tải ${parts.join(', ')}.` : '');
       } else if (initialGroups.length || initialPages.length) {
         applyTargetRows(
           initialGroups.filter((item) => item?.id),
@@ -293,17 +263,29 @@ export function MarketingPipelinePanel({
           setSelectedGroups,
           setSelectedPages,
         );
+      } else {
+        setGroups([]);
+        setPages([]);
       }
 
       if (errors.length) {
         setLocalStatus(errors.join(' '));
       }
-    } catch {
-      if (!initialGroups.length && !initialPages.length) {
+    } catch (error) {
+      if (initialGroups.length || initialPages.length) {
+        applyTargetRows(
+          initialGroups.filter((item) => item?.id),
+          initialPages.filter((item) => item?.id),
+          setGroups,
+          setPages,
+          setSelectedGroups,
+          setSelectedPages,
+        );
+      } else {
         setGroups([]);
         setPages([]);
       }
-      setLocalStatus('Lỗi kết nối khi tải danh sách nhóm/Page.');
+      setLocalStatus(formatFetchError(error, 'Lỗi kết nối khi tải nhóm/Page từ DB.'));
     } finally {
       setLoadingTargets(false);
     }
@@ -361,6 +343,7 @@ export function MarketingPipelinePanel({
           content: base,
           targets: selectedTargets.map((target) => ({ id: target.id, name: target.name, type: target.type })),
         }),
+        timeoutMs: AI_TIMEOUT_MS,
       });
       const payload = await readPayload(res);
       if (!res.ok || !payload.ok) throw new Error(payload.error || 'AI chưa tạo được biến thể');
@@ -405,6 +388,7 @@ export function MarketingPipelinePanel({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        timeoutMs: PUBLISH_TIMEOUT_MS,
       });
       const payload = await readPayload(res);
 
@@ -439,8 +423,8 @@ export function MarketingPipelinePanel({
       } else {
         setLocalStatus(payload.error || 'Lỗi không xác định từ server.');
       }
-    } catch (err: any) {
-      setLocalStatus(`Lỗi kết nối: ${err?.message || 'Không gọi được backend'}.`);
+    } catch (err: unknown) {
+      setLocalStatus(`Lỗi kết nối: ${formatFetchError(err)}`);
     } finally {
       setPublishing(false);
       void onReload();
@@ -480,14 +464,15 @@ export function MarketingPipelinePanel({
           targets: selectedTargets.map((t) => ({ type: t.type, id: t.id, name: t.name })),
           status: 'scheduled',
         }),
+        timeoutMs: 60000,
       });
       const payload = await readPayload(res);
       if (!res.ok || !payload.ok) throw new Error(payload.error || 'Không lưu được lịch đăng');
       appendHistory({ title, content, mediaUrl, mediaUrls, hashtags, scheduledAt, targets: selectedTargets, status: 'Đã lưu lịch' });
       setLocalStatus('Đã lưu lịch đăng lên backend. Cron/worker có thể gọi /api/content-pipeline/scheduled/run để tự đăng khi tới giờ.');
       void onReload();
-    } catch (err: any) {
-      setLocalStatus(`Lỗi đặt lịch: ${err?.message || 'Không gọi được backend'}.`);
+    } catch (err: unknown) {
+      setLocalStatus(`Lỗi đặt lịch: ${formatFetchError(err)}`);
     } finally {
       setPublishing(false);
     }
@@ -505,7 +490,7 @@ export function MarketingPipelinePanel({
     try {
       const form = new FormData();
       selected.forEach((file) => form.append('media', file));
-      const res = await api('/api/uploads/post-media', { method: 'POST', body: form });
+      const res = await api('/api/uploads/post-media', { method: 'POST', body: form, timeoutMs: UPLOAD_TIMEOUT_MS });
       const payload = await readPayload(res);
       if (!res.ok || !payload.ok || !Array.isArray(payload.media)) throw new Error(payload.error || 'Không upload được ảnh/video');
       const uploaded: PostMediaItem[] = payload.media.map((item: PostMediaItem) => ({
@@ -515,8 +500,8 @@ export function MarketingPipelinePanel({
       }));
       setPostMedia((prev) => [...prev, ...uploaded].slice(0, 10));
       setLocalStatus('Đã upload media. Bấm Đăng ngay để đăng ảnh/video thật lên Facebook.');
-    } catch (err: any) {
-      setLocalStatus(`Lỗi upload ảnh/video: ${err?.message || 'Không gọi được backend'}.`);
+    } catch (err: unknown) {
+      setLocalStatus(`Lỗi upload ảnh/video: ${formatFetchError(err)}`);
     } finally {
       setUploadingImage(false);
     }
@@ -546,6 +531,11 @@ export function MarketingPipelinePanel({
   }
 
   const targetCount = selectedTargets.length;
+  const previewAuthor = selectedTargets[0]?.name || 'Seeding Fsolution';
+  const previewHint = selectedTargets[0]
+    ? (selectedTargets[0].type === 'page' ? 'Facebook Page' : 'Facebook Group')
+    : 'Facebook';
+
   return (
     <section className="module-panel marketing-panel seeding-studio">
       <div className="module-head">
@@ -570,6 +560,8 @@ export function MarketingPipelinePanel({
         <div className="seeding-compose-card">
           <div className="seeding-section-title">📄 Bài viết chuẩn</div>
 
+          <div className="seeding-compose-split">
+            <div className="seeding-compose-form">
           <label className="seeding-field">
             <span>Tiêu đề bài viết</span>
             <input
@@ -678,6 +670,21 @@ export function MarketingPipelinePanel({
               ))}
             </div>
           ) : null}
+            </div>
+
+            <aside className="seeding-compose-preview">
+              <PostPublishPreview
+                authorName={previewAuthor}
+                authorHint={previewHint}
+                title={title}
+                content={content}
+                hashtags={hashtags}
+                mediaUrl={mediaUrl}
+                postMedia={postMedia}
+                scheduledAt={scheduledAt}
+              />
+            </aside>
+          </div>
         </div>
 
         <aside className="seeding-target-card">
@@ -724,7 +731,7 @@ export function MarketingPipelinePanel({
             ) : null}
             {!loadingTargets && !groups.length && !pages.length ? (
               <div className="seeding-empty-target">
-                Chưa có nhóm/Page. Vào Quản lý nhóm để thêm nhóm hoặc bấm Tải nhóm/Page.
+                Chưa có nhóm/Page trong DB. Vào mục <b>Kênh</b> để thêm nhóm/Page, rồi bấm Tải nhóm/Page.
               </div>
             ) : null}
           </div>

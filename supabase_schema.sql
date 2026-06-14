@@ -59,6 +59,29 @@ create table if not exists public.managed_channels (
     updated_at   timestamptz not null default now()
 );
 
+create table if not exists public.content_scripts (
+    id                      text primary key,
+    title                   text not null default '',
+    platform                text not null default 'TikTok',
+    status                  text not null default 'draft',
+    writer                  text not null default '',
+    script_date             text not null default '',
+    blocks                  jsonb not null default '[]'::jsonb,
+    created_by_staff_id     text,
+    created_by_staff_name   text,
+    created_at              timestamptz not null default now(),
+    updated_at              timestamptz not null default now(),
+    constraint content_scripts_status_check
+        check (status in ('draft', 'pending', 'approved')),
+    constraint content_scripts_blocks_array_check
+        check (jsonb_typeof(blocks) = 'array')
+);
+
+create index if not exists content_scripts_status_idx
+    on public.content_scripts (status);
+create index if not exists content_scripts_updated_at_idx
+    on public.content_scripts (updated_at desc);
+
 create table if not exists public.seen_posts (
     post_id       text primary key,
     permalink_url text,
@@ -71,11 +94,13 @@ create table if not exists public.seen_posts (
 
 -- Khi đã có bảng seen_posts từ trước, chạy các ALTER bên dưới
 -- để bổ sung cột metadata (idempotent):
+alter table public.seen_posts add column if not exists post_id       text;
 alter table public.seen_posts add column if not exists permalink_url text;
 alter table public.seen_posts add column if not exists group_id      text;
 alter table public.seen_posts add column if not exists author_name   text;
 alter table public.seen_posts add column if not exists message       text;
 alter table public.seen_posts add column if not exists created_time  timestamptz;
+alter table public.seen_posts add column if not exists seen_at       timestamptz default now();
 
 create index if not exists seen_posts_created_time_idx
     on public.seen_posts (created_time desc);
@@ -113,6 +138,35 @@ create table if not exists public.leads (
     updated_at                 timestamptz not null default now()
 );
 
+-- Bổ sung cột nếu bảng leads đã tồn tại từ trước (idempotent):
+alter table public.leads add column if not exists lead_key                  text;
+alter table public.leads add column if not exists platform                  text;
+alter table public.leads add column if not exists lead_source               text;
+alter table public.leads add column if not exists source_id                 text;
+alter table public.leads add column if not exists post_id                   text;
+alter table public.leads add column if not exists group_id                  text;
+alter table public.leads add column if not exists post_url                  text;
+alter table public.leads add column if not exists comment_id                text;
+alter table public.leads add column if not exists comment_url               text;
+alter table public.leads add column if not exists customer_name             text;
+alter table public.leads add column if not exists customer_phone              text;
+alter table public.leads add column if not exists phones                    jsonb default '[]'::jsonb;
+alter table public.leads add column if not exists customer_need               text;
+alter table public.leads add column if not exists intent                      text;
+alter table public.leads add column if not exists product_or_service          text;
+alter table public.leads add column if not exists location                    text;
+alter table public.leads add column if not exists budget                      text;
+alter table public.leads add column if not exists urgency                     text;
+alter table public.leads add column if not exists contact_status              text;
+alter table public.leads add column if not exists confidence                  numeric;
+alter table public.leads add column if not exists evidence                    text;
+alter table public.leads add column if not exists raw_lead                    jsonb default '{}'::jsonb;
+alter table public.leads add column if not exists created_by_staff_id         text;
+alter table public.leads add column if not exists created_by_staff_name       text;
+alter table public.leads add column if not exists created_by_staff_username   text;
+alter table public.leads add column if not exists created_at                  timestamptz default now();
+alter table public.leads add column if not exists updated_at                  timestamptz default now();
+
 create index if not exists leads_post_id_idx
     on public.leads (post_id);
 create index if not exists leads_customer_phone_idx
@@ -137,5 +191,6 @@ alter table public.managed_channels  disable row level security;
 alter table public.seen_posts        disable row level security;
 alter table public.leads             disable row level security;
 alter table public.classifications   disable row level security;
+alter table public.content_scripts   disable row level security;
 
 select pg_notify('pgrst', 'reload schema');

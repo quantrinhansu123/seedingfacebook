@@ -1,10 +1,10 @@
 import {
   Columns3,
-  Cookie,
   History,
   Home,
   MessageSquareText,
   PenLine,
+  ScrollText,
   Target,
   Users,
   Waypoints,
@@ -18,8 +18,8 @@ export const CONSOLE_MODULE_ICONS: Record<ViewKey, LucideIcon> = {
   channels: Waypoints,
   comments: MessageSquareText,
   manage: Columns3,
-  cookies: Cookie,
   history: History,
   leads: Target,
+  scripts: ScrollText,
   marketing: PenLine,
 };

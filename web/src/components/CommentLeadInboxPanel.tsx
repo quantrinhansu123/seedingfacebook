@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { CommentAuthorHeading, CommentAuthorLink } from '@/components/CommentAuthorLink';
 import { api } from '@/lib/api';
-import type { StoredPostComment } from '@/lib/types';
+import { extractPhones, phonesForComment } from '@/lib/phone-utils';
+import type { ManagedChannel, StoredPostComment } from '@/lib/types';
 import './omni-inbox.css';
 
 type TabKey = 'inbox' | 'customers' | 'stats' | 'templates';
@@ -11,6 +12,13 @@ type ChannelFilter = 'all' | 'facebook' | 'tiktok' | 'instagram';
 type SourceKey = 'fb-page' | 'fb-group' | 'tiktok' | 'instagram';
 type TagKey = string;
 type WorkflowFilter = 'all' | 'open' | 'done' | 'starred';
+
+type NamedChannelOption = {
+  key: string;
+  label: string;
+  platform?: string;
+  count: number;
+};
 
 type CommentPayload = {
   ok?: boolean;
@@ -188,6 +196,48 @@ function matchesChannelFilter(row: StoredPostComment, filter: ChannelFilter) {
   return channelFilterKey(row) === filter;
 }
 
+function commentChannelKeys(row: StoredPostComment) {
+  const keys = new Set<string>();
+  const name = (row.channel_name || '').trim();
+  const groupId = (row.group_id || '').trim();
+  if (name) keys.add(name);
+  if (groupId && groupId !== name) keys.add(groupId);
+  return [...keys];
+}
+
+function rowMatchesManagedChannel(row: StoredPostComment, channel: ManagedChannel) {
+  const targetId = (channel.target_id || '').trim();
+  const channelName = (channel.channel_name || '').trim();
+  const groupId = (row.group_id || '').trim();
+  const postId = (row.post_id || '').trim();
+  const postUrl = (row.post_url || '').trim();
+  const link = (channel.link || '').trim();
+  if (targetId && (groupId === targetId || postId.includes(targetId))) return true;
+  if (channelName && commentChannelKeys(row).some((key) => key === channelName)) return true;
+  if (link && postUrl && postUrl.includes(link.replace(/^https?:\/\//, ''))) return true;
+  return false;
+}
+
+function matchesNamedChannelFilter(
+  row: StoredPostComment,
+  filterKey: string,
+  managedChannels: ManagedChannel[] = [],
+) {
+  if (!filterKey) return true;
+  if (commentChannelKeys(row).includes(filterKey)) return true;
+  const managed = managedChannels.find((item) => item.id === filterKey);
+  if (managed) return rowMatchesManagedChannel(row, managed);
+  return false;
+}
+
+function platformForNamedChannel(option: NamedChannelOption) {
+  const platform = (option.platform || '').toLowerCase();
+  if (platform.includes('tiktok')) return 'tiktok';
+  if (platform.includes('instagram')) return 'instagram';
+  if (platform) return 'facebook';
+  return 'all' as ChannelFilter;
+}
+
 function workflowId(row: StoredPostComment) {
   return row.comment_id || commentKey(row);
 }
@@ -225,7 +275,7 @@ function commentKey(row: StoredPostComment) {
 function commentTags(row: StoredPostComment, tagOptions: TagMeta[] = TAGS, manualTagIds: string[] = []): TagMeta[] {
   const text = normalizeText(commentText(row));
   const matched = new Set((row.matched_keywords || []).map((item) => normalizeText(item)));
-  const phones = row.phones || (row.phone ? [row.phone] : []);
+  const phones = row.phones?.length ? row.phones : (row.phone ? [row.phone] : []);
   const tags = new Set<TagKey>();
 
   if (phones.length || /gấp|ngay|inbox|ib|nhắn|zalo|sđt|sdt|phone/.test(text)) tags.add('hot');
@@ -288,9 +338,12 @@ function MaterialIcon({ name, filled, className, style }: { name: string; filled
 
 function channelName(row: StoredPostComment) {
   if (row.channel_name) return row.channel_name;
-  if (row.video_title) return row.video_title;
   if (row.group_id) return row.group_id;
   return row.post_id || '-';
+}
+
+function postTitle(row: StoredPostComment) {
+  return row.post_title || row.video_title || '-';
 }
 
 export function CommentLeadInboxPanel() {
@@ -298,6 +351,8 @@ export function CommentLeadInboxPanel() {
   const [comments, setComments] = useState<StoredPostComment[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [sourceFilter, setSourceFilter] = useState<ChannelFilter>('all');
+  const [namedChannelFilter, setNamedChannelFilter] = useState('');
+  const [managedChannels, setManagedChannels] = useState<ManagedChannel[]>([]);
   const [tagFilter, setTagFilter] = useState<TagKey | ''>('');
   const [workflowFilter, setWorkflowFilter] = useState<WorkflowFilter>('all');
   const [query, setQuery] = useState('');
@@ -315,6 +370,9 @@ export function CommentLeadInboxPanel() {
   const [tiktokBridgeVersion, setTiktokBridgeVersion] = useState('');
   const [processedIds, setProcessedIds] = useState<string[]>(() => readWorkflowStore().processed);
   const [starredIds, setStarredIds] = useState<string[]>(() => readWorkflowStore().starred);
+  const [phoneInput, setPhoneInput] = useState('');
+  const [phoneBusy, setPhoneBusy] = useState(false);
+  const [phoneHint, setPhoneHint] = useState('');
 
   const processedSet = useMemo(() => new Set(processedIds), [processedIds]);
   const starredSet = useMemo(() => new Set(starredIds), [starredIds]);
@@ -429,6 +487,17 @@ export function CommentLeadInboxPanel() {
   useEffect(() => {
     void loadWorkflow();
     void loadTemplateConfig();
+    void (async () => {
+      try {
+        const r = await api('/api/channels');
+        const data = await r.json().catch(() => ({}));
+        if (data.ok && Array.isArray(data.channels)) {
+          setManagedChannels(data.channels);
+        }
+      } catch {
+        /* giữ danh sách rỗng */
+      }
+    })();
   }, [loadWorkflow]);
 
   useEffect(() => {
@@ -452,10 +521,6 @@ export function CommentLeadInboxPanel() {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(MANUAL_TAG_STORAGE_KEY, JSON.stringify(manualTagsByComment));
   }, [manualTagsByComment]);
-
-  useEffect(() => {
-    setReplyStatus('');
-  }, [selectedId]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -501,21 +566,38 @@ export function CommentLeadInboxPanel() {
   const filtered = useMemo(() => {
     const kw = normalizeText(query);
     return comments.filter((row) => {
-      const key = commentKey(row);
       if (!matchesChannelFilter(row, sourceFilter)) return false;
+      if (!matchesNamedChannelFilter(row, namedChannelFilter, managedChannels)) return false;
       if (workflowFilter === 'open' && isRowProcessed(row, processedSet)) return false;
       if (workflowFilter === 'done' && !isRowProcessed(row, processedSet)) return false;
       if (workflowFilter === 'starred' && !isRowStarred(row, starredSet)) return false;
       const tags = tagsForRow(row);
       if (tagFilter && !tags.some((tag) => tag.key === tagFilter)) return false;
       if (!kw) return true;
-      return [row.author_name, row.message, row.post_id, row.channel_name, row.video_title, row.phone, ...(row.phones || [])]
+      return [row.author_name, row.message, row.post_id, row.post_title, row.channel_name, row.video_title, row.phone, ...(row.phones || [])]
         .filter(Boolean)
         .some((value) => normalizeText(String(value)).includes(kw));
     });
-  }, [comments, query, sourceFilter, tagFilter, workflowFilter, processedSet, starredSet, tagsForRow]);
+  }, [comments, query, sourceFilter, namedChannelFilter, managedChannels, tagFilter, workflowFilter, processedSet, starredSet, tagsForRow]);
 
   const selected = filtered.find((row) => commentKey(row) === selectedId) || filtered[0] || null;
+
+  useEffect(() => {
+    setReplyStatus('');
+    setPhoneHint('');
+    if (!selected) {
+      setPhoneInput('');
+      return;
+    }
+    setPhoneInput(phonesForComment(selected).join(', '));
+  }, [selectedId, selected?.comment_id, selected?.phone, selected?.phones?.join('|')]);
+
+  const patchCommentPhone = (commentId: string, patch: Pick<StoredPostComment, 'phone' | 'phones' | 'phones_auto' | 'phones_manual'>) => {
+    if (!commentId) return;
+    setComments((rows) => rows.map((row) => (
+      String(row.comment_id || '') === commentId ? { ...row, ...patch } : row
+    )));
+  };
 
   const workflowCounts = useMemo(() => {
     let done = 0;
@@ -530,10 +612,52 @@ export function CommentLeadInboxPanel() {
   const channelCounts = useMemo(() => {
     const counts: Record<ChannelFilter, number> = { all: comments.length, facebook: 0, tiktok: 0, instagram: 0 };
     comments.forEach((row) => {
+      if (namedChannelFilter && !matchesNamedChannelFilter(row, namedChannelFilter, managedChannels)) return;
       counts[channelFilterKey(row)] += 1;
     });
     return counts;
-  }, [comments]);
+  }, [comments, namedChannelFilter, managedChannels]);
+
+  const namedChannelOptions = useMemo(() => {
+    const map = new Map<string, NamedChannelOption>();
+
+    const upsert = (key: string, label: string, platform?: string) => {
+      const cleanKey = key.trim();
+      const cleanLabel = label.trim();
+      if (!cleanKey) return;
+      const existing = map.get(cleanKey);
+      if (existing) {
+        if (!existing.platform && platform) existing.platform = platform;
+        return;
+      }
+      map.set(cleanKey, { key: cleanKey, label: cleanLabel || cleanKey, platform, count: 0 });
+    };
+
+    managedChannels.forEach((item) => {
+      if (item.id) upsert(String(item.id), item.channel_name || item.target_id || String(item.id), item.platform);
+      commentChannelKeys({ channel_name: item.channel_name, group_id: item.target_id } as StoredPostComment).forEach((key) => {
+        upsert(key, item.channel_name || key, item.platform);
+      });
+    });
+
+    comments.forEach((row) => {
+      if (!matchesChannelFilter(row, sourceFilter)) return;
+      commentChannelKeys(row).forEach((key) => {
+        upsert(key, key, row.source);
+      });
+    });
+
+    map.forEach((option) => {
+      option.count = comments.filter((row) => {
+        if (!matchesChannelFilter(row, sourceFilter)) return false;
+        return matchesNamedChannelFilter(row, option.key, managedChannels) || commentChannelKeys(row).includes(option.key);
+      }).length;
+    });
+
+    return [...map.values()]
+      .filter((item) => item.count > 0 || managedChannels.some((ch) => ch.id === item.key || ch.channel_name === item.label))
+      .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, 'vi'));
+  }, [comments, managedChannels, sourceFilter]);
 
   const tagCounts = useMemo(() => {
     const counts: Record<TagKey, number> = {};
@@ -546,14 +670,14 @@ export function CommentLeadInboxPanel() {
     return counts;
   }, [comments, tagOptions, tagsForRow]);
 
-  const customers = useMemo(() => comments
+  const customers = useMemo(() => filtered
     .map((row) => {
       const tags = tagsForRow(row);
-      const phones = row.phones || (row.phone ? [row.phone] : []);
+      const phones = row.phones?.length ? row.phones : (row.phone ? [row.phone] : []);
       const isLead = phones.length || tags.some((tag) => ['hot', 'closed', 'need', 'price', 'vip'].includes(tag.key));
       return isLead ? { row, tags, phones } : null;
     })
-    .filter(Boolean) as { row: StoredPostComment; tags: TagMeta[]; phones: string[] }[], [comments, tagsForRow]);
+    .filter(Boolean) as { row: StoredPostComment; tags: TagMeta[]; phones: string[] }[], [filtered, tagsForRow]);
 
   const statsDashboard = useMemo(() => {
     const withPhone = customers.filter((item) => item.phones.length).length;
@@ -640,6 +764,50 @@ export function CommentLeadInboxPanel() {
     } catch {
       setStatus('❌ Lỗi kết nối khi đồng bộ lead');
     }
+  };
+
+  const saveCommentPhone = async (row: StoredPostComment, phones: string[]) => {
+    const commentId = String(row.comment_id || '').trim();
+    if (!commentId) {
+      setPhoneHint('Comment chưa có ID, không lưu được SĐT');
+      return;
+    }
+    setPhoneBusy(true);
+    setPhoneHint('Đang lưu SĐT...');
+    try {
+      const r = await api('/api/post-comments/phone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ comment_id: commentId, phones }),
+      });
+      const data = await r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
+      if (!data.ok) {
+        setPhoneHint(data.error || 'Không lưu được SĐT');
+        return;
+      }
+      patchCommentPhone(commentId, {
+        phone: data.phone || '',
+        phones: data.phones || [],
+        phones_auto: data.phones_auto || [],
+        phones_manual: data.phones_manual || [],
+      });
+      setPhoneInput((data.phones || []).join(', '));
+      setPhoneHint(phones.length ? '✅ Đã lưu SĐT' : '✅ Đã xoá SĐT');
+    } catch {
+      setPhoneHint('❌ Lỗi kết nối khi lưu SĐT');
+    } finally {
+      setPhoneBusy(false);
+    }
+  };
+
+  const extractCommentPhone = async (row: StoredPostComment) => {
+    const fromText = extractPhones(commentText(row));
+    if (!fromText.length) {
+      setPhoneHint('Không tìm thấy SĐT trong nội dung comment');
+      return;
+    }
+    setPhoneInput(fromText.join(', '));
+    await saveCommentPhone(row, fromText);
   };
 
   const slashMatch = replyText.match(/(^|\s)\/([^\s/]*)$/);
@@ -1076,9 +1244,17 @@ export function CommentLeadInboxPanel() {
   };
 
   const exportCustomers = () => {
-    const rows = [['Tên', 'Kênh', 'SĐT', 'Nội dung', 'Link']];
+    const rows = [['Tên', 'Kênh', 'ID bài viết', 'Tiêu đề bài viết', 'SĐT', 'Nội dung', 'Link']];
     customers.forEach(({ row, phones }) => {
-      rows.push([row.author_name || 'Ẩn danh', sourceLabel(row).label, phones.join(', '), row.message || '', row.comment_url || row.post_url || '']);
+      rows.push([
+        row.author_name || 'Ẩn danh',
+        sourceLabel(row).label,
+        row.post_id || '',
+        postTitle(row) === '-' ? '' : postTitle(row),
+        phones.join(', '),
+        row.message || '',
+        row.comment_url || row.post_url || '',
+      ]);
     });
     const csv = rows.map((line) => line.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
     const link = document.createElement('a');
@@ -1104,6 +1280,19 @@ export function CommentLeadInboxPanel() {
           </nav>
         </div>
         <div className="omni-topbar-right">
+          <select
+            className="omni-channel-select"
+            value={namedChannelFilter}
+            onChange={(e) => setNamedChannelFilter(e.target.value)}
+            aria-label="Lọc theo kênh"
+          >
+            <option value="">Tất cả kênh ({comments.length})</option>
+            {namedChannelOptions.map((item) => (
+              <option key={item.key} value={item.key}>
+                {item.label} ({item.count})
+              </option>
+            ))}
+          </select>
           <div className="omni-search">
             <MaterialIcon name="search" />
             <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Tìm lead, SĐT, nội dung..." type="text" />
@@ -1123,19 +1312,54 @@ export function CommentLeadInboxPanel() {
               <p>Bộ lọc đang dùng</p>
             </div>
             <div className="omni-sidebar-scroll">
-              <p className="omni-section-label">Kênh</p>
+              <p className="omni-section-label">Nền tảng</p>
               {CHANNEL_FILTERS.map((channel) => (
                 <button
                   key={channel.key}
                   type="button"
                   className={`omni-filter-btn ${sourceFilter === channel.key ? 'active' : ''}`}
-                  onClick={() => setSourceFilter(channel.key)}
+                  onClick={() => {
+                    setSourceFilter(channel.key);
+                    if (namedChannelFilter) {
+                      const selected = namedChannelOptions.find((item) => item.key === namedChannelFilter);
+                      const platform = selected ? platformForNamedChannel(selected) : 'all';
+                      if (channel.key !== 'all' && platform !== 'all' && platform !== channel.key) {
+                        setNamedChannelFilter('');
+                      }
+                    }
+                  }}
                 >
                   <MaterialIcon name={channel.materialIcon} />
                   <span>{channel.label}</span>
                   <b>{channelCounts[channel.key]}</b>
                 </button>
               ))}
+
+              <p className="omni-section-label" style={{ marginTop: 24 }}>Kênh theo dõi</p>
+              <button
+                type="button"
+                className={`omni-filter-btn ${!namedChannelFilter ? 'active' : ''}`}
+                onClick={() => setNamedChannelFilter('')}
+              >
+                <MaterialIcon name="hub" />
+                <span>Tất cả kênh</span>
+                <b>{sourceFilter === 'all' ? comments.length : channelCounts[sourceFilter]}</b>
+              </button>
+              {namedChannelOptions.length ? namedChannelOptions.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`omni-filter-btn omni-filter-btn-channel ${namedChannelFilter === item.key ? 'active' : ''}`}
+                  onClick={() => setNamedChannelFilter((current) => (current === item.key ? '' : item.key))}
+                  title={item.label}
+                >
+                  <MaterialIcon name={platformForNamedChannel(item) === 'tiktok' ? 'movie' : 'groups'} />
+                  <span>{item.label}</span>
+                  <b>{item.count}</b>
+                </button>
+              )) : (
+                <p className="omni-filter-empty">Chưa có kênh. Thêm tại Quản lý nhóm.</p>
+              )}
 
               <p className="omni-section-label" style={{ marginTop: 24 }}>Tags</p>
               {tagOptions.map((tag) => {
@@ -1210,7 +1434,17 @@ export function CommentLeadInboxPanel() {
                         <MaterialIcon name={meta.materialIcon} style={{ fontSize: 10 }} />
                         {meta.label}
                       </span>
+                      <div className="omni-stream-post">
+                        <span className="mono" title={row.post_id || ''}>{row.post_id || '-'}</span>
+                        <span className="omni-stream-post-title" title={postTitle(row)}>{postTitle(row)}</span>
+                      </div>
                       <p>{commentText(row) || '(Không có nội dung)'}</p>
+                      {phonesForComment(row).length ? (
+                        <div className="omni-stream-phone">
+                          <MaterialIcon name="call" style={{ fontSize: 12 }} />
+                          {phonesForComment(row).join(', ')}
+                        </div>
+                      ) : null}
                       <div className="omni-stream-item-foot">
                         {isStarred ? (
                           <span className="omni-status-chip vip">VIP</span>
@@ -1291,10 +1525,52 @@ export function CommentLeadInboxPanel() {
                       </div>
 
                       <div className="omni-meta-grid">
-                        <div><span>Post ID</span><b className="mono">{selected.post_id || '-'}</b></div>
+                        <div><span>ID bài viết</span><b className="mono">{selected.post_id || '-'}</b></div>
+                        <div className="omni-meta-wide"><span>Tiêu đề bài viết</span><b title={postTitle(selected)}>{postTitle(selected)}</b></div>
                         <div><span>Comment ID</span><b className="mono">{selected.comment_id || '-'}</b></div>
-                        <div><span>SĐT</span><b>{(selected.phones || (selected.phone ? [selected.phone] : [])).join(', ') || '-- Chưa có --'}</b></div>
                         <div><span>Thời gian</span><b>{commentTime(selected)}</b></div>
+                      </div>
+
+                      <div className="omni-phone-panel">
+                        <label htmlFor="omni-phone-input">SĐT</label>
+                        <div className="omni-phone-input-row">
+                          <input
+                            id="omni-phone-input"
+                            value={phoneInput}
+                            onChange={(e) => setPhoneInput(e.target.value)}
+                            placeholder="Nhập SĐT hoặc lấy từ nội dung CMT..."
+                            disabled={phoneBusy}
+                          />
+                          <button
+                            type="button"
+                            className="omni-btn-ghost"
+                            disabled={phoneBusy}
+                            onClick={() => void extractCommentPhone(selected)}
+                          >
+                            Lấy từ CMT
+                          </button>
+                          <button
+                            type="button"
+                            className="omni-btn-primary"
+                            disabled={phoneBusy}
+                            onClick={() => {
+                              const phones = phoneInput
+                                .split(/[,;\n|/]+/)
+                                .map((item) => item.trim())
+                                .filter(Boolean);
+                              void saveCommentPhone(selected, phones);
+                            }}
+                          >
+                            {phoneBusy ? 'Đang lưu...' : 'Lưu SĐT'}
+                          </button>
+                        </div>
+                        {selected.phones_auto?.length ? (
+                          <p className="omni-phone-note">
+                            Trong nội dung: {selected.phones_auto.join(', ')}
+                            {selected.phones_manual?.length ? ' · Đã chỉnh tay' : ''}
+                          </p>
+                        ) : null}
+                        {phoneHint ? <p className="omni-phone-hint">{phoneHint}</p> : null}
                       </div>
 
                       <div className="omni-action-row">
@@ -1382,6 +1658,8 @@ export function CommentLeadInboxPanel() {
                 <tr>
                   <th>Khách hàng</th>
                   <th>Kênh</th>
+                  <th>ID bài viết</th>
+                  <th>Tiêu đề bài viết</th>
                   <th>SĐT</th>
                   <th>Tags</th>
                   <th>Nội dung</th>
@@ -1393,13 +1671,15 @@ export function CommentLeadInboxPanel() {
                   <tr key={row.comment_id || `${row.post_id}-${row.author_name}`}>
                     <td><CommentAuthorLink row={row} /><br /><small>{channelName(row)}</small></td>
                     <td>{sourceLabel(row).label}</td>
+                    <td className="mono omni-post-id-cell" title={row.post_id || ''}>{row.post_id || '-'}</td>
+                    <td className="omni-post-title-cell" title={postTitle(row)}>{postTitle(row)}</td>
                     <td>{phones.join(', ') || '-'}</td>
                     <td>{tags.map((tag) => tag.label).join(', ') || '-'}</td>
                     <td>{row.message || '-'}</td>
                     <td>{(row.comment_url || row.post_url) ? <a href={row.comment_url || row.post_url} target="_blank" rel="noreferrer">Mở</a> : '-'}</td>
                   </tr>
                 )) : (
-                  <tr><td colSpan={6} className="omni-empty">Chưa có khách hàng/lead từ comment.</td></tr>
+                  <tr><td colSpan={8} className="omni-empty">Chưa có khách hàng/lead từ comment.</td></tr>
                 )}
               </tbody>
             </table>

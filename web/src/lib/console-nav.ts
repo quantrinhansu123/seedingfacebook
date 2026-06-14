@@ -24,8 +24,8 @@ export const CONSOLE_NAV_ITEMS: ConsoleNavItem[] = [
   { key: 'channels', label: 'Quản lý nhóm', shortLabel: 'Kênh', tone: 'indigo' },
   { key: 'comments', label: 'Bình luận', shortLabel: 'Bình luận', tone: 'cyan' },
   { key: 'manage', label: 'Quản lý', shortLabel: 'Quản lý', tone: 'sky' },
-  { key: 'cookies', label: 'Cooki', shortLabel: 'Cookie', tone: 'amber' },
   { key: 'history', label: 'Lịch thử thao tác', shortLabel: 'Lịch sử', tone: 'slate' },
   { key: 'leads', label: 'Lead', shortLabel: 'Lead', tone: 'emerald' },
+  { key: 'scripts', label: 'Kịch bản', shortLabel: 'Kịch bản', tone: 'violet' },
   { key: 'marketing', label: 'Bài viết', shortLabel: 'Bài viết', tone: 'rose' },
 ];

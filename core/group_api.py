@@ -1,6 +1,8 @@
 import os
 import json
+import re
 import requests
+from requests.exceptions import RequestException
 from typing import Optional, List, Dict
 from urllib.parse import urlparse
 from core.token_gen import FacebookTokenGenerator
@@ -73,12 +75,27 @@ def refresh_token(cookie: str = None, token_file: str = None) -> Optional[str]:
     return FacebookTokenGenerator(FB_CLIENT_ID, cookie, token_file).GetToken()
 
 
+def friendly_graph_error(exc: Exception) -> str:
+    raw = re.sub(r'access_token=[^&\s\'"]+', 'access_token=***', str(exc))
+    low = raw.lower()
+    if 'getaddrinfo failed' in low or 'failed to resolve' in low or 'nameresolution' in low:
+        return 'Không phân giải được graph.facebook.com (lỗi DNS/mạng). Kiểm tra internet, DNS hoặc tắt VPN/proxy rồi thử lại.'
+    if 'max retries exceeded' in low or 'connectionerror' in low or 'connection refused' in low:
+        return 'Không kết nối được Facebook Graph API. Kiểm tra mạng hoặc thử lại sau vài phút.'
+    if 'timed out' in low or 'timeout' in low:
+        return 'Facebook Graph API phản hồi quá chậm (timeout). Thử lại sau.'
+    if len(raw) > 280:
+        return raw[:280] + '...'
+    return raw
+
+
 class FacebookGroupAPI:
     def __init__(self, group_id: str, cookie: str = None, token_file: str = None):
         self.group_id = group_id
         self.cookie = load_cookie(cookie)
         self.token_file = token_file
         self.access_token = load_token(token_file) or refresh_token(self.cookie, token_file)
+        self.last_graph_error = ''
         _live_api_instances.append(self)
 
     def _sync_access_token(self, token: str) -> None:
@@ -101,14 +118,24 @@ class FacebookGroupAPI:
         return data.get('error', {}).get('code') == 190
 
     def _call(self, method: str, url: str, **kwargs) -> Optional[dict]:
+        self.last_graph_error = ''
         for attempt in range(2):
-            kwargs.setdefault('params', {})['access_token'] = self.access_token
-            resp = getattr(requests, method)(url, **kwargs)
-            data = resp.json()
+            try:
+                kwargs.setdefault('params', {})['access_token'] = self.access_token
+                kwargs.setdefault('timeout', 30)
+                resp = getattr(requests, method)(url, **kwargs)
+                data = resp.json()
+            except RequestException as exc:
+                self.last_graph_error = friendly_graph_error(exc)
+                return None
+            except ValueError:
+                self.last_graph_error = 'Facebook trả về dữ liệu không hợp lệ.'
+                return None
             if self._is_expired(data):
                 if attempt == 0 and self._refresh_access_token():
                     continue
                 print('Khong the refresh token - kiem tra lai cookie')
+                self.last_graph_error = 'Cookie/token Facebook hết hạn hoặc không hợp lệ.'
                 return None
             return data
         return None
@@ -360,97 +387,278 @@ class FacebookGroupAPI:
                 break
         return {'comments': comments[:limit], 'total_count': total_count or len(comments)}
 
+    def get_post_reactions(self, post_id: str, limit: int = 100, access_token: str = None) -> Optional[dict]:
+        reactions: List[Dict] = []
+        token = access_token or self.access_token
+        page_limit = min(max(limit, 1), 100)
+        params = {
+            'access_token': token,
+            'fields': 'id,name,type',
+            'limit': page_limit,
+            'summary': 'true',
+        }
+        target_ids = [post_id]
+        if '_' in str(post_id):
+            alt = _post_object_id(post_id)
+            if alt and alt not in target_ids:
+                target_ids.append(alt)
+
+        data = None
+        for target_id in target_ids:
+            resp = requests.get(f'{GRAPH_URL}/{target_id}/reactions', params=dict(params), timeout=30)
+            data = resp.json()
+            if data and not data.get('error'):
+                break
+        if data and self._is_expired(data) and not access_token:
+            new_token = refresh_token(self.cookie, self.token_file)
+            if new_token:
+                self.access_token = new_token
+                params['access_token'] = self.access_token
+                resp = requests.get(f'{GRAPH_URL}/{target_ids[0]}/reactions', params=dict(params), timeout=30)
+                data = resp.json()
+        if data is None or data.get('error'):
+            return None
+
+        total_count = ((data.get('summary') or {}).get('total_count') or 0)
+        while data and len(reactions) < limit:
+            for item in data.get('data') or []:
+                reactions.append(item)
+                if len(reactions) >= limit:
+                    break
+            next_url = ((data.get('paging') or {}).get('next') or '')
+            if not next_url or len(reactions) >= limit:
+                break
+            try:
+                resp = requests.get(next_url, timeout=30)
+                data = resp.json()
+                if 'error' in data:
+                    break
+            except Exception:
+                break
+        return {'reactions': reactions[:limit], 'total_count': total_count or len(reactions)}
+
+    def get_post_share_count(self, post_id: str, access_token: str = None) -> Optional[int]:
+        token = access_token or self.access_token
+        target_ids = [post_id]
+        if '_' in str(post_id):
+            alt = _post_object_id(post_id)
+            if alt and alt not in target_ids:
+                target_ids.append(alt)
+        for target_id in target_ids:
+            resp = requests.get(
+                f'{GRAPH_URL}/{target_id}',
+                params={'access_token': token, 'fields': 'shares'},
+                timeout=30,
+            )
+            data = resp.json()
+            if data and not data.get('error'):
+                shares = data.get('shares') or {}
+                return int(shares.get('count') or 0)
+        return None
+
     def resolve_slug(self, slug: str) -> Optional[dict]:
         data = self._call('get', f'{GRAPH_URL}/{slug}', params={'fields': 'id,name'})
         if data and 'id' in data:
             return data
         return _scrape_group_id(slug, self.cookie)
 
-    def check_membership(self, group_id: str) -> bool:
-        """Check if current user is a member of the group."""
-        # Try to get /member endpoint which requires membership
-        data = self._call('get', f'{GRAPH_URL}/{group_id}', params={'fields': 'id,name'})
-        if data is None or 'error' in data:
+    def _parse_membership_html(self, html: str, url: str = '') -> Optional[bool]:
+        import re
+        if not html:
+            return None
+        if '/login' in (url or '') or re.search(r'login_form|<title>Log in|Đăng nhập', html[:2000], re.I):
+            return None
+        member_patterns = (
+            r'"is_member"\s*:\s*true',
+            r'"viewerMembershipState"\s*:\s*"IS_MEMBER"',
+            r'"membership_state"\s*:\s*"MEMBER"',
+            r'viewer_membership_status["\']?\s*:\s*["\']member',
+            r'if_viewer_can_leave_group|leave_group_button|groups_leave',
+            r'Đã tham gia|\bJoined\b|rời nhóm|Rời Nhóm|Leave group|leave_group',
+        )
+        if any(re.search(pattern, html, re.I) for pattern in member_patterns):
+            return True
+        non_member_patterns = (
+            r'"is_member"\s*:\s*false',
+            r'"viewerMembershipState"\s*:\s*"(CAN_REQUEST|CAN_JOIN|NON_MEMBER)"',
+            r'action="(/a/group/join[^"]*)"',
+            r'name="join_group"|groups_join',
+        )
+        if any(re.search(pattern, html, re.I) for pattern in non_member_patterns):
             return False
-        # Also try feed access — if feed returns error, not a member
-        feed = self._call('get', f'{GRAPH_URL}/{group_id}/feed', params={'fields': 'id', 'limit': 1})
-        if feed is None or 'error' in feed:
+        if re.search(r'action="(/groups/[^"]*join[^"]*)"', html, re.I):
             return False
-        # For public groups, feed is accessible even without membership
-        # Use cookie-based check as fallback
-        return self._cookie_check_membership(group_id)
+        if re.search(r'Tham gia nhóm|Tham Gia Nhóm', html, re.I):
+            if not re.search(r'leave_group|rời nhóm|Đã tham gia', html, re.I):
+                return False
+        return None
 
-    def _cookie_check_membership(self, group_id: str) -> bool:
-        """Check membership via mbasic.facebook.com (cookie-based)."""
+    def _fetch_membership_via_cookie(self, group_id: str) -> Optional[bool]:
         import re
         cookie = load_cookie(self.cookie)
         if not cookie:
-            return True  # Can't check, assume member
-        try:
-            resp = requests.get(
-                f'https://mbasic.facebook.com/groups/{group_id}',
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
-                    'Accept': 'text/html',
-                    'Cookie': cookie,
-                },
-                timeout=15,
-                allow_redirects=True,
-            )
-            html = resp.text
-            # If redirected to login
-            if '/login' in resp.url or 'Đăng nhập' in html[:500]:
-                return True  # Can't determine, assume member
-            # Check for leave/member indicators
-            if re.search(r'leave_group|rời nhóm|Rời Nhóm|Đã tham gia', html, re.I):
-                return True
-            # Check for join button — means NOT a member
-            if re.search(r'join.*group|tham gia nhóm|Tham Gia Nhóm|/join/', html, re.I):
-                return False
-            return True  # Default assume member
-        except Exception:
+            return None
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+            ),
+            'Accept': 'text/html,application/xhtml+xml',
+            'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
+            'Cookie': cookie,
+        }
+        urls = [
+            f'https://www.facebook.com/groups/{group_id}',
+            f'https://m.facebook.com/groups/{group_id}',
+            f'https://mbasic.facebook.com/groups/{group_id}',
+        ]
+        saw_login = False
+        for url in urls:
+            try:
+                resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+                status = self._parse_membership_html(resp.text, resp.url)
+                if status is True:
+                    return True
+                if status is False:
+                    return False
+                if '/login' in resp.url:
+                    saw_login = True
+            except Exception:
+                continue
+        return None if saw_login else None
+
+    def _can_read_group_feed(self, group_id: str) -> bool:
+        feed = self._call('get', f'{GRAPH_URL}/{group_id}/feed', params={'fields': 'id', 'limit': 1})
+        if feed is None or feed.get('error'):
+            return False
+        return bool((feed.get('data') or []))
+
+    def check_membership(self, group_id: str) -> bool:
+        """Check if current user is a member of the group."""
+        cookie_status = self._fetch_membership_via_cookie(group_id)
+        if cookie_status is True:
             return True
+        if self._can_read_group_feed(group_id):
+            return True
+        if cookie_status is False:
+            return False
+        return False
+
+    def _try_submit_join(self, sess, cookie: str, html: str, page_url: str, referer: str) -> Optional[dict]:
+        import re
+        from urllib.parse import urljoin
+
+        if self._parse_membership_html(html, page_url) is True:
+            return {'ok': True, 'already_member': True, 'msg': 'Đã là thành viên'}
+
+        headers = {
+            'User-Agent': (
+                'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 '
+                '(KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
+            ),
+            'Cookie': cookie,
+            'Referer': referer,
+            'Accept': 'text/html',
+            'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
+        }
+
+        form_actions = re.findall(r'action="([^"]*join[^"]*)"', html, re.I)
+        for action in form_actions:
+            form_url = urljoin(page_url, action.replace('&amp;', '&'))
+            inputs = {k: v for k, v in re.findall(r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"', html)}
+            try:
+                resp = sess.post(
+                    form_url,
+                    data=inputs,
+                    headers={**headers, 'Content-Type': 'application/x-www-form-urlencoded'},
+                    timeout=15,
+                    allow_redirects=True,
+                )
+                if resp.status_code < 400:
+                    if self._parse_membership_html(resp.text, resp.url) is True:
+                        return {'ok': True, 'already_member': True, 'msg': 'Đã là thành viên'}
+                    return {'ok': True, 'msg': 'Đã gửi yêu cầu tham gia nhóm'}
+            except Exception:
+                continue
+
+        join_links = re.findall(r'href="([^"]*join[^"]*)"', html, re.I)
+        join_links += re.findall(r'"(https://[^"]*facebook\.com[^"]*join[^"]*)"', html, re.I)
+        for href in join_links:
+            if re.search(r'leave|cancel|unfollow', href, re.I):
+                continue
+            join_url = urljoin(page_url, href.replace('&amp;', '&'))
+            try:
+                resp = sess.get(join_url, headers=headers, timeout=15, allow_redirects=True)
+                if resp.status_code < 400:
+                    if self._parse_membership_html(resp.text, resp.url) is True:
+                        return {'ok': True, 'already_member': True, 'msg': 'Đã là thành viên'}
+                    return {'ok': True, 'msg': 'Đã gửi yêu cầu tham gia nhóm'}
+            except Exception:
+                continue
+        return None
 
     def join_group(self, group_id: str) -> dict:
         import re
         cookie = load_cookie(self.cookie)
         if not cookie:
-            return {'ok': False, 'error': 'Không có cookie'}
-        try:
-            sess = requests.Session()
-            r = sess.get(
-                f'https://mbasic.facebook.com/groups/{group_id}',
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
-                    'Accept': 'text/html',
-                    'Cookie': cookie,
-                },
-                timeout=15,
-            )
-            html = r.text
-            if re.search(r'leave_group|rời nhóm|Rời Nhóm', html, re.I):
-                return {'ok': True, 'already_member': True, 'msg': 'Đã là thành viên'}
-            m = re.search(r'action="(/groups/[^"]*join[^"]*)"', html, re.I) or \
-                re.search(r'action="(/a/group/join[^"]*)"', html, re.I)
-            if not m:
-                return {'ok': False, 'error': 'Nhóm riêng tư hoặc không tìm được nút tham gia'}
-            form_url = 'https://mbasic.facebook.com' + m.group(1).replace('&amp;', '&')
-            inputs = {k: v for k, v in re.findall(r'<input[^>]+name="([^"]+)"[^>]+value="([^"]*)"', html)}
-            r2 = sess.post(
-                form_url, data=inputs,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
-                    'Cookie': cookie,
-                    'Referer': f'https://mbasic.facebook.com/groups/{group_id}',
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                timeout=15,
-            )
-            if r2.status_code < 400:
-                return {'ok': True, 'msg': 'Đã gửi yêu cầu tham gia nhóm'}
-            return {'ok': False, 'error': f'Lỗi HTTP {r2.status_code}'}
-        except Exception as e:
-            return {'ok': False, 'error': str(e)}
+            return {'ok': False, 'error': 'Chưa có cookie Facebook. Vào mục Cookie → Lấy từ Chrome.'}
+
+        cookie_status = self._fetch_membership_via_cookie(group_id)
+        if cookie_status is True:
+            return {'ok': True, 'already_member': True, 'msg': 'Đã là thành viên'}
+
+        sess = requests.Session()
+        desktop_ua = (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        )
+        mobile_ua = (
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 '
+            '(KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
+        )
+        pages = [
+            (f'https://www.facebook.com/groups/{group_id}', desktop_ua),
+            (f'https://m.facebook.com/groups/{group_id}', mobile_ua),
+            (f'https://mbasic.facebook.com/groups/{group_id}', mobile_ua),
+        ]
+        saw_login = False
+        for page_url, user_agent in pages:
+            try:
+                resp = sess.get(
+                    page_url,
+                    headers={
+                        'User-Agent': user_agent,
+                        'Cookie': cookie,
+                        'Accept': 'text/html',
+                        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
+                    },
+                    timeout=15,
+                    allow_redirects=True,
+                )
+                html = resp.text
+                if '/login' in resp.url or re.search(r'login_form|Đăng nhập|Log in', html[:1500], re.I):
+                    saw_login = True
+                    continue
+                result = self._try_submit_join(sess, cookie, html, resp.url, page_url)
+                if result:
+                    return result
+            except Exception:
+                continue
+
+        if saw_login:
+            return {
+                'ok': False,
+                'error': 'Cookie Facebook hết hạn. Vào mục Cookie, lấy cookie mới từ Chrome rồi thử lại.',
+            }
+        return {
+            'ok': False,
+            'error': (
+                'Facebook không cho tự tham gia nhóm này qua hệ thống. '
+                'Bấm Mở FB → Tham gia/ Gửi yêu cầu thủ công. Nhóm kín cần admin duyệt.'
+            ),
+            'manual_required': True,
+            'group_url': f'https://www.facebook.com/groups/{group_id}',
+        }
 
 
 def _scrape_group_id(slug: str, cookie: str = None) -> Optional[dict]:

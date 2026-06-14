@@ -50,3 +50,28 @@ export function extractSlug(raw: string): string {
   }
   return raw.trim().replace(/[^a-zA-Z0-9._-]/g, '');
 }
+
+export function classifyFacebookFeedError(message: string): 'network' | 'auth' | 'other' {
+  const low = String(message || '').toLowerCase();
+  if (
+    low.includes('dns') ||
+    low.includes('mạng') ||
+    low.includes('graph.facebook.com') ||
+    low.includes('kết nối') ||
+    low.includes('timeout') ||
+    low.includes('getaddrinfo') ||
+    low.includes('failed to resolve')
+  ) {
+    return 'network';
+  }
+  if (
+    low.includes('cookie') ||
+    low.includes('token') ||
+    low.includes('hết hạn') ||
+    low.includes('xác thực') ||
+    low.includes('quyền')
+  ) {
+    return 'auth';
+  }
+  return 'other';
+}

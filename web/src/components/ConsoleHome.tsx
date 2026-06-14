@@ -9,7 +9,6 @@ const MODULE_DESCS: Partial<Record<ViewKey, string>> = {
   channels: 'Lưu nền tảng, kênh, page, video và nhóm.',
   comments: 'Inbox comment đa kênh, lọc tag và tách lead.',
   manage: 'Theo dõi bài viết, phân loại và vận hành.',
-  cookies: 'Quản lý phiên đăng nhập và cookie nhân sự.',
   history: 'Xem lịch sử comment và trạng thái thao tác.',
   leads: 'Theo dõi khách hàng tiềm năng và nhu cầu.',
   marketing: 'Soạn bài viết chuẩn, lên lịch và chọn nơi đăng.',

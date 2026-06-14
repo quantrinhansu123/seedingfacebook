@@ -13,9 +13,9 @@ import type {
   FbPost,
   Lead,
   ManagedChannel,
-  ReplySuggestion,
   StaffAccount,
 } from '@/lib/types';
+import { classifyFacebookFeedError } from '@/lib/utils';
 import './manage-dashboard.css';
 
 type JoinPrompt = { id: string; name: string };
@@ -51,7 +51,9 @@ export type ManageDashboardProps = {
   onDismissJoin: () => void;
   onJoinGroup: (id: string, name: string) => void;
   onForceAddGroup: (id: string, name: string) => void;
+  onRefreshMembership: (ids: string[]) => void;
   groupMembership: Record<string, boolean | null>;
+  membershipCheckingIds: string[];
   joiningGroupId: string;
   onSyncFacebookPages: () => void;
   channelBusy: boolean;
@@ -95,12 +97,10 @@ export type ManageDashboardProps = {
   classifications: Record<string, string>;
   pages: FbPage[];
   leads: Record<string, Lead[]>;
-  replySuggestions: Record<string, ReplySuggestion>;
   commentSummaries: Record<string, CommentSummary>;
-  onSuggestReply: (post: FbPost) => Promise<void>;
   onSummarizeComments: (post: FbPost) => Promise<string>;
   onExploreComments: (post: FbPost) => void;
-  onCommentSent: () => void | Promise<void>;
+  onCommentSent: (postId: string) => void | Promise<void>;
   onOpenLightbox: (url: string) => void;
   saleSetupProps: React.ComponentProps<typeof SaleSetupPanel>;
 };
@@ -128,7 +128,9 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
     onDismissJoin,
     onJoinGroup,
     onForceAddGroup,
+    onRefreshMembership,
     groupMembership,
+    membershipCheckingIds,
     joiningGroupId,
     onSyncFacebookPages,
     channelBusy,
@@ -172,9 +174,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
     classifications,
     pages,
     leads,
-    replySuggestions,
     commentSummaries,
-    onSuggestReply,
     onSummarizeComments,
     onExploreComments,
     onCommentSent,
@@ -187,8 +187,57 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
   const [errorDismissed, setErrorDismissed] = useState(false);
   const [tgOpen, setTgOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
+  const [selectedGroups, setSelectedGroups] = useState<Record<string, boolean>>({});
+
+  const selectedGroupIds = groups.filter((gid) => selectedGroups[gid]);
+  const checkingSet = new Set(membershipCheckingIds);
+
+  function toggleGroupSelected(gid: string, checked: boolean) {
+    setSelectedGroups((prev) => ({ ...prev, [gid]: checked }));
+  }
+
+  function toggleSelectAllGroups(checked: boolean) {
+    if (!checked) {
+      setSelectedGroups({});
+      return;
+    }
+    const next: Record<string, boolean> = {};
+    groups.forEach((gid) => {
+      next[gid] = true;
+    });
+    setSelectedGroups(next);
+  }
+
+  function checkSelectedMembership() {
+    const ids = selectedGroupIds.length ? selectedGroupIds : groups;
+    if (!ids.length) return;
+    onRefreshMembership(ids);
+  }
+
+  function membershipLabel(gid: string): string {
+    if (checkingSet.has(gid)) return 'Đang kiểm tra...';
+    const member = groupMembership[gid];
+    if (member === true) return 'Đã tham gia';
+    if (member === false) return 'Chưa tham gia';
+    return 'Chưa kiểm tra';
+  }
+
+  function membershipClass(gid: string): string {
+    if (checkingSet.has(gid)) return ' pending';
+    const member = groupMembership[gid];
+    if (member === true) return ' ok';
+    if (member === false) return ' warn';
+    return ' idle';
+  }
 
   const roleLabel = staffRole === 'admin' ? 'Administrator' : 'Nhân sự';
+  const feedErrorKind = classifyFacebookFeedError(feedError);
+  const feedErrorTitle =
+    feedErrorKind === 'network'
+      ? 'Không kết nối được Facebook Graph API'
+      : feedErrorKind === 'auth'
+        ? 'Xác thực Facebook không hợp lệ'
+        : 'Không tải được bài từ Facebook';
 
   return (
     <div className="manage-dashboard">
@@ -238,6 +287,38 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                     <span className="md-source-block-count">{groups.length}</span>
                   </div>
 
+                  {joinMsg && !joinPrompt ? (
+                    <div className={`md-join-feedback${joinMsg.startsWith('❌') ? ' error' : ''}`}>{joinMsg}</div>
+                  ) : null}
+
+                  <p className="md-join-hint">
+                    Nhóm kín thường không tự tham gia được qua hệ thống. Bấm <b>Mở FB</b> để gửi yêu cầu trên Facebook,
+                    sau đó tick nhóm và bấm <b>Kiểm tra lại</b>.
+                  </p>
+
+                  {groups.length ? (
+                    <div className="md-membership-toolbar">
+                      <label className="md-check-all">
+                        <input
+                          type="checkbox"
+                          checked={groups.length > 0 && selectedGroupIds.length === groups.length}
+                          onChange={(e) => toggleSelectAllGroups(e.target.checked)}
+                        />
+                        Chọn tất cả
+                      </label>
+                      <button
+                        type="button"
+                        className="md-ghost-btn"
+                        disabled={!groups.length || checkingSet.size > 0}
+                        onClick={checkSelectedMembership}
+                      >
+                        {checkingSet.size > 0
+                          ? 'Đang kiểm tra...'
+                          : `Kiểm tra lại${selectedGroupIds.length ? ` (${selectedGroupIds.length})` : ''}`}
+                      </button>
+                    </div>
+                  ) : null}
+
                   {joinPrompt ? (
                     <div className="md-pending-group">
                       <div>
@@ -254,6 +335,14 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                         >
                           {joinBusy ? 'Đang tham gia...' : 'Tự tham gia'}
                         </button>
+                        <a
+                          className="md-ghost-btn"
+                          href={`https://www.facebook.com/groups/${joinPrompt.id}`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          Mở FB
+                        </a>
                         <button type="button" className="md-ghost-btn" onClick={() => onForceAddGroup(joinPrompt.id, joinPrompt.name)}>
                           Theo dõi
                         </button>
@@ -268,27 +357,50 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                     {groups.length ? groups.map((gid) => {
                       const member = groupMembership[gid];
                       const gname = groupNames[gid] || gid;
+                      const isChecking = checkingSet.has(gid);
                       return (
-                        <div key={gid} className={`md-source-item group${member === false ? ' not-member' : ''}`}>
+                        <div key={gid} className={`md-source-item group${member !== true ? ' not-member' : ''}`}>
+                          <label className="md-group-check">
+                            <input
+                              type="checkbox"
+                              checked={!!selectedGroups[gid]}
+                              onChange={(e) => toggleGroupSelected(gid, e.target.checked)}
+                            />
+                          </label>
                           <div>
                             <p>{gname}</p>
                             {gname !== gid ? <small>{gid}</small> : null}
-                            {member === false ? <span className="md-member-badge warn">Chưa tham gia</span> : null}
-                            {member === true ? <span className="md-member-badge ok">Đã tham gia</span> : null}
+                            <span className={`md-member-badge${membershipClass(gid)}`}>{membershipLabel(gid)}</span>
                           </div>
                           <div className="md-source-actions">
-                            {member === false ? (
-                              <button
-                                type="button"
-                                className="md-join-btn"
-                                disabled={joiningGroupId === gid}
-                                onClick={() => onJoinGroup(gid, gname)}
-                              >
-                                {joiningGroupId === gid ? '...' : 'Tham gia'}
-                              </button>
+                            {member !== true ? (
+                              <>
+                                <button
+                                  type="button"
+                                  className="md-join-btn"
+                                  disabled={joiningGroupId === gid}
+                                  onClick={() => onJoinGroup(gid, gname)}
+                                >
+                                  {joiningGroupId === gid ? '...' : 'Tham gia'}
+                                </button>
+                                <a
+                                  className="md-ghost-btn"
+                                  href={`https://www.facebook.com/groups/${gid}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                >
+                                  Mở FB
+                                </a>
+                              </>
                             ) : null}
-                            <button type="button" className="md-remove-btn" onClick={() => onRemoveGroup(gid)} title="Xoá nhóm">
-                              <i className="fa-solid fa-xmark" />
+                            <button
+                              type="button"
+                              className="md-delete-btn"
+                              onClick={() => onRemoveGroup(gid)}
+                              title="Xoá khỏi danh sách quét"
+                            >
+                              <i className="fa-solid fa-trash-can" />
+                              Xoá
                             </button>
                           </div>
                         </div>
@@ -481,7 +593,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                     <div className="md-error-banner">
                       <p>
                         <i className="fa-solid fa-circle-exclamation" />
-                        Xác thực Facebook không hợp lệ. {feedError}
+                        {feedErrorTitle}. {feedError}
                       </p>
                       <button type="button" className="md-remove-btn" style={{ opacity: 1 }} onClick={() => setErrorDismissed(true)}>
                         <i className="fa-solid fa-xmark" />
@@ -550,7 +662,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                         </div>
                         <div>
                           <h3>{feedError ? 'Cookie Facebook cần cập nhật' : 'Hướng dẫn Cookie'}</h3>
-                          <p>{feedError || 'Export cookie từ Chrome và dán vào mục Cooki.'}</p>
+                          <p>{feedError || 'Export cookie từ Chrome và dán vào mục Nhân sự.'}</p>
                         </div>
                         <span className="md-cookie-chevron">
                           <i className={`fa-solid fa-chevron-${cookieOpen ? 'up' : 'down'}`} />
@@ -560,7 +672,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                         <div className="md-cookie-body">
                           <p style={{ fontSize: 14, color: '#475569', lineHeight: 1.6, margin: '0 0 12px' }}>
                             Mở Google Chrome và đăng nhập đúng tài khoản Facebook nhân sự. Truy cập Facebook,
-                            xử lý xác minh danh tính hoặc CAPTCHA nếu có, rồi export cookie và dán vào mục Cooki.
+                            xử lý xác minh danh tính hoặc CAPTCHA nếu có, rồi export cookie và dán vào mục Nhân sự.
                           </p>
                           {!cookieDetail ? (
                             <button type="button" className="md-cookie-detail-btn" onClick={() => setCookieDetail(true)}>
@@ -598,7 +710,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                       <div className="md-empty-feed">
                         <div className="icon">{feedError ? '🍪' : keywords.length || catFilter ? '🔍' : '📭'}</div>
                         <h3>
-                          {feedError ? 'Lỗi xác thực Facebook' : keywords.length || catFilter ? 'Không có bài khớp bộ lọc' : 'Không có bài viết nào'}
+                          {feedErrorKind === 'network' ? 'Lỗi mạng/DNS Facebook' : feedErrorKind === 'auth' ? 'Lỗi xác thực Facebook' : 'Không tải được bài'}
                         </h3>
                         {feedError ? <p>{feedError}</p> : null}
                       </div>
@@ -612,12 +724,10 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                           keywords={keywords}
                           pages={pages}
                           leads={leads[p.id]}
-                          replySuggestion={replySuggestions[p.id]}
                           commentSummary={commentSummaries[p.id]}
-                          onSuggestReply={onSuggestReply}
                           onSummarizeComments={onSummarizeComments}
                           onExploreComments={onExploreComments}
-                          onCommentSent={async () => { await onCommentSent(); }}
+                          onCommentSent={async (postId) => { await onCommentSent(postId); }}
                           onOpenLightbox={onOpenLightbox}
                         />
                       ))

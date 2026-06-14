@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import type { ManagedChannel } from '@/lib/types';
 import { extractSlug } from '@/lib/utils';
@@ -98,58 +98,58 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
   const [platformFilter, setPlatformFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [groupMembership, setGroupMembership] = useState<Record<string, boolean | null>>({});
+  const [membershipCheckingIds, setMembershipCheckingIds] = useState<string[]>([]);
+  const [selectedGroupIds, setSelectedGroupIds] = useState<Record<string, boolean>>({});
   const [joiningGroupId, setJoiningGroupId] = useState('');
   const [joinMsg, setJoinMsg] = useState('');
 
-  const facebookGroupIds = useMemo(
-    () => [...new Set(channels.filter(isFacebookGroup).map(groupIdFromChannel).filter(Boolean))],
-    [channels],
-  );
-
   const loadGroupMembership = useCallback(async (ids: string[]) => {
     const unique = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
-    if (!unique.length) {
-      setGroupMembership({});
-      return;
-    }
+    if (!unique.length) return;
+    setMembershipCheckingIds((prev) => [...new Set([...prev, ...unique])]);
     try {
-      const r = await api(`/api/group-membership?ids=${encodeURIComponent(unique.join(','))}`);
+      const r = await api(`/api/group-membership?ids=${encodeURIComponent(unique.join(','))}`, {
+        timeoutMs: 120000,
+      });
       const d = await r.json();
       if (d.ok && d.membership && typeof d.membership === 'object') {
         setGroupMembership((prev) => ({ ...prev, ...d.membership }));
       }
     } catch {
       /* ignore */
+    } finally {
+      setMembershipCheckingIds((prev) => prev.filter((id) => !unique.includes(id)));
     }
   }, []);
-
-  useEffect(() => {
-    void loadGroupMembership(facebookGroupIds);
-  }, [facebookGroupIds, loadGroupMembership]);
 
   async function joinGroupNow(gid: string, name: string) {
     if (!gid) return;
     setJoiningGroupId(gid);
     setJoinMsg('');
     try {
-      const r = await api(`/api/groups/${gid}/join`, { method: 'POST' });
+      const r = await api(`/api/groups/${gid}/join`, { method: 'POST', timeoutMs: 60000 });
       const d = await r.json();
       if (d.ok) {
         if (d.already_member) {
           setGroupMembership((prev) => ({ ...prev, [gid]: true }));
           setJoinMsg(`✅ Đã tham gia nhóm "${name || gid}"`);
         } else {
-          setJoinMsg(`✅ ${d.msg || 'Đã gửi yêu cầu tham gia'} — chờ admin duyệt nếu nhóm kín.`);
+          setJoinMsg(`✅ ${d.msg || 'Đã gửi yêu cầu tham gia'} — bấm Kiểm tra nhóm để cập nhật trạng thái.`);
         }
         void loadGroupMembership([gid]);
       } else {
         setJoinMsg(`❌ ${d.error || 'Không tham gia được nhóm'}`);
+        if (d.manual_required && d.group_url && typeof window !== 'undefined') {
+          window.open(String(d.group_url), '_blank', 'noopener,noreferrer');
+          setJoinMsg((prev) => `${prev} Đã mở Facebook — tham gia thủ công rồi bấm Kiểm tra nhóm.`);
+        }
       }
     } catch {
       setJoinMsg('❌ Lỗi kết nối khi tham gia nhóm');
+    } finally {
+      setJoiningGroupId('');
     }
-    setJoiningGroupId('');
-    setTimeout(() => setJoinMsg(''), 8000);
+    setTimeout(() => setJoinMsg(''), 12000);
   }
 
   const channelOptions = useMemo(() => {
@@ -187,6 +187,34 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
       return true;
     });
   }, [activeTab, channels, platformFilter, query, typeFilter]);
+
+  const visibleFacebookGroupIds = useMemo(
+    () =>
+      [...new Set(
+        filtered
+          .filter(isFacebookGroup)
+          .map(groupIdFromChannel)
+          .filter(Boolean),
+      )],
+    [filtered],
+  );
+
+  const checkedGroupIds = visibleFacebookGroupIds.filter((gid) => selectedGroupIds[gid]);
+  const checkingSet = useMemo(() => new Set(membershipCheckingIds), [membershipCheckingIds]);
+
+  function membershipLabel(gid: string): string {
+    if (checkingSet.has(gid)) return 'Đang kiểm tra...';
+    const member = groupMembership[gid];
+    if (member === true) return 'Đã tham gia';
+    if (member === false) return 'Chưa tham gia';
+    return 'Chưa kiểm tra';
+  }
+
+  function checkSelectedMembership() {
+    const ids = checkedGroupIds.length ? checkedGroupIds : visibleFacebookGroupIds;
+    if (!ids.length) return;
+    void loadGroupMembership(ids);
+  }
 
   function setField(key: keyof Payload, value: string) {
     setFormError('');
@@ -289,6 +317,7 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
         </div>
       </div>
 
+      <div className="channel-filter-bar">
       <div className="channel-tabs" role="tablist" aria-label="Phân loại kênh theo dõi">
         {CHANNEL_TABS.map((tab) => (
           <button
@@ -308,12 +337,12 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
         ))}
       </div>
 
-      <div className="table-toolbar">
+      <div className="table-toolbar channel-table-toolbar">
         <div className="table-search">
           <span>⌕</span>
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Tìm kiếm..." />
         </div>
-        <select value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value)}>
+        <select value={platformFilter} onChange={(e) => setPlatformFilter(e.target.value)} aria-label="Nền tảng">
           <option value="">Nền tảng</option>
           {PLATFORM_OPTIONS.map((item) => (
             <option key={item} value={item}>
@@ -321,7 +350,7 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
             </option>
           ))}
         </select>
-        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} aria-label="Loại">
           <option value="">Loại</option>
           {TYPE_OPTIONS.map((item) => (
             <option key={item} value={item}>
@@ -329,19 +358,63 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
             </option>
           ))}
         </select>
+        {visibleFacebookGroupIds.length ? (
+          <button
+            type="button"
+            className="btn-cancel channel-check-btn"
+            disabled={checkingSet.size > 0}
+            onClick={checkSelectedMembership}
+          >
+            {checkingSet.size > 0
+              ? 'Đang kiểm tra...'
+              : `Kiểm tra nhóm${checkedGroupIds.length ? ` (${checkedGroupIds.length})` : ''}`}
+          </button>
+        ) : null}
+      </div>
       </div>
 
+      {activeTab === 'groups' || visibleFacebookGroupIds.length ? (
+        <p className="channel-join-hint">
+          Để <b>Tham gia ngay</b> hoạt động: cần cookie Facebook tại mục <b>Nhân sự</b> (Lấy từ Chrome).
+          Nhóm kín thường phải bấm <b>Mở FB</b> tham gia thủ công, sau đó <b>Kiểm tra nhóm</b>.
+        </p>
+      ) : null}
+
       <div className="data-table-wrap">
-        <table className="data-table">
+        <table className="data-table channel-data-table">
           <thead>
             <tr>
+              <th className="select-col">
+                {visibleFacebookGroupIds.length ? (
+                  <input
+                    type="checkbox"
+                    title="Chọn tất cả nhóm Facebook"
+                    checked={
+                      visibleFacebookGroupIds.length > 0 &&
+                      visibleFacebookGroupIds.every((gid) => selectedGroupIds[gid])
+                    }
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setSelectedGroupIds((prev) => {
+                        const next = { ...prev };
+                        visibleFacebookGroupIds.forEach((gid) => {
+                          if (checked) next[gid] = true;
+                          else delete next[gid];
+                        });
+                        return next;
+                      });
+                    }}
+                  />
+                ) : null}
+              </th>
               <th>Mã</th>
               <th>Nền tảng</th>
               <th>Kênh</th>
               <th>Loại</th>
+              <th>Trạng thái</th>
               <th>Link</th>
-              <th>ID</th>
-              <th>Thao tác</th>
+              <th className="channel-id-col">ID</th>
+              <th className="channel-actions-col">Thao tác</th>
             </tr>
           </thead>
           <tbody>
@@ -351,20 +424,48 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
                 const member = gid ? groupMembership[gid] : undefined;
                 return (
                   <tr key={item.id}>
-                    <td className="mono-cell">{item.id}</td>
+                    <td className="select-col">
+                      {isFacebookGroup(item) && gid ? (
+                        <input
+                          type="checkbox"
+                          checked={!!selectedGroupIds[gid]}
+                          onChange={(e) =>
+                            setSelectedGroupIds((prev) => ({
+                              ...prev,
+                              [gid]: e.target.checked,
+                            }))
+                          }
+                        />
+                      ) : null}
+                    </td>
+                    <td className="mono-cell channel-code-col">{item.id}</td>
                     <td>
                       <span className="platform-pill">{item.platform || '-'}</span>
                     </td>
-                    <td>
-                      <b>{item.channel_name || '-'}</b>
+                    <td className="channel-name-cell">
+                      <b title={item.channel_name || '-'}>{item.channel_name || '-'}</b>
                       {item.note ? <small>{item.note}</small> : null}
-                      {isFacebookGroup(item) && gid ? (
-                        <small className={`channel-member-tag${member === false ? ' warn' : member ? ' ok' : ''}`}>
-                          {member === false ? 'Chưa tham gia' : member ? 'Đã tham gia' : 'Đang kiểm tra...'}
-                        </small>
-                      ) : null}
                     </td>
-                    <td>{item.channel_type || '-'}</td>
+                    <td className="channel-type-col">{item.channel_type || '-'}</td>
+                    <td>
+                      {isFacebookGroup(item) && gid ? (
+                        <span
+                          className={`channel-status-pill${
+                            checkingSet.has(gid)
+                              ? ' pending'
+                              : member === true
+                                ? ' ok'
+                                : member === false
+                                  ? ' warn'
+                                  : ' idle'
+                          }`}
+                        >
+                          {membershipLabel(gid)}
+                        </span>
+                      ) : (
+                        <span className="channel-status-pill na">—</span>
+                      )}
+                    </td>
                     <td className="link-cell">
                       {item.link ? (
                         <a href={item.link} target="_blank" rel="noreferrer">
@@ -374,25 +475,49 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
                         '-'
                       )}
                     </td>
-                    <td className="mono-cell">{item.target_id || '-'}</td>
-                    <td>
-                      <div className="table-actions">
-                        {isFacebookGroup(item) && gid && member === false ? (
-                          <button
-                            type="button"
-                            className="btn-join-now"
-                            disabled={joiningGroupId === gid}
-                            onClick={() => void joinGroupNow(gid, item.channel_name || gid)}
-                          >
-                            {joiningGroupId === gid ? 'Đang tham gia...' : 'Tham gia ngay'}
+                    <td className="mono-cell channel-id-col" title={item.target_id || ''}>{item.target_id || '-'}</td>
+                    <td className="channel-actions-col">
+                      <div className="channel-row-actions">
+                        <div className="channel-group-actions">
+                          {isFacebookGroup(item) && gid ? (
+                            <>
+                              {member !== true ? (
+                                <button
+                                  type="button"
+                                  className="btn-join-now"
+                                  disabled={joiningGroupId === gid}
+                                  onClick={() => void joinGroupNow(gid, item.channel_name || gid)}
+                                >
+                                  {joiningGroupId === gid ? '...' : 'Tham gia'}
+                                </button>
+                              ) : null}
+                              <a
+                                className="btn-join-now ghost"
+                                href={`https://www.facebook.com/groups/${gid}`}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                FB
+                              </a>
+                              <button
+                                type="button"
+                                className="btn-join-now ghost"
+                                disabled={checkingSet.has(gid)}
+                                onClick={() => void loadGroupMembership([gid])}
+                              >
+                                {checkingSet.has(gid) ? '...' : 'Check'}
+                              </button>
+                            </>
+                          ) : null}
+                        </div>
+                        <div className="channel-core-actions">
+                          <button type="button" title="Sửa" onClick={() => edit(item)}>
+                            ✎
                           </button>
-                        ) : null}
-                        <button type="button" title="Sửa" onClick={() => edit(item)}>
-                          ✎
-                        </button>
-                        <button type="button" title="Xoá" className="danger" onClick={() => item.id && void onDelete(item.id)}>
-                          🗑
-                        </button>
+                          <button type="button" title="Xoá" className="danger" onClick={() => item.id && void onDelete(item.id)}>
+                            🗑
+                          </button>
+                        </div>
                       </div>
                     </td>
                   </tr>
@@ -400,7 +525,7 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
               })
             ) : (
               <tr>
-                <td colSpan={7} className="table-empty">
+                <td colSpan={9} className="table-empty">
                   Chưa có kênh nào
                 </td>
               </tr>

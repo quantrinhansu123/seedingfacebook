@@ -15,7 +15,20 @@ export function getApiBase(): string {
 }
 
 const API_TIMEOUT_MS = 12000;
-const AI_TIMEOUT_MS = 120000;
+export const AI_TIMEOUT_MS = 120000;
+export const UPLOAD_TIMEOUT_MS = 120000;
+export const PUBLISH_TIMEOUT_MS = 180000;
+
+export function formatFetchError(err: unknown): string {
+  if (err instanceof DOMException && err.name === 'AbortError') {
+    return 'Backend không phản hồi kịp (timeout). Kiểm tra Flask trên cổng 5000 và thử lại.';
+  }
+  const message = err instanceof Error ? err.message : String(err || '');
+  if (/aborted|abort/i.test(message)) {
+    return 'Backend không phản hồi kịp (timeout). Kiểm tra Flask trên cổng 5000 và thử lại.';
+  }
+  return message || 'Không gọi được backend';
+}
 
 export type ApiInit = RequestInit & { timeoutMs?: number };
 

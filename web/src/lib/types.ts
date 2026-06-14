@@ -31,10 +31,16 @@ export type FbPost = {
   _page_id?: string;
   _page_name?: string;
   _source?: string;
-  reactions?: { summary?: { total_count?: number } };
+  reactions?: { summary?: { total_count?: number }; data?: FbReaction[] };
   shares?: { count?: number };
   comments?: { data?: FbComment[]; summary?: { total_count?: number } };
   attachments?: { data?: FbAttachment[] };
+};
+
+export type FbReaction = {
+  id?: string;
+  name?: string;
+  type?: string;
 };
 
 export type FbPage = { id: string; name: string };
@@ -183,8 +189,11 @@ export type StoredPostComment = {
   is_matched?: boolean;
   phone?: string;
   phones?: string[];
+  phones_auto?: string[];
+  phones_manual?: string[];
   comment_url?: string;
   channel_name?: string;
+  post_title?: string;
   video_title?: string;
   processed?: boolean;
   starred?: boolean;

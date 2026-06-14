@@ -5,6 +5,10 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'Seeding Fsolution',
   description: 'Theo dõi bài viết, lọc bình luận và quản lý sale đa kênh',
+  icons: {
+    icon: '/st-real-logo.jpg',
+    shortcut: '/favicon.ico',
+  },
 };
 
 const roboto = Roboto({

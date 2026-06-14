@@ -10,10 +10,11 @@ import { HistoryPanel } from '@/components/HistoryPanel';
 import { LeadManagerPanel } from '@/components/LeadManagerPanel';
 import { ManageDashboardPanel } from '@/components/ManageDashboardPanel';
 import { MarketingPipelinePanel } from '@/components/MarketingPipelinePanel';
+import { ScriptWriterPanel } from '@/components/ScriptWriterPanel';
 import '@/components/standard-post-panel.css';
 import { StaffCookiePanel, type StaffPayload } from '@/components/StaffCookiePanel';
 import { api } from '@/lib/api';
-import { pathToView, viewToPath, type ViewKey } from '@/lib/app-routes';
+import { LEGACY_PATH_REDIRECTS, pathToView, viewToPath, type ViewKey } from '@/lib/app-routes';
 import { CONSOLE_NAV_ITEMS } from '@/lib/console-nav';
 import { ConsoleRail } from '@/components/ConsoleRail';
 import type {
@@ -26,13 +27,12 @@ import type {
   GroupRow,
   Lead,
   ManagedChannel,
-  ReplySuggestion,
   StaffAccount,
   StoredPostComment,
   TikTokCommentStat,
 } from '@/lib/types';
 import { CommentAuthorLink } from '@/components/CommentAuthorLink';
-import { extractSlug } from '@/lib/utils';
+import { classifyFacebookFeedError, extractSlug } from '@/lib/utils';
 
 type AiProviders = Record<string, { default_model?: string }>;
 type AiConfig = {
@@ -97,7 +97,6 @@ export function MonitorPage() {
   const [allPosts, setAllPosts] = useState<FbPost[]>([]);
   const [classifications, setClassifications] = useState<Record<string, string>>({});
   const [leads, setLeads] = useState<Record<string, Lead[]>>({});
-  const [replySuggestions, setReplySuggestions] = useState<Record<string, ReplySuggestion>>({});
   const [commentSummaries, setCommentSummaries] = useState<Record<string, CommentSummary>>({});
   const [leadsBusy, setLeadsBusy] = useState(false);
   const [aiProviders, setAiProviders] = useState<AiProviders>({});
@@ -126,8 +125,14 @@ export function MonitorPage() {
   }, [pathname, router]);
 
   useEffect(() => {
+    const normalized = pathname.replace(/\/$/, '') || '/';
+    const legacyTarget = LEGACY_PATH_REDIRECTS[normalized];
+    if (legacyTarget) {
+      router.replace(legacyTarget);
+      return;
+    }
     setActiveView(pathToView(pathname));
-  }, [pathname]);
+  }, [pathname, router]);
   const [channels, setChannels] = useState<ManagedChannel[]>([]);
   const [channelStatus, setChannelStatus] = useState('');
   const [channelBusy, setChannelBusy] = useState(false);
@@ -156,6 +161,7 @@ export function MonitorPage() {
   const [joinBusy, setJoinBusy] = useState(false);
   const [joiningGroupId, setJoiningGroupId] = useState('');
   const [groupMembership, setGroupMembership] = useState<Record<string, boolean | null>>({});
+  const [membershipCheckingIds, setMembershipCheckingIds] = useState<string[]>([]);
 
   const [postModal, setPostModal] = useState(false);
   const [postSelected, setPostSelected] = useState<Record<string, boolean>>({});
@@ -444,18 +450,20 @@ export function MonitorPage() {
 
   const loadGroupMembership = useCallback(async (gIds: string[]) => {
     const ids = [...new Set(gIds.map((id) => String(id || '').trim()).filter(Boolean))];
-    if (!ids.length) {
-      setGroupMembership({});
-      return;
-    }
+    if (!ids.length) return;
+    setMembershipCheckingIds((prev) => [...new Set([...prev, ...ids])]);
     try {
-      const r = await api(`/api/group-membership?ids=${encodeURIComponent(ids.join(','))}`);
+      const r = await api(`/api/group-membership?ids=${encodeURIComponent(ids.join(','))}`, {
+        timeoutMs: 120000,
+      });
       const d = await r.json();
       if (d.ok && d.membership && typeof d.membership === 'object') {
         setGroupMembership((prev) => ({ ...prev, ...d.membership }));
       }
     } catch {
       /* ignore */
+    } finally {
+      setMembershipCheckingIds((prev) => prev.filter((id) => !ids.includes(id)));
     }
   }, []);
 
@@ -501,6 +509,13 @@ export function MonitorPage() {
       setTodayCommentCount(null);
     }
   }, []);
+
+  const handleCommentSent = useCallback(async (postId: string) => {
+    await loadTodayCommentStats();
+    if (postId) {
+      setAllPosts((prev) => prev.filter((p) => p.id !== postId));
+    }
+  }, [loadTodayCommentStats]);
 
   useEffect(() => {
     void checkAuth();
@@ -557,7 +572,7 @@ export function MonitorPage() {
         groups: gids.join(','),
         pages: pageIds.join(','),
       });
-      const res = await api(`/api/posts?${params.toString()}`);
+      const res = await api(`/api/posts?${params.toString()}`, { timeoutMs: 120000 });
       const data = await res.json();
       if (!res.ok || data.error) {
         setPostFetchReport(Array.isArray(data.report) ? data.report : []);
@@ -568,7 +583,14 @@ export function MonitorPage() {
             : `Lỗi tải bài (${res.status})`);
         setAllPosts([]);
         setFeedError(msg);
-        setToolStatus('Lỗi xác thực');
+        const errKind = classifyFacebookFeedError(msg);
+        setToolStatus(
+          errKind === 'network'
+            ? 'Lỗi mạng/DNS Facebook'
+            : data.ok === false
+              ? 'Không đọc được Facebook'
+              : 'Lỗi xác thực',
+        );
         statusBaseRef.current = '';
         return null;
       }
@@ -594,15 +616,19 @@ export function MonitorPage() {
       const groupCount = report.filter((item) => item.target_type !== 'page').length;
       const targetText = [groupCount ? `${groupCount} nhóm` : '', pageCount ? `${pageCount} page` : ''].filter(Boolean).join(', ');
       const reportText = report.length ? ` · Facebook thật · ${okTargets}/${report.length} nguồn đọc được${targetText ? ` (${targetText})` : ''}${failedTargets ? ` · ${failedTargets} nguồn lỗi` : ''}` : '';
-      const base = `${rows.length} bài · ${now}${reportText}`;
+      const skippedProcessed = Number(data.skipped_processed || 0);
+      const skippedText = skippedProcessed > 0 ? ` · ẩn ${skippedProcessed} bài đã xử lý` : '';
+      const base = `${rows.length} bài · ${now}${reportText}${skippedText}`;
       statusBaseRef.current = base;
       const nb = fresh.length && knownSet.size > fresh.length ? ` +${fresh.length} mới` : '';
       setToolStatus(base + nb);
       return rows as FbPost[];
-    } catch {
+    } catch (err) {
       setAllPosts([]);
       setPostFetchReport([]);
-      setToolStatus('Lỗi');
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
+      setFeedError(aborted ? 'Backend không phản hồi kịp (timeout). Thử lại hoặc giảm số nhóm/Page.' : 'Không kết nối được backend. Kiểm tra Flask trên cổng 5000.');
+      setToolStatus(aborted ? 'Timeout' : 'Lỗi kết nối');
       return null;
     } finally {
       setLoading(false);
@@ -654,12 +680,11 @@ export function MonitorPage() {
 
       let autoClassify = false;
       try {
-        const [pRes, cRes, clRes, lRes, rsRes, csRes] = await Promise.all([
+        const [pRes, cRes, clRes, lRes, csRes] = await Promise.all([
           api('/api/ai/providers'),
           api('/api/ai/config'),
           api('/api/ai/classifications'),
           api('/api/ai/leads'),
-          api('/api/ai/reply-suggestions'),
           api('/api/ai/comment-summaries'),
         ]);
         if (cancelled) return;
@@ -671,7 +696,6 @@ export function MonitorPage() {
         setAiAutoClassify(autoClassify);
         setClassifications(await clRes.json());
         setLeads(await lRes.json());
-        setReplySuggestions(await rsRes.json());
         setCommentSummaries(await csRes.json());
       } catch {
         /* ignore */
@@ -693,7 +717,6 @@ export function MonitorPage() {
       groupsRef.current = gIds;
       setGroups(gIds);
       setGroupNames((prev) => ({ ...prev, ...gn }));
-      void loadGroupMembership(gIds);
 
       await Promise.allSettled(gIds.map((g) => loadGroupName(g)));
       await Promise.allSettled(
@@ -812,7 +835,6 @@ export function MonitorPage() {
           });
           setGroups((g) => (g.includes(d.id) ? g : [...g, d.id]));
           setToolStatus(`✅ Đã thêm: ${d.name || d.id}`);
-          void loadGroupMembership([d.id]);
           setTimeout(() => setToolStatus(prev), 5000);
         }
       } else {
@@ -841,7 +863,6 @@ export function MonitorPage() {
     setGroupNames((prev) => ({ ...prev, [gid]: gname }));
     setJoinPrompt(null);
     setJoinMsg('');
-    void loadGroupMembership([gid]);
   }
 
   async function joinGroupAct(gid: string, gname: string) {
@@ -863,11 +884,14 @@ export function MonitorPage() {
           setJoinPrompt(null);
           setJoinMsg('✅ Đã tham gia nhóm');
         } else {
-          setJoinMsg('✅ ' + d.msg + ' — Chờ admin duyệt rồi bấm Tham gia lại.');
+          setJoinMsg('✅ ' + d.msg + ' — Bấm Kiểm tra lại để cập nhật trạng thái.');
         }
         void loadGroupMembership([gid]);
       } else {
         setJoinMsg('❌ ' + (d.error || 'Lỗi không xác định'));
+        if (d.manual_required && d.group_url && typeof window !== 'undefined') {
+          window.open(String(d.group_url), '_blank', 'noopener,noreferrer');
+        }
       }
     } catch {
       setJoinMsg('❌ Lỗi kết nối');
@@ -877,11 +901,20 @@ export function MonitorPage() {
   }
 
   async function removeGroup(gid: string) {
+    const name = groupNames[gid] || gid;
+    if (typeof window !== 'undefined' && !window.confirm(`Xoá nhóm "${name}" khỏi danh sách quét?`)) {
+      return;
+    }
     const previousGroups = groups;
     const previousNames = groupNames;
     setGroups((g) => g.filter((x) => x !== gid));
     setGroupNames((names) => {
       const next = { ...names };
+      delete next[gid];
+      return next;
+    });
+    setGroupMembership((prev) => {
+      const next = { ...prev };
       delete next[gid];
       return next;
     });
@@ -892,7 +925,12 @@ export function MonitorPage() {
         setGroups(previousGroups);
         setGroupNames(previousNames);
         setToolStatus(`❌ Không xoá được nhóm: ${d.error || `Server lỗi ${r.status}`}`);
+        return;
       }
+      if (Number(d.removed_channels || 0) > 0) {
+        await loadChannels();
+      }
+      setToolStatus(`✅ Đã xoá nhóm "${name}" khỏi danh sách quét`);
     } catch {
       setGroups(previousGroups);
       setGroupNames(previousNames);
@@ -1472,31 +1510,6 @@ export function MonitorPage() {
     setTimeout(() => setAiStatus(''), 4000);
   }
 
-  const suggestReply = useCallback(async (post: FbPost) => {
-    setAiStatus('AI đang đọc bài viết và bình luận...');
-    try {
-      const r = await api('/api/ai/suggest-reply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ post }),
-        timeoutMs: 120000,
-      });
-      const d = await r.json();
-      if (d.ok && post.id) {
-        setReplySuggestions((prev) => ({
-          ...prev,
-          [post.id]: { ...d.suggestion, storage: d.storage, warning: d.warning || '' },
-        }));
-        setAiStatus(d.storage === 'supabase' ? '✅ Đã tạo gợi ý và lưu Supabase' : '✅ Đã tạo gợi ý và lưu local');
-      } else {
-        setAiStatus(`❌ ${d.error || 'AI chưa tạo được gợi ý'}`);
-      }
-    } catch {
-      setAiStatus('❌ Lỗi kết nối server');
-    }
-    setTimeout(() => setAiStatus(''), 7000);
-  }, []);
-
   const summarizeComments = useCallback(async (post: FbPost): Promise<string> => {
     const working = 'AI đang đọc toàn bộ bình luận của bài viết...';
     setAiStatus(working);
@@ -1816,13 +1829,21 @@ export function MonitorPage() {
     const type = (item.channel_type || '').trim().toLowerCase();
     return platform === 'facebook' && ['page', 'fanpage', 'trang'].includes(type);
   });
+  const facebookGroupChannels = channels.filter((item) => {
+    const platform = (item.platform || '').trim().toLowerCase();
+    const type = (item.channel_type || '').trim().toLowerCase();
+    return platform === 'facebook' && ['nhóm', 'nhom', 'group'].includes(type);
+  });
   const tiktokManagedChannels = channels.filter((item) => (item.platform || '').trim().toLowerCase() === 'tiktok');
 
   useEffect(() => {
     if (!authenticated) return;
     if (activeView === 'history') void loadCommentLogs();
     if (activeView === 'channels') void loadChannels();
-    if (activeView === 'marketing') void loadContentPipeline();
+    if (activeView === 'marketing') {
+      void loadContentPipeline();
+      void loadChannels();
+    }
   }, [activeView, authenticated, loadChannels, loadCommentLogs, loadContentPipeline]);
 
   if (!authChecked) {
@@ -1899,6 +1920,7 @@ export function MonitorPage() {
           {activeView === 'comments' ? <CommentLeadInboxPanel /> : null}
           {activeView === 'history' ? <HistoryPanel rows={commentLogs} status={historyStatus} onReload={loadCommentLogs} /> : null}
           {activeView === 'leads' ? <LeadManagerPanel leads={leads} onExtract={extractLeadsAll} onSyncPhones={syncPhoneLeadsFromComments} /> : null}
+          {activeView === 'scripts' ? <ScriptWriterPanel /> : null}
           {activeView === 'marketing' ? (
             <MarketingPipelinePanel
               data={pipelineData}
@@ -1906,23 +1928,15 @@ export function MonitorPage() {
               status={pipelineStatus}
               onReload={loadContentPipeline}
               onResearch={runContentPipelineResearch}
-              initialGroups={groups.map((id) => ({ id, name: groupNames[id] || id }))}
-              initialPages={pages}
+              initialGroups={facebookGroupChannels
+                .map((item) => ({ id: item.target_id || '', name: item.channel_name || item.target_id || '' }))
+                .filter((item) => item.id)}
+              initialPages={facebookPageChannels
+                .map((item) => ({ id: item.target_id || '', name: item.channel_name || item.target_id || '' }))
+                .filter((item) => item.id)}
             />
           ) : null}
           {activeView === 'staff' ? (
-            <StaffCookiePanel
-              staff={staffRows}
-              currentStaff={currentStaff}
-              canManage={canManageStaff}
-              status={staffStatus}
-              title="Nhân sự"
-              kicker="Quản lý tài khoản"
-              onSave={saveStaffCookie}
-              onDelete={deleteStaffCookie}
-            />
-          ) : null}
-          {activeView === 'cookies' ? (
             <>
               <section className="module-panel tiktok-cookie-panel">
                 <div className="module-head">
@@ -1975,8 +1989,8 @@ export function MonitorPage() {
                 currentStaff={currentStaff}
                 canManage={canManageStaff}
                 status={staffStatus}
-                title="Quản lý Cooki"
-                kicker="Cookie nhân sự"
+                title="Nhân sự"
+                kicker="Quản lý tài khoản"
                 onSave={saveStaffCookie}
                 onDelete={deleteStaffCookie}
               />
@@ -2006,7 +2020,9 @@ export function MonitorPage() {
           onDismissJoin={() => setJoinPrompt(null)}
           onJoinGroup={(id, name) => void joinGroupAct(id, name)}
           onForceAddGroup={(id, name) => void forceAddGroup(id, name)}
+          onRefreshMembership={(ids) => void loadGroupMembership(ids)}
           groupMembership={groupMembership}
+          membershipCheckingIds={membershipCheckingIds}
           joiningGroupId={joiningGroupId}
           onSyncFacebookPages={() => void syncFacebookPages()}
           channelBusy={channelBusy}
@@ -2050,12 +2066,10 @@ export function MonitorPage() {
           classifications={classifications}
           pages={pages}
           leads={leads}
-          replySuggestions={replySuggestions}
           commentSummaries={commentSummaries}
-          onSuggestReply={suggestReply}
           onSummarizeComments={summarizeComments}
           onExploreComments={openFbCommentExplorer}
-          onCommentSent={loadTodayCommentStats}
+          onCommentSent={handleCommentSent}
           onOpenLightbox={setLightbox}
           saleSetupProps={{
             aiProvider,

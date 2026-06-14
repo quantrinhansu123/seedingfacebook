@@ -14,6 +14,7 @@ Nếu env SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY chưa được set thì
 
 import os
 import json
+import time
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -33,6 +34,7 @@ SUPABASE_KEY = (
 )
 STAFF_USERS_TABLE = os.environ.get('SUPABASE_STAFF_TABLE', 'staff_users')
 MANAGED_CHANNEL_TABLE = os.environ.get('SUPABASE_CHANNEL_TABLE', 'managed_channels')
+CONTENT_SCRIPT_TABLE = os.environ.get('SUPABASE_SCRIPT_TABLE', 'content_scripts')
 
 _TIMEOUT = 30
 
@@ -258,6 +260,73 @@ def update_managed_channel(channel_id: str, row: dict, table: Optional[str] = No
 def delete_managed_channel(channel_id: str, table: Optional[str] = None) -> None:
     table_name = table or MANAGED_CHANNEL_TABLE
     _request('DELETE', f'{table_name}?id=eq.{quote(channel_id or "", safe="")}', prefer='return=minimal')
+
+
+def _is_schema_cache_error(message: str) -> bool:
+    text = str(message or '')
+    return 'PGRST205' in text or 'schema cache' in text.lower()
+
+
+def _request_scripts(method: str, path: str, **kwargs) -> requests.Response:
+    """PostgREST đôi khi chậm cập nhật cache sau khi tạo bảng mới."""
+    last_err: Optional[Exception] = None
+    for attempt in range(6):
+        try:
+            return _request(method, path, **kwargs)
+        except RuntimeError as exc:
+            last_err = exc
+            if _is_schema_cache_error(str(exc)) and attempt < 5:
+                time.sleep(2)
+                continue
+            raise
+    if last_err:
+        raise last_err
+    raise RuntimeError(f'Supabase {method} {path} failed')
+
+
+# ── content_scripts ───────────────────────────────────────────────
+def list_content_scripts(table: Optional[str] = None) -> list:
+    table_name = table or CONTENT_SCRIPT_TABLE
+    r = _request_scripts(
+        'GET',
+        f'{table_name}?select=id,title,platform,status,writer,script_date,blocks,'
+        'created_by_staff_id,created_by_staff_name,created_at,updated_at&order=updated_at.desc',
+    )
+    rows = r.json()
+    return [{
+        'id': row.get('id'),
+        'title': row.get('title'),
+        'platform': row.get('platform'),
+        'status': row.get('status'),
+        'writer': row.get('writer'),
+        'date': row.get('script_date'),
+        'blocks': row.get('blocks') if isinstance(row.get('blocks'), list) else [],
+        'created_by_staff_id': row.get('created_by_staff_id'),
+        'created_by_staff_name': row.get('created_by_staff_name'),
+        'created_at': row.get('created_at'),
+        'updated_at': row.get('updated_at'),
+    } for row in rows]
+
+
+def sync_content_scripts(rows: list[dict], table: Optional[str] = None) -> None:
+    table_name = table or CONTENT_SCRIPT_TABLE
+    current = list_content_scripts(table_name)
+    next_ids = {str(row.get('id') or '') for row in rows if row.get('id')}
+    if rows:
+        _request_scripts(
+            'POST',
+            table_name,
+            json=rows,
+            prefer='resolution=merge-duplicates,return=minimal',
+        )
+    for row in current:
+        script_id = str(row.get('id') or '')
+        if script_id and script_id not in next_ids:
+            _request_scripts(
+                'DELETE',
+                f'{table_name}?id=eq.{quote(script_id, safe="")}',
+                prefer='return=minimal',
+            )
 
 
 # ── seen_posts ──────────────────────────────────────────

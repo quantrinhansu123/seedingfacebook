@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import uuid
 import hashlib
@@ -13,12 +14,12 @@ from urllib.parse import quote
 from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, jsonify, render_template, request, session, copy_current_request_context
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-from core.group_api import FacebookGroupAPI, load_token, load_cookie, refresh_token
-from core.ai_classifier import AIClassifier, DEFAULT_MODEL, DEFAULT_API_KEY, DEFAULT_CATEGORIES, PROVIDERS, extract_phones
+from core.group_api import FacebookGroupAPI, load_token, load_cookie, refresh_token, friendly_graph_error
+from core.ai_classifier import AIClassifier, DEFAULT_MODEL, DEFAULT_API_KEY, DEFAULT_CATEGORIES, PROVIDERS, extract_phones, normalize_phone
 from core import supabase_store as sb
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -62,6 +63,23 @@ COMMENT_TEMPLATES_FILE = os.path.join(DATA_DIR, 'comment_templates.json')
 COMMENT_TAGS_FILE = os.path.join(DATA_DIR, 'comment_tags.json')
 COMMENT_TAG_ASSIGNMENTS_FILE = os.path.join(DATA_DIR, 'comment_tag_assignments.json')
 COMMENT_INBOX_WORKFLOW_FILE = os.path.join(DATA_DIR, 'comment_inbox_workflow.json')
+COMMENT_MANUAL_PHONES_FILE = os.path.join(DATA_DIR, 'comment_manual_phones.json')
+SCRIPTS_FILE = os.path.join(DATA_DIR, 'content_scripts.json')
+CONTENT_SCRIPTS_MISSING_HINT = (
+    'Chưa có bảng content_scripts. Mở Supabase → SQL Editor → '
+    'chạy file supabase_content_scripts.sql (không chạy toàn bộ supabase_schema.sql).'
+)
+CONTENT_SCRIPTS_CACHE_HINT = (
+    'Bảng content_scripts đã có trong DB nhưng Supabase API chưa cập nhật cache. '
+    'Trong SQL Editor chạy: NOTIFY pgrst, \'reload schema\'; '
+    'hoặc vào Settings → API → Reload schema, đợi 30 giây rồi F5 trang Kịch bản. '
+    'Kiểm tra .env trùng project: xhesagiugewwtuedxyxo.'
+)
+CONTENT_SCRIPTS_RLS_HINT = (
+    'Bảng content_scripts đang bật RLS và chặn ghi. '
+    'Chạy file supabase_content_scripts_rls_fix.sql trong Supabase SQL Editor, '
+    'đợi 10 giây rồi F5 trang Kịch bản.'
+)
 
 BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '')
 DEFAULT_GROUP = os.environ.get('DEFAULT_GROUP', '3809441172650624')
@@ -82,6 +100,7 @@ SUPABASE_POST_COMMENT_TABLE = os.environ.get('SUPABASE_POST_COMMENT_TABLE', 'pos
 SUPABASE_LEAD_TABLE = os.environ.get('SUPABASE_LEAD_TABLE', 'leads')
 SUPABASE_STAFF_TABLE = os.environ.get('SUPABASE_STAFF_TABLE', 'staff_users')
 SUPABASE_CHANNEL_TABLE = os.environ.get('SUPABASE_CHANNEL_TABLE', 'managed_channels')
+SUPABASE_SCRIPT_TABLE = os.environ.get('SUPABASE_SCRIPT_TABLE', 'content_scripts')
 SUPABASE_COMMENT_IMAGE_BUCKET = os.environ.get('SUPABASE_COMMENT_IMAGE_BUCKET', 'comment-images')
 SUPABASE_POST_MEDIA_BUCKET = os.environ.get('SUPABASE_POST_MEDIA_BUCKET', SUPABASE_COMMENT_IMAGE_BUCKET)
 APP_TIMEZONE = os.environ.get('APP_TIMEZONE', 'Asia/Ho_Chi_Minh')
@@ -157,6 +176,7 @@ _comment_templates: list = []
 _comment_tags: list = []
 _comment_tag_assignments: dict = {}
 _comment_inbox_workflow: dict = {}
+_comment_manual_phones: dict = {}
 
 
 def _default_business_profile() -> dict:
@@ -280,7 +300,7 @@ def _verify_password(password: str, salt: str, digest: str) -> bool:
 
 
 def _load_state():
-    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _tiktok_config, _content_pipeline, _comment_templates, _comment_tags, _comment_tag_assignments, _comment_inbox_workflow
+    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _tiktok_config, _content_pipeline, _comment_templates, _comment_tags, _comment_tag_assignments, _comment_inbox_workflow, _comment_manual_phones
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
     except OSError as e:
@@ -389,6 +409,7 @@ def _load_state():
     loaded_tags = _read_json(COMMENT_TAGS_FILE, [])
     loaded_tag_assignments = _read_json(COMMENT_TAG_ASSIGNMENTS_FILE, {})
     loaded_inbox_workflow = _read_json(COMMENT_INBOX_WORKFLOW_FILE, {})
+    loaded_manual_phones = _read_json(COMMENT_MANUAL_PHONES_FILE, {})
     if USE_SUPABASE:
         try:
             loaded_templates = sb.kv_get('comment_templates', loaded_templates) or loaded_templates
@@ -406,10 +427,15 @@ def _load_state():
             loaded_inbox_workflow = sb.kv_get('comment_inbox_workflow', loaded_inbox_workflow) or loaded_inbox_workflow
         except Exception as e:
             print(f'[supabase] load comment_inbox_workflow failed, fallback file: {e}')
+        try:
+            loaded_manual_phones = sb.kv_get('comment_manual_phones', loaded_manual_phones) or loaded_manual_phones
+        except Exception as e:
+            print(f'[supabase] load comment_manual_phones failed, fallback file: {e}')
     _comment_templates = _merge_system_rows(_default_comment_templates(), loaded_templates if isinstance(loaded_templates, list) else [])
     _comment_tags = _merge_system_rows(_default_comment_tags(), loaded_tags if isinstance(loaded_tags, list) else [])
     _comment_tag_assignments = loaded_tag_assignments if isinstance(loaded_tag_assignments, dict) else {}
     _comment_inbox_workflow = loaded_inbox_workflow if isinstance(loaded_inbox_workflow, dict) else {}
+    _comment_manual_phones = loaded_manual_phones if isinstance(loaded_manual_phones, dict) else {}
 
 
 def _save_seen(new_posts=None):
@@ -515,6 +541,48 @@ def _save_comment_inbox_workflow():
             sb.kv_set('comment_inbox_workflow', _comment_inbox_workflow)
         except Exception as e:
             print(f'[supabase] save comment_inbox_workflow failed: {e}')
+
+
+def _save_comment_manual_phones():
+    _write_json(COMMENT_MANUAL_PHONES_FILE, _comment_manual_phones)
+    if USE_SUPABASE:
+        try:
+            sb.kv_set('comment_manual_phones', _comment_manual_phones)
+        except Exception as e:
+            print(f'[supabase] save comment_manual_phones failed: {e}')
+
+
+def _normalize_phones_list(values) -> list[str]:
+    seen: set[str] = set()
+    phones: list[str] = []
+    for item in values or []:
+        phone = normalize_phone(str(item or ''))
+        if phone and phone not in seen:
+            seen.add(phone)
+            phones.append(phone)
+    return phones
+
+
+def _manual_phones_for_comment(row: dict) -> list[str]:
+    cid = str(row.get('comment_id') or '').strip()
+    entry = _comment_manual_phones.get(cid) if cid else None
+    if isinstance(entry, str):
+        return _normalize_phones_list([entry])
+    if isinstance(entry, dict):
+        return _normalize_phones_list(entry.get('phones') or ([entry.get('phone')] if entry.get('phone') else []))
+    return _normalize_phones_list(row.get('manual_phones') or ([row.get('manual_phone')] if row.get('manual_phone') else []))
+
+
+def _resolve_comment_phones(row: dict) -> tuple[str, list[str], list[str]]:
+    manual_phones = _manual_phones_for_comment(row)
+    auto_phones = extract_phones(row.get('message') or '')
+    seen: set[str] = set()
+    phones: list[str] = []
+    for phone in manual_phones + auto_phones:
+        if phone and phone not in seen:
+            seen.add(phone)
+            phones.append(phone)
+    return phones[0] if phones else '', phones, manual_phones
 
 
 def _workflow_lists() -> tuple[list[str], list[str]]:
@@ -1029,7 +1097,7 @@ def _comment_rows_to_phone_leads(rows: list[dict]) -> list[dict]:
     leads: list[dict] = []
     for row in rows or []:
         message = str(row.get('message') or '').strip()
-        phones = extract_phones(message)
+        _, phones, _ = _resolve_comment_phones(row)
         if not phones:
             continue
         public = _public_comment_row(row)
@@ -1791,6 +1859,7 @@ def _flatten_facebook_comment_rows(post: dict, comments: list, keywords: list[st
     page_id = str(post.get('_page_id') or '')
     group_id = str(post.get('_group_id') or page_id or DEFAULT_GROUP)
     post_url = post.get('permalink_url') or ''
+    post_title = _strip_html(post.get('message') or post.get('story') or '', 220)
     source = 'facebook_page' if page_id else 'facebook'
 
     def walk(items: list, parent_id: str = '', depth: int = 0):
@@ -1806,6 +1875,7 @@ def _flatten_facebook_comment_rows(post: dict, comments: list, keywords: list[st
             rows.append({
                 'source': source,
                 'post_id': post_id,
+                'post_title': post_title,
                 'group_id': group_id,
                 'post_url': post_url,
                 'comment_url': _facebook_comment_url(post_url, cid),
@@ -1961,10 +2031,13 @@ def _public_comment_row(row: dict) -> dict:
     meta = raw.get('_video_meta') if isinstance(raw.get('_video_meta'), dict) else {}
     cid = str(row.get('comment_id') or '')
     post_url = row.get('post_url') or ''
-    phones = extract_phones(row.get('message') or '')
+    auto_phones = extract_phones(row.get('message') or '')
+    phone, phones, manual_phones = _resolve_comment_phones(row)
+    post_title = str(row.get('post_title') or meta.get('video_title') or '').strip()
     return {
         'source': row.get('source') or '',
         'post_id': row.get('post_id') or '',
+        'post_title': post_title,
         'group_id': row.get('group_id') or '',
         'post_url': post_url,
         'comment_url': _comment_url_for_row(str(row.get('source') or ''), post_url, cid),
@@ -1979,8 +2052,10 @@ def _public_comment_row(row: dict) -> dict:
         'matched_keywords': row.get('matched_keywords') or [],
         'manual_tags': _comment_tag_assignments.get(cid) or row.get('manual_tags') or [],
         'is_matched': bool(row.get('is_matched')),
-        'phone': phones[0] if phones else '',
+        'phone': phone,
         'phones': phones,
+        'phones_auto': auto_phones,
+        'phones_manual': manual_phones,
         'channel_name': meta.get('channel_name') or _derive_tiktok_channel_name(post_url),
         'video_title': meta.get('video_title') or '',
         'fetched_at': row.get('fetched_at'),
@@ -2314,6 +2389,7 @@ def _flatten_tiktok_comment_rows(
         rows.append({
             'source': 'tiktok',
             'post_id': post_id,
+            'post_title': video_meta['video_title'],
             'group_id': '',
             'post_url': video_url,
             'comment_id': f'tiktok_{cid}',
@@ -2909,6 +2985,38 @@ def _upload_post_media_to_supabase(file_storage) -> tuple[str, str, str]:
         return '', '', str(e)[:300]
 
 
+def _staff_processed_post_ids(staff_id: str) -> set:
+    staff_id = str(staff_id or '').strip()
+    if not staff_id:
+        return set()
+    processed = set()
+    for item in _comment_logs:
+        if str(item.get('staff_id') or '').strip() != staff_id:
+            continue
+        if item.get('status') != 'success':
+            continue
+        post_id = str(item.get('post_id') or '').strip()
+        if post_id:
+            processed.add(post_id)
+    return processed
+
+
+def _filter_posts_for_staff(posts: list, staff_id: str) -> tuple[list, int]:
+    if not staff_id or _is_admin():
+        return posts, 0
+    processed_ids = _staff_processed_post_ids(staff_id)
+    if not processed_ids:
+        return posts, 0
+    kept = []
+    skipped = 0
+    for post in posts:
+        if str(post.get('id') or '').strip() in processed_ids:
+            skipped += 1
+            continue
+        kept.append(post)
+    return kept, skipped
+
+
 def _record_comment_log(post_id: str, group_id: str, post_url: str, message: str, page_id: str,
                         status: str, comment_id: str = '', error_message: str = '', image_url: str = '') -> dict:
     global _comment_logs
@@ -3216,6 +3324,75 @@ def auth_logout():
     return jsonify({'ok': True})
 
 
+def _group_display_name(gid: str) -> str:
+    return next((g.get('name') for g in _merged_facebook_groups() if g.get('id') == gid), gid)
+
+
+def _fetch_group_feed(gid: str, limit: int):
+    api = get_api(gid)
+    posts = api.get_posts(limit)
+    name = _group_display_name(gid)
+    if posts is None:
+        return [], {
+            'group_id': gid,
+            'group_name': name,
+            'target_type': 'group',
+            'target_id': gid,
+            'ok': False,
+            'count': 0,
+            'source': 'facebook_graph',
+            'error': api.last_graph_error or 'Cookie hết hạn, chưa vào nhóm, hoặc Facebook không cho đọc feed nhóm này',
+        }
+    for p in posts:
+        p['_group_id'] = gid
+        p['_source'] = 'facebook_graph'
+    return posts, {
+        'group_id': gid,
+        'target_type': 'group',
+        'target_id': gid,
+        'group_name': name,
+        'ok': True,
+        'count': len(posts or []),
+        'source': 'facebook_graph',
+        'error': '',
+    }
+
+
+def _fetch_page_feed(page_id: str, limit: int):
+    page_name = next((item.get('channel_name') for item in _managed_channels if str(item.get('target_id') or '') == page_id), '')
+    try:
+        page_token = _page_token_from_cache(page_id)
+        posts = get_api(DEFAULT_GROUP).get_page_posts(page_id, page_token, limit)
+    except Exception:
+        posts = None
+    display = page_name or (_pages_cache.get(page_id) or {}).get('name') or page_id
+    if posts is None:
+        return [], {
+            'group_id': page_id,
+            'target_type': 'page',
+            'target_id': page_id,
+            'group_name': display,
+            'ok': False,
+            'count': 0,
+            'source': 'facebook_page_graph',
+            'error': 'Không đọc được bài từ Page. Kiểm tra ID Page, cookie và quyền quản trị/Page public.',
+        }
+    for p in posts:
+        p['_page_id'] = page_id
+        p['_page_name'] = display
+        p['_source'] = 'facebook_page_graph'
+    return posts, {
+        'group_id': page_id,
+        'target_type': 'page',
+        'target_id': page_id,
+        'group_name': display,
+        'ok': True,
+        'count': len(posts or []),
+        'source': 'facebook_page_graph',
+        'error': '',
+    }
+
+
 @app.route('/api/posts')
 def api_posts():
     global _seen_ids
@@ -3228,78 +3405,34 @@ def api_posts():
     try:
         all_posts = []
         report = []
-        for gid in group_ids:
-            posts = get_api(gid).get_posts(limit)
-            if posts is None:
-                report.append({
-                    'group_id': gid,
-                    'group_name': next((g.get('name') for g in _merged_facebook_groups() if g.get('id') == gid), gid),
-                    'ok': False,
-                    'count': 0,
-                    'source': 'facebook_graph',
-                    'error': 'Cookie hết hạn, chưa vào nhóm, hoặc Facebook không cho đọc feed nhóm này',
-                })
-                continue
-            for p in posts:
-                p['_group_id'] = gid
-                p['_source'] = 'facebook_graph'
-            all_posts.extend(posts)
-            report.append({
-                'group_id': gid,
-                'target_type': 'group',
-                'target_id': gid,
-                'group_name': next((g.get('name') for g in _merged_facebook_groups() if g.get('id') == gid), gid),
-                'ok': True,
-                'count': len(posts or []),
-                'source': 'facebook_graph',
-                'error': '',
-            })
-
-        for page_id in page_ids:
-            page_name = next((item.get('channel_name') for item in _managed_channels if str(item.get('target_id') or '') == page_id), '')
-            try:
-                page_token = _page_token_from_cache(page_id)
-                posts = get_api(DEFAULT_GROUP).get_page_posts(page_id, page_token, limit)
-            except Exception:
-                posts = None
-            if posts is None:
-                report.append({
-                    'group_id': page_id,
-                    'target_type': 'page',
-                    'target_id': page_id,
-                    'group_name': page_name or page_id,
-                    'ok': False,
-                    'count': 0,
-                    'source': 'facebook_page_graph',
-                    'error': 'Không đọc được bài từ Page. Kiểm tra ID Page, cookie và quyền quản trị/Page public.',
-                })
-                continue
-            for p in posts:
-                p['_page_id'] = page_id
-                p['_page_name'] = page_name or (_pages_cache.get(page_id) or {}).get('name') or page_id
-                p['_source'] = 'facebook_page_graph'
-            all_posts.extend(posts)
-            report.append({
-                'group_id': page_id,
-                'target_type': 'page',
-                'target_id': page_id,
-                'group_name': page_name or (_pages_cache.get(page_id) or {}).get('name') or page_id,
-                'ok': True,
-                'count': len(posts or []),
-                'source': 'facebook_page_graph',
-                'error': '',
-            })
+        skipped_processed = 0
+        targets = [( 'group', gid) for gid in group_ids] + [('page', pid) for pid in page_ids]
+        if targets:
+            workers = min(8, len(targets))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = []
+                for kind, target_id in targets:
+                    fn = _fetch_group_feed if kind == 'group' else _fetch_page_feed
+                    futures.append(pool.submit(copy_current_request_context(fn), target_id, limit))
+                for future in as_completed(futures):
+                    posts, item = future.result()
+                    all_posts.extend(posts)
+                    report.append(item)
 
         if (group_ids or page_ids) and not all_posts and any(not item.get('ok') for item in report):
             payload = {
+                'ok': False,
                 'error': 'Không lấy được bài từ Facebook. Kiểm tra cookie nhân sự, quyền nhóm/Page và quyền quản trị Page.',
                 'posts': [],
                 'report': report,
                 'source': 'facebook_graph',
             }
-            return jsonify(payload), 401
+            return jsonify(payload), 200
 
         all_posts.sort(key=lambda x: x.get('created_time', ''), reverse=True)
+
+        staff_id = _current_staff_id()
+        all_posts, skipped_processed = _filter_posts_for_staff(all_posts, staff_id)
 
         new_ids = set()
         new_posts = []
@@ -3322,10 +3455,17 @@ def api_posts():
                 'posts': all_posts,
                 'report': report,
                 'total_posts': len(all_posts),
+                'skipped_processed': skipped_processed,
             })
         return jsonify(all_posts)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'ok': False,
+            'error': friendly_graph_error(e),
+            'posts': [],
+            'report': [],
+            'source': 'facebook_graph',
+        }), 200
 
 
 @app.route('/api/post', methods=['POST'])
@@ -3645,6 +3785,78 @@ def comment_stats_today():
         return jsonify(payload)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e), 'success_count': 0}), 500
+
+
+@app.route('/api/post-engagement', methods=['POST'])
+def api_post_engagement():
+    body = request.get_json() or {}
+    post = body.get('post') or {}
+    if not post or not post.get('id'):
+        return jsonify({'ok': False, 'error': 'Thiếu bài viết Facebook'}), 400
+    kind = str(body.get('kind') or 'all').strip().lower()
+    limit = max(1, min(int(body.get('limit') or 100), 500))
+    post_id = str(post.get('id'))
+    page_id = str(post.get('_page_id') or body.get('page_id') or '').strip()
+    group_id = str(post.get('_group_id') or page_id or DEFAULT_GROUP)
+    page_token = _page_token_from_cache(page_id) if page_id else None
+    api_client = get_api(group_id)
+    payload = {'ok': True, 'post_id': post_id}
+
+    try:
+        if kind in ('comments', 'all'):
+            embedded = ((post.get('comments') or {}).get('data') or [])
+            embedded_total = ((post.get('comments') or {}).get('summary') or {}).get('total_count')
+            if kind == 'comments' and embedded and len(embedded) >= min(limit, 50):
+                payload['comments'] = embedded[:limit]
+                payload['comment_count'] = int(embedded_total or len(embedded))
+                payload['source'] = 'embedded'
+            else:
+                if page_id:
+                    loaded = api_client.get_post_comments(post_id, limit=limit, access_token=page_token or None)
+                else:
+                    loaded = api_client.get_post_comments(post_id, limit=limit)
+                if loaded is None:
+                    if embedded:
+                        payload['comments'] = embedded[:limit]
+                        payload['comment_count'] = int(embedded_total or len(embedded))
+                        payload['source'] = 'embedded'
+                        payload['warning'] = 'Không tải thêm được comment từ Facebook, hiển thị dữ liệu có sẵn.'
+                    elif kind == 'comments':
+                        return jsonify({'ok': False, 'error': 'Không đọc được bình luận Facebook.'}), 502
+                else:
+                    payload['comments'] = loaded.get('comments') or []
+                    payload['comment_count'] = int(loaded.get('total_count') or len(payload['comments']))
+                    payload['source'] = 'facebook_graph'
+
+        if kind in ('likes', 'reactions', 'all'):
+            if page_id:
+                loaded = api_client.get_post_reactions(post_id, limit=limit, access_token=page_token or None)
+            else:
+                loaded = api_client.get_post_reactions(post_id, limit=limit)
+            if loaded is None:
+                summary_count = ((post.get('reactions') or {}).get('summary') or {}).get('total_count')
+                if summary_count is not None and kind == 'likes':
+                    payload['reactions'] = []
+                    payload['reaction_count'] = int(summary_count)
+                    payload['warning'] = 'Facebook không trả danh sách người thích, chỉ có tổng số.'
+                elif kind == 'likes':
+                    return jsonify({'ok': False, 'error': 'Không đọc được danh sách người thích.'}), 502
+            else:
+                payload['reactions'] = loaded.get('reactions') or []
+                payload['reaction_count'] = int(loaded.get('total_count') or len(payload['reactions']))
+
+        if kind in ('shares', 'all'):
+            share_count = post.get('shares', {}).get('count')
+            if share_count is None and page_id:
+                share_count = api_client.get_post_share_count(post_id, access_token=page_token or None)
+            elif share_count is None:
+                share_count = api_client.get_post_share_count(post_id)
+            payload['share_count'] = int(share_count or 0)
+            payload['shares_note'] = 'Facebook API thường chỉ trả tổng lượt chia sẻ, không trả danh sách người share.'
+
+        return jsonify(payload)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @app.route('/api/post-comments/fetch', methods=['POST'])
@@ -4329,6 +4541,65 @@ def post_comment_workflow():
     })
 
 
+@app.route('/api/post-comments/phone', methods=['POST'])
+def post_comment_phone_save():
+    global _post_comments, _comment_manual_phones
+    body = request.get_json() or {}
+    comment_id = str(body.get('comment_id') or '').strip()
+    if not comment_id:
+        return jsonify({'ok': False, 'error': 'Thiếu comment_id'}), 400
+
+    row = next((item for item in _post_comments if str(item.get('comment_id') or '') == comment_id), None)
+    if not row:
+        rows, _ = _load_post_comment_rows(limit=5000)
+        row = next((item for item in rows if str(item.get('comment_id') or '') == comment_id), None)
+        if row and row not in _post_comments:
+            _post_comments.append(row)
+
+    message = str((row or {}).get('message') or body.get('message') or '').strip()
+    extract_from_message = bool(body.get('extract_from_message'))
+    raw_phones = body.get('phones') if isinstance(body.get('phones'), list) else None
+    raw_phone = str(body.get('phone') if body.get('phone') is not None else '').strip()
+
+    if extract_from_message:
+        phones = extract_phones(message)
+    elif raw_phones is not None:
+        phones = _normalize_phones_list(raw_phones)
+    elif 'phone' in body:
+        phones = _normalize_phones_list([raw_phone] if raw_phone else [])
+    else:
+        return jsonify({'ok': False, 'error': 'Thiếu phone hoặc extract_from_message'}), 400
+
+    if phones:
+        _comment_manual_phones[comment_id] = {
+            'phone': phones[0],
+            'phones': phones,
+            'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+        }
+        if row:
+            row['manual_phone'] = phones[0]
+            row['manual_phones'] = phones
+            _save_post_comments()
+    else:
+        _comment_manual_phones.pop(comment_id, None)
+        if row:
+            row.pop('manual_phone', None)
+            row.pop('manual_phones', None)
+            _save_post_comments()
+
+    _save_comment_manual_phones()
+    public = _public_comment_row(row or {'comment_id': comment_id, 'message': message})
+    return jsonify({
+        'ok': True,
+        'comment_id': comment_id,
+        'phone': public.get('phone') or '',
+        'phones': public.get('phones') or [],
+        'phones_auto': public.get('phones_auto') or [],
+        'phones_manual': public.get('phones_manual') or [],
+        'storage': 'supabase' if USE_SUPABASE else 'local',
+    })
+
+
 @app.route('/api/ai/caption-variants', methods=['POST'])
 def ai_caption_variants():
     body = request.get_json() or {}
@@ -4490,6 +4761,13 @@ def api_resolve_group():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+def _membership_for_gid(gid: str):
+    try:
+        return gid, bool(get_api(DEFAULT_GROUP).check_membership(gid))
+    except Exception:
+        return gid, None
+
+
 @app.route('/api/group-membership', methods=['GET'])
 @app.route('/api/groups/membership', methods=['GET'])
 def api_groups_membership():
@@ -4498,13 +4776,18 @@ def api_groups_membership():
     if not ids:
         return jsonify({'ok': True, 'membership': {}})
     try:
-        api = get_api(DEFAULT_GROUP)
+        get_api(DEFAULT_GROUP)
         membership = {}
-        for gid in ids[:80]:
-            try:
-                membership[gid] = bool(api.check_membership(gid))
-            except Exception:
-                membership[gid] = None
+        target_ids = ids[:80]
+        workers = min(8, len(target_ids))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [
+                pool.submit(copy_current_request_context(_membership_for_gid), gid)
+                for gid in target_ids
+            ]
+            for future in as_completed(futures):
+                gid, status = future.result()
+                membership[gid] = status
         return jsonify({'ok': True, 'membership': membership})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
@@ -4539,6 +4822,17 @@ def _sync_group_from_channel(row: dict) -> None:
             sb.upsert_group(target_id, name)
         except Exception as e:
             print(f'[supabase] upsert_group from managed channel failed: {e}')
+
+
+def _facebook_page_channels() -> list[dict]:
+    rows = []
+    for row in _managed_channels:
+        platform = str(row.get('platform') or '').strip().lower()
+        channel_type = str(row.get('channel_type') or '').strip().lower()
+        target_id = str(row.get('target_id') or '').strip()
+        if platform == 'facebook' and channel_type in ('page', 'fanpage', 'trang') and target_id:
+            rows.append({'id': target_id, 'name': str(row.get('channel_name') or '').strip()})
+    return rows
 
 
 def _facebook_group_channels() -> list[dict]:
@@ -4596,6 +4890,21 @@ def channels_get():
     rows = [_public_managed_channel(item) for item in _managed_channels]
     rows.sort(key=lambda item: item.get('created_at') or item.get('updated_at') or '', reverse=True)
     return jsonify({'ok': True, 'channels': rows})
+
+
+@app.route('/api/channels/publish-targets', methods=['GET'])
+def channels_publish_targets():
+    """Nhóm/Page đăng bài — chỉ lấy từ bảng managed_channels (Supabase)."""
+    _refresh_managed_channels_from_supabase()
+    groups = _facebook_group_channels()
+    pages = _facebook_page_channels()
+    return jsonify({
+        'ok': True,
+        'groups': groups,
+        'pages': pages,
+        'count': len(groups) + len(pages),
+        'storage': 'supabase' if USE_SUPABASE else 'local',
+    })
 
 
 @app.route('/api/channels/sync-facebook-pages', methods=['POST'])
@@ -4827,15 +5136,39 @@ def groups_add():
 
 @app.route('/api/groups/<gid>', methods=['DELETE'])
 def groups_remove(gid):
-    global _groups
+    global _groups, _managed_channels
     _groups = [g for g in _groups if g['id'] != gid]
     _save_groups()
+
+    removed_channels = 0
+    next_channels = []
+    for item in _managed_channels:
+        platform = str(item.get('platform') or '').strip().lower()
+        channel_type = str(item.get('channel_type') or '').strip().lower()
+        target_id = str(item.get('target_id') or '').strip()
+        if platform == 'facebook' and channel_type in ('nhóm', 'nhom', 'group') and target_id == gid:
+            removed_channels += 1
+            if USE_SUPABASE:
+                try:
+                    sb.delete_managed_channel(str(item.get('id') or ''), SUPABASE_CHANNEL_TABLE)
+                except Exception as e:
+                    print(f'[supabase] delete_managed_channel from group remove failed: {e}')
+            continue
+        next_channels.append(item)
+    if removed_channels:
+        _managed_channels = next_channels
+        _save_managed_channels()
+
     if USE_SUPABASE:
         try:
             sb.delete_group(gid)
         except Exception as e:
             print(f'[supabase] delete_group failed: {e}')
-    return jsonify({'ok': True, 'groups': _groups})
+    return jsonify({
+        'ok': True,
+        'groups': _merged_facebook_groups(),
+        'removed_channels': removed_channels,
+    })
 
 
 @app.route('/api/staff-cookies', methods=['GET'])
@@ -5108,6 +5441,163 @@ def settings_save():
     _settings.update({k: v for k, v in body.items() if k in ('auto_refresh', 'interval')})
     _save_settings()
     return jsonify({'ok': True, 'settings': _settings})
+
+
+def _is_missing_supabase_table_error(message: str) -> bool:
+    text = str(message or '')
+    return 'Could not find the table' in text or 'PGRST205' in text
+
+
+def _is_content_scripts_rls_error(message: str) -> bool:
+    text = str(message or '').lower()
+    return '42501' in text or 'row-level security' in text
+
+
+def _content_scripts_supabase_warning(exc: Exception) -> str:
+    message = str(exc or '')
+    if _is_content_scripts_rls_error(message):
+        return CONTENT_SCRIPTS_RLS_HINT
+    if 'PGRST205' in message or 'schema cache' in message.lower():
+        return CONTENT_SCRIPTS_CACHE_HINT
+    if _is_missing_supabase_table_error(message):
+        return CONTENT_SCRIPTS_MISSING_HINT
+    return message
+
+
+def _content_scripts_should_fallback_local(exc: Exception) -> bool:
+    message = str(exc or '')
+    return (
+        _is_missing_supabase_table_error(message)
+        or _is_content_scripts_rls_error(message)
+    )
+
+
+def _load_scripts_local() -> list:
+    rows = _read_json(SCRIPTS_FILE, [])
+    return rows if isinstance(rows, list) else []
+
+
+def _save_scripts_local(rows: list) -> None:
+    _write_json(SCRIPTS_FILE, rows)
+
+
+def _clean_script_library(rows) -> list[dict]:
+    if not isinstance(rows, list):
+        return []
+    allowed_statuses = {'draft', 'pending', 'approved'}
+    allowed_block_types = {'text', 'h1', 'h2', 'hook', 'body', 'cta', 'scene', 'quote'}
+    cleaned = []
+    for raw in rows[:500]:
+        if not isinstance(raw, dict):
+            continue
+        script_id = str(raw.get('id') or '').strip()[:160]
+        title = str(raw.get('title') or '').strip()[:300]
+        if not script_id or not title:
+            continue
+        blocks = []
+        for raw_block in (raw.get('blocks') or [])[:300]:
+            if not isinstance(raw_block, dict):
+                continue
+            block_id = str(raw_block.get('id') or '').strip()[:160]
+            block_type = str(raw_block.get('type') or 'text').strip().lower()
+            if not block_id:
+                continue
+            blocks.append({
+                'id': block_id,
+                'type': block_type if block_type in allowed_block_types else 'text',
+                'text': str(raw_block.get('text') or '')[:50000],
+            })
+        status = str(raw.get('status') or 'draft').strip().lower()
+        cleaned.append({
+            'id': script_id,
+            'title': title,
+            'platform': str(raw.get('platform') or 'TikTok').strip()[:80],
+            'status': status if status in allowed_statuses else 'draft',
+            'writer': str(raw.get('writer') or '').strip()[:160],
+            'date': str(raw.get('date') or '').strip()[:40],
+            'blocks': blocks,
+        })
+    return cleaned
+
+
+@app.route('/api/scripts', methods=['GET'])
+def scripts_get():
+    if not USE_SUPABASE:
+        rows = _clean_script_library(_load_scripts_local())
+        return jsonify({'ok': True, 'scripts': rows, 'storage': 'local'})
+    try:
+        rows = _clean_script_library(sb.list_content_scripts(SUPABASE_SCRIPT_TABLE))
+        return jsonify({'ok': True, 'scripts': rows, 'storage': 'supabase'})
+    except Exception as e:
+        message = str(e)
+        if _content_scripts_should_fallback_local(e):
+            rows = _clean_script_library(_load_scripts_local())
+            return jsonify({
+                'ok': True,
+                'scripts': rows,
+                'storage': 'local',
+                'warning': _content_scripts_supabase_warning(e),
+            })
+        return jsonify({'ok': False, 'error': f'Không tải được kịch bản từ Supabase: {message}'}), 500
+
+
+@app.route('/api/scripts', methods=['PUT'])
+def scripts_save():
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body.get('scripts'), list):
+        return jsonify({'ok': False, 'error': 'Dữ liệu scripts không hợp lệ'}), 400
+    rows = _clean_script_library(body.get('scripts'))
+    if not USE_SUPABASE:
+        _save_scripts_local(rows)
+        return jsonify({
+            'ok': True,
+            'scripts': rows,
+            'count': len(rows),
+            'storage': 'local',
+            'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+        })
+    try:
+        existing = sb.list_content_scripts(SUPABASE_SCRIPT_TABLE)
+        existing_by_id = {str(row.get('id') or ''): row for row in existing}
+        now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+        staff = _current_staff()
+        db_rows = []
+        for row in rows:
+            current = existing_by_id.get(row['id']) or {}
+            db_rows.append({
+                'id': row['id'],
+                'title': row['title'],
+                'platform': row['platform'],
+                'status': row['status'],
+                'writer': row['writer'],
+                'script_date': row['date'],
+                'blocks': row['blocks'],
+                'created_by_staff_id': current.get('created_by_staff_id') or staff.get('id') or None,
+                'created_by_staff_name': current.get('created_by_staff_name') or staff.get('name') or staff.get('username') or None,
+                'created_at': current.get('created_at') or now,
+                'updated_at': now,
+            })
+        sb.sync_content_scripts(db_rows, SUPABASE_SCRIPT_TABLE)
+        return jsonify({
+            'ok': True,
+            'scripts': rows,
+            'count': len(rows),
+            'storage': 'supabase',
+            'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+        })
+    except Exception as e:
+        message = str(e)
+        if _content_scripts_should_fallback_local(e):
+            _save_scripts_local(rows)
+            return jsonify({
+                'ok': True,
+                'scripts': rows,
+                'count': len(rows),
+                'storage': 'local',
+                'warning': _content_scripts_supabase_warning(e),
+                'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+            })
+        return jsonify({'ok': False, 'error': f'Không lưu được kịch bản lên Supabase: {message}'}), 500
 
 
 @app.route('/api/business-profile', methods=['GET'])
@@ -5785,5 +6275,5 @@ threading.Thread(target=_poll_telegram, daemon=True).start()
 
 if __name__ == '__main__':
     print(f'[server] supabase={"on" if USE_SUPABASE else "off"} | http://localhost:{PORT}')
-    app.run(debug=False, host='0.0.0.0', port=PORT)
+    app.run(debug=False, host='0.0.0.0', port=PORT, threaded=True)
 

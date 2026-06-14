@@ -4,9 +4,9 @@ export type ViewKey =
   | 'channels'
   | 'comments'
   | 'manage'
-  | 'cookies'
   | 'history'
   | 'leads'
+  | 'scripts'
   | 'marketing';
 
 export const VIEW_ROUTES: Record<ViewKey, string> = {
@@ -15,9 +15,9 @@ export const VIEW_ROUTES: Record<ViewKey, string> = {
   channels: '/kenh',
   comments: '/binh-luan',
   manage: '/quan-ly',
-  cookies: '/cookie',
   history: '/lich-su',
   leads: '/lead',
+  scripts: '/kich-ban',
   marketing: '/bai-viet',
 };
 
@@ -27,10 +27,15 @@ export const VIEW_LABELS: Record<ViewKey, string> = {
   channels: 'Quản lý nhóm',
   comments: 'Bình luận',
   manage: 'Quản lý',
-  cookies: 'Cooki',
   history: 'Lịch thử thao tác',
   leads: 'Lead',
+  scripts: 'Kịch bản',
   marketing: 'Bài viết',
+};
+
+/** URL cũ → chuyển hướng sau khi gỡ trang */
+export const LEGACY_PATH_REDIRECTS: Record<string, string> = {
+  '/cookie': '/nhan-su',
 };
 
 const PATH_TO_VIEW = Object.fromEntries(

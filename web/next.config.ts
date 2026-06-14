@@ -34,6 +34,10 @@ function resolveApiProxyBase(): string {
   if (configured && !frontendHosts.has(hostOf(configured))) {
     return configured;
   }
+  // Local `npm run dev` should talk to Flask on this machine, not Render.
+  if (process.env.NODE_ENV === 'development') {
+    return 'http://127.0.0.1:5000';
+  }
   return DEFAULT_API_PROXY_BASE_URL;
 }
 

@@ -38,7 +38,7 @@ export function HistoryPanel({ rows, status, onReload }: { rows: CommentLog[]; s
                   <td>{item.comment_text || item.error_message || '-'}</td>
                   <td>
                     <span className={item.status === 'success' ? 'status-pill ok' : 'status-pill fail'}>
-                      {item.status === 'success' ? 'Thành công' : 'Lỗi'}
+                      {item.status === 'success' ? 'Đã xử lý' : 'Lỗi'}
                     </span>
                   </td>
                 </tr>

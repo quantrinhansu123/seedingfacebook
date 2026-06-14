@@ -5,8 +5,7 @@ import { api } from '@/lib/api';
 import { catBg, catFg } from '@/lib/constants';
 import { LeadBlock } from '@/components/LeadBlock';
 import { CommentSummaryBlock } from '@/components/CommentSummaryBlock';
-import { ReplySuggestionBlock } from '@/components/ReplySuggestionBlock';
-import type { CommentSummary, FbPage, FbPost, Lead, ReplySuggestion } from '@/lib/types';
+import type { CommentSummary, FbComment, FbPage, FbPost, FbReaction, Lead } from '@/lib/types';
 import { avatarColor, escRegex, initials, timeAgo } from '@/lib/utils';
 
 function HighlightText({ text, keywords }: { text: string; keywords: string[] }) {
@@ -39,6 +38,19 @@ function HighlightText({ text, keywords }: { text: string; keywords: string[] })
   return <>{nodes}</>;
 }
 
+function reactionEmoji(type?: string): string {
+  const key = String(type || 'LIKE').toUpperCase();
+  if (key === 'LOVE') return '❤️';
+  if (key === 'HAHA') return '😆';
+  if (key === 'WOW') return '😮';
+  if (key === 'SAD') return '😢';
+  if (key === 'ANGRY') return '😡';
+  if (key === 'CARE') return '🥰';
+  return '👍';
+}
+
+type EngagementTab = 'comments' | 'likes' | 'shares';
+
 function postShortId(post: FbPost): string {
   const parts = post.id.split('_');
   return parts[1] || post.id;
@@ -66,10 +78,8 @@ export function PostCard({
   keywords,
   pages,
   leads,
-  replySuggestion,
   commentSummary,
   onOpenLightbox,
-  onSuggestReply,
   onSummarizeComments,
   onExploreComments,
   onCommentSent,
@@ -80,13 +90,11 @@ export function PostCard({
   keywords: string[];
   pages: FbPage[];
   leads?: Lead[];
-  replySuggestion?: ReplySuggestion;
   commentSummary?: CommentSummary;
   onOpenLightbox: (src: string) => void;
-  onSuggestReply?: (post: FbPost) => Promise<void>;
   onSummarizeComments?: (post: FbPost) => Promise<string>;
   onExploreComments?: (post: FbPost) => void;
-  onCommentSent?: () => Promise<void>;
+  onCommentSent?: (postId: string) => Promise<void>;
 }) {
   const authorName = post.from?.name || 'Ẩn danh';
   const reactions = post.reactions?.summary?.total_count ?? 0;
@@ -116,11 +124,18 @@ export function PostCard({
   const [cmtMsg, setCmtMsg] = useState('');
   const [sending, setSending] = useState(false);
   const [pageId, setPageId] = useState('');
-  const [suggestBusy, setSuggestBusy] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [summaryMsg, setSummaryMsg] = useState('');
   const [imageUrl, setImageUrl] = useState('');
   const [uploadingImage, setUploadingImage] = useState(false);
+  const [engagementOpen, setEngagementOpen] = useState(false);
+  const [engagementTab, setEngagementTab] = useState<EngagementTab>('comments');
+  const [engagementLoading, setEngagementLoading] = useState(false);
+  const [engagementError, setEngagementError] = useState('');
+  const [engagementWarning, setEngagementWarning] = useState('');
+  const [engagementComments, setEngagementComments] = useState<FbComment[]>([]);
+  const [engagementReactions, setEngagementReactions] = useState<FbReaction[]>([]);
+  const [engagementShareCount, setEngagementShareCount] = useState<number | null>(null);
   const postLeads = leads || [];
   const visibleCommentSummary =
     commentSummary &&
@@ -187,8 +202,8 @@ export function PostCard({
       if (d.ok) {
         if (ta) ta.value = '';
         setImageUrl('');
-        setCmtMsg(image ? '✅ Đã bình luận kèm ảnh!' : '✅ Đã bình luận!');
-        await onCommentSent?.();
+        setCmtMsg(image ? '✅ Đã bình luận kèm ảnh!' : '✅ Đã bình luận — đã xử lý');
+        await onCommentSent?.(post.id);
       } else setCmtMsg('❌ ' + (d.error || 'Lỗi'));
     } catch {
       setCmtMsg('❌ Lỗi kết nối');
@@ -220,6 +235,131 @@ export function PostCard({
     }
     setUploadingImage(false);
     setTimeout(() => setCmtMsg(''), 3500);
+  }
+
+  async function openEngagement(tab: EngagementTab) {
+    if (engagementOpen && engagementTab === tab) {
+      setEngagementOpen(false);
+      return;
+    }
+    setEngagementTab(tab);
+    setEngagementOpen(true);
+    setEngagementError('');
+    setEngagementWarning('');
+
+    if (tab === 'comments' && cList.length) {
+      setEngagementComments(cList);
+    }
+    if (tab === 'shares') {
+      setEngagementShareCount(shares);
+    }
+
+    setEngagementLoading(true);
+    try {
+      const r = await api('/api/post-engagement', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ post, kind: tab, limit: 100 }),
+        timeoutMs: 60000,
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        if (tab === 'comments' && cList.length) {
+          setEngagementComments(cList);
+          setEngagementWarning(d.error || 'Không tải thêm được comment từ Facebook.');
+        } else if (tab === 'shares') {
+          setEngagementShareCount(shares);
+        } else {
+          setEngagementError(d.error || 'Không tải được dữ liệu tương tác.');
+        }
+        return;
+      }
+      if (Array.isArray(d.comments)) setEngagementComments(d.comments);
+      if (Array.isArray(d.reactions)) setEngagementReactions(d.reactions);
+      if (d.share_count !== undefined && d.share_count !== null) {
+        setEngagementShareCount(Number(d.share_count));
+      }
+      if (d.warning) setEngagementWarning(String(d.warning));
+    } catch {
+      if (tab === 'comments' && cList.length) {
+        setEngagementComments(cList);
+        setEngagementWarning('Không kết nối được backend, hiển thị comment có sẵn.');
+      } else if (tab === 'shares') {
+        setEngagementShareCount(shares);
+      } else {
+        setEngagementError('Lỗi kết nối khi tải dữ liệu tương tác.');
+      }
+    } finally {
+      setEngagementLoading(false);
+    }
+  }
+
+  function renderEngagementPanel() {
+    if (!engagementOpen) return null;
+    const title =
+      engagementTab === 'comments'
+        ? `Bình luận (${engagementComments.length || cCount})`
+        : engagementTab === 'likes'
+          ? `Người thích (${engagementReactions.length || reactions})`
+          : `Chia sẻ (${engagementShareCount ?? shares})`;
+
+    return (
+      <div className="post-engagement-panel">
+        <div className="post-engagement-head">
+          <b>{title}</b>
+          <button type="button" className="post-engagement-close" onClick={() => setEngagementOpen(false)}>
+            Đóng
+          </button>
+        </div>
+        {engagementLoading ? <div className="post-engagement-loading">Đang tải...</div> : null}
+        {engagementError ? <div className="post-engagement-error">{engagementError}</div> : null}
+        {engagementWarning ? <div className="post-engagement-note">{engagementWarning}</div> : null}
+        {!engagementLoading && engagementTab === 'comments' ? (
+          engagementComments.length ? (
+            <div className="comments-list">
+              {engagementComments.map((comment, index) => {
+                const name = comment.from?.name || 'Ẩn danh';
+                return (
+                  <div key={comment.id || `cmt-${index}`} className="comment">
+                    <div className="comment-av">{initials(name)}</div>
+                    <div className="comment-bubble">
+                      <div className="comment-name">{name}</div>
+                      <div className="comment-msg">{comment.message || '[Không có nội dung chữ]'}</div>
+                      {comment.created_time ? (
+                        <small style={{ color: '#64748b', fontSize: 11 }}>{timeAgo(comment.created_time)}</small>
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="post-engagement-empty">Chưa có bình luận.</div>
+          )
+        ) : null}
+        {!engagementLoading && engagementTab === 'likes' ? (
+          engagementReactions.length ? (
+            <div className="reaction-list">
+              {engagementReactions.map((item, index) => (
+                <div key={item.id || `like-${index}`} className="reaction-item">
+                  <span className="reaction-type">{reactionEmoji(item.type)}</span>
+                  <span className="reaction-name">{item.name || 'Ẩn danh'}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="post-engagement-empty">Không lấy được danh sách người thích.</div>
+          )
+        ) : null}
+        {!engagementLoading && engagementTab === 'shares' ? (
+          <div className="post-engagement-note">
+            Tổng lượt chia sẻ: <b>{engagementShareCount ?? shares}</b>.
+            <br />
+            Facebook thường không cung cấp danh sách người share qua API.
+          </div>
+        ) : null}
+      </div>
+    );
   }
 
   return (
@@ -266,12 +406,6 @@ export function PostCard({
               <>
                 <span className="meta-dot" />
                 <span className="badge badge-lead">🧲 {postLeads.length} lead</span>
-              </>
-            ) : null}
-            {replySuggestion ? (
-              <>
-                <span className="meta-dot" />
-                <span className="badge badge-reply">🤖 Gợi ý</span>
               </>
             ) : null}
             {visibleCommentSummary ? (
@@ -348,18 +482,33 @@ export function PostCard({
       ) : null}
       {atts.some(Boolean) ? <div className="card-body" style={{ paddingTop: 0 }}>{atts}</div> : null}
       <div className="card-stats">
-        <div className="stat">
+        <button
+          type="button"
+          className={`stat stat-clickable${engagementOpen && engagementTab === 'likes' ? ' active' : ''}`}
+          onClick={() => void openEngagement('likes')}
+          title="Xem người thích"
+        >
           <span className="stat-icon">❤️</span> {reactions}
-        </div>
-        <div className="stat">
+        </button>
+        <button
+          type="button"
+          className={`stat stat-clickable${engagementOpen && engagementTab === 'comments' ? ' active' : ''}`}
+          onClick={() => void openEngagement('comments')}
+          title="Xem bình luận"
+        >
           <span className="stat-icon">💬</span> {cCount}
-        </div>
-        <div className="stat">
+        </button>
+        <button
+          type="button"
+          className={`stat stat-clickable${engagementOpen && engagementTab === 'shares' ? ' active' : ''}`}
+          onClick={() => void openEngagement('shares')}
+          title="Xem lượt chia sẻ"
+        >
           <span className="stat-icon">↗️</span> {shares}
-        </div>
+        </button>
       </div>
+      {renderEngagementPanel()}
       <LeadBlock items={postLeads} />
-      {replySuggestion ? <ReplySuggestionBlock item={replySuggestion} /> : null}
       {visibleCommentSummary ? <CommentSummaryBlock item={visibleCommentSummary} /> : null}
       <div className="card-footer">
         <div className="post-link">
@@ -368,23 +517,6 @@ export function PostCard({
           </a>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          {onSuggestReply ? (
-            <button
-              type="button"
-              className="btn-reply-ai"
-              disabled={suggestBusy}
-              onClick={async () => {
-                setSuggestBusy(true);
-                try {
-                  await onSuggestReply(post);
-                } finally {
-                  setSuggestBusy(false);
-                }
-              }}
-            >
-              {suggestBusy ? '⏳ AI đang đọc...' : '🤖 Gợi ý trả lời'}
-            </button>
-          ) : null}
           {onSummarizeComments ? (
             <button
               type="button"
