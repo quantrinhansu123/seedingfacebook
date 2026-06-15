@@ -1283,6 +1283,81 @@ export function MonitorPage() {
     });
   }
 
+  function requestTiktokExtensionOpenComment(payload: Record<string, unknown>): Promise<TikTokBridgeResult> {
+    return new Promise((resolve) => {
+      if (typeof window === 'undefined') {
+        resolve({ ok: false, error: 'Chỉ mở được TikTok trên trình duyệt Chrome có cài extension' });
+        return;
+      }
+
+      const requestId = `tiktok_open_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const timer = window.setTimeout(() => {
+        cleanup();
+        resolve({ ok: false, error: 'Extension chưa phản hồi khi mở comment TikTok' });
+      }, 45000);
+
+      const handleMessage = (event: MessageEvent) => {
+        if (event.source !== window) return;
+        const data = event.data || {};
+        if (data.source !== 'streal-tiktok-extension') return;
+        if (data.type !== 'STREAL_TIKTOK_OPEN_COMMENT_RESPONSE') return;
+        if (data.requestId !== requestId) return;
+        cleanup();
+        resolve(data as TikTokBridgeResult);
+      };
+
+      function cleanup() {
+        window.removeEventListener('message', handleMessage);
+        window.clearTimeout(timer);
+      }
+
+      window.addEventListener('message', handleMessage);
+      window.postMessage(
+        {
+          source: 'streal-web-page',
+          type: 'STREAL_TIKTOK_OPEN_COMMENT_REQUEST',
+          requestId,
+          payload,
+        },
+        window.location.origin,
+      );
+    });
+  }
+
+  async function openTiktokVideo(item: TikTokCommentStat) {
+    if (!item.post_url) return;
+    window.open(item.post_url, '_blank', 'noopener,noreferrer');
+  }
+
+  async function openTiktokComment(row: StoredPostComment) {
+    const fallbackUrl = row.comment_url || row.post_url || '';
+    if (!fallbackUrl) return;
+    if (!tiktokBridgeReady) {
+      window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+      setTiktokCommentStatus('Chưa thấy extension, đã mở link TikTok thường.');
+      return;
+    }
+
+    setTiktokCommentStatus('Đang mở video và định vị comment TikTok...');
+    const result = await requestTiktokExtensionOpenComment({
+      post_id: row.post_id,
+      video_id: row.post_id?.replace(/^tiktok_/, ''),
+      post_url: row.post_url || row.comment_url,
+      comment_url: row.comment_url,
+      comment_id: row.comment_id,
+      comment_text: row.message,
+      author_name: row.author_name,
+      channel_name: row.channel_name,
+      video_title: row.video_title,
+    });
+    if (result.ok) {
+      setTiktokCommentStatus(result.message || 'Đã mở TikTok và ghim comment cần xử lý.');
+      return;
+    }
+    window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+    setTiktokCommentStatus(`${result.error || 'Extension chưa định vị được comment'}, đã mở link thường.`);
+  }
+
   async function recordTiktokExtensionResult(status: 'success' | 'failed', message: string, result: TikTokBridgeResult) {
     const r = await api('/api/tiktok/comment/result', {
       method: 'POST',
@@ -2420,9 +2495,12 @@ export function MonitorPage() {
                           </td>
                           <td className="link-cell">
                             {item.post_url ? (
-                              <a href={item.post_url} target="_blank" rel="noreferrer">
+                              <button type="button" className="inline-link-button" onClick={(event) => {
+                                event.stopPropagation();
+                                void openTiktokVideo(item);
+                              }}>
                                 Mở
-                              </a>
+                              </button>
                             ) : (
                               '-'
                             )}
@@ -2503,9 +2581,9 @@ export function MonitorPage() {
                           <td>{row.phones?.length ? row.phones.join(', ') : '-'}</td>
                           <td className="link-cell">
                             {(row.comment_url || row.post_url) ? (
-                              <a href={row.comment_url || row.post_url} target="_blank" rel="noreferrer">
-                                Mở
-                              </a>
+                              <button type="button" className="inline-link-button" onClick={() => void openTiktokComment(row)}>
+                                Mở CMT
+                              </button>
                             ) : (
                               '-'
                             )}
