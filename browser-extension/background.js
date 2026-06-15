@@ -542,8 +542,8 @@ async function collectTikTokChannelVideos(request) {
 
 async function collectTikTokDomComments(request) {
   const payload = request.payload || {};
-  const maxVideos = Math.max(1, Math.min(Number(payload.max_videos || 8) || 8, 30));
-  const limitPerVideo = Math.max(1, Math.min(Number(payload.limit_per_video || 80) || 80, 250));
+  const maxVideos = Math.max(1, Math.min(Number(payload.max_videos || 8) || 8, 50));
+  const limitPerVideo = Math.max(1, Math.min(Number(payload.limit_per_video || 80) || 80, 300));
   let videos = Array.isArray(payload.videos) ? payload.videos : [];
   if (!videos.length) {
     const collected = await collectTikTokChannelVideos({

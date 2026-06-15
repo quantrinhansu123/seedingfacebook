@@ -2308,7 +2308,7 @@ def _fetch_tiktok_channel_videos(channel: str, max_videos: int = 8, cookie: str 
     handle, profile_url = _extract_tiktok_handle(channel)
     if not handle:
         return [], 'Không nhận diện được kênh TikTok. Nhập @username hoặc link kênh TikTok.'
-    max_videos = max(1, min(int(max_videos or 8), 30))
+    max_videos = max(1, min(int(max_videos or 8), 50))
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -3954,7 +3954,7 @@ def fetch_tiktok_channel_comments():
     body = request.get_json() or {}
     channel = str(body.get('channel') or body.get('channel_url') or body.get('handle') or '').strip()
     keywords = _normalize_keywords(body.get('keywords') or [])
-    max_videos = max(1, min(int(body.get('max_videos') or 8), 30))
+    max_videos = max(1, min(int(body.get('max_videos') or 8), 50))
     per_video_limit = max(1, min(int(body.get('limit_per_video') or body.get('limit') or 200), 500))
     cookie = str(body.get('cookie') or '').strip()
     videos, video_error = _fetch_tiktok_channel_videos(channel, max_videos=max_videos, cookie=cookie)
@@ -4228,8 +4228,8 @@ def import_tiktok_dom_comments():
 def fetch_configured_tiktok_channels_comments():
     body = request.get_json() or {}
     keywords = _normalize_keywords(body.get('keywords') or [])
-    max_videos = max(1, min(int(body.get('max_videos') or 5), 20))
-    per_video_limit = max(1, min(int(body.get('limit_per_video') or 150), 400))
+    max_videos = max(1, min(int(body.get('max_videos') or 5), 50))
+    per_video_limit = max(1, min(int(body.get('limit_per_video') or 150), 500))
     cookie = str(body.get('cookie') or '').strip()
     selected_ids = {
         str(item).strip()

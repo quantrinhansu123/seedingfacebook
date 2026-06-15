@@ -79,6 +79,9 @@ type TikTokDomCollectResult = TikTokBridgeResult & {
   comment_count?: number;
   video_count?: number;
 };
+type TikTokVideoCollectResult = TikTokBridgeResult & {
+  videos?: Array<Record<string, unknown>>;
+};
 type PostFetchReport = {
   group_id?: string;
   target_type?: 'group' | 'page' | string;
@@ -1163,6 +1166,95 @@ export function MonitorPage() {
     return data;
   }
 
+  async function importTikTokDomVideos(videos: Array<Record<string, unknown>>, prefix: string) {
+    const importResponse = await api('/api/tiktok/dom-comments/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        videos,
+        keywords: parseKeywordInput(tiktokKeywords),
+      }),
+      timeoutMs: PUBLISH_TIMEOUT_MS,
+    });
+    const imported = await readTikTokJson(importResponse, '/api/tiktok/dom-comments/import');
+    if (!imported.ok) {
+      throw new Error(imported.error || 'Backend chưa lưu được comment DOM');
+    }
+    const count = Number(imported.fetched_comment_count || imported.comment_count || 0);
+    const warn = imported.warning ? ` · ${imported.warning}` : '';
+    setTiktokStatus(`${prefix}: đã lưu thêm ${count} comment từ batch · khớp ${imported.matched_count || 0} · có SĐT ${imported.phone_count || 0} · ${imported.storage}${warn}`);
+    return imported;
+  }
+
+  async function collectTikTokByExtensionBatches(prefix: string, payload: Record<string, unknown>) {
+    const requestedVideos = Math.max(1, Math.min(Number(payload.max_videos || tiktokMaxVideos || 1), 50));
+    const requestedLimit = Math.max(1, Math.min(Number(payload.limit_per_video || tiktokLimitPerVideo || 80), 300));
+    const batchSize = requestedVideos >= 20 || requestedLimit >= 200 ? 5 : 8;
+    let videos: Array<Record<string, unknown>> = Array.isArray(payload.videos)
+      ? (payload.videos as Array<Record<string, unknown>>)
+      : [];
+
+    if (!videos.length && payload.channel) {
+      setTiktokStatus(`${prefix}: đang gom tối đa ${requestedVideos} video bằng Chrome extension...`);
+      const videoResult = await requestTiktokExtensionVideos({
+        channel: payload.channel,
+        max_videos: requestedVideos,
+      });
+      if (!videoResult.ok || !Array.isArray(videoResult.videos) || !videoResult.videos.length) {
+        throw new Error(videoResult.error || 'Extension chưa gom được video TikTok.');
+      }
+      videos = videoResult.videos.slice(0, requestedVideos);
+    }
+
+    if (!videos.length) {
+      throw new Error('Chưa có video TikTok để quét bằng extension.');
+    }
+
+    const allComments: StoredPostComment[] = [];
+    let totalMatched = 0;
+    let totalPhones = 0;
+    let storage = 'local';
+    const warnings: string[] = [];
+
+    for (let start = 0; start < videos.length; start += batchSize) {
+      const batch = videos.slice(start, start + batchSize);
+      const batchNo = Math.floor(start / batchSize) + 1;
+      const totalBatch = Math.ceil(videos.length / batchSize);
+      setTiktokStatus(`${prefix}: batch ${batchNo}/${totalBatch} · đang lấy ${batch.length} video · ${requestedLimit} comment/video...`);
+      const domResult = await requestTiktokExtensionDomComments({
+        videos: batch,
+        max_videos: batch.length,
+        limit_per_video: requestedLimit,
+      });
+      if (!domResult.ok && !domResult.videos?.length) {
+        warnings.push(`Batch ${batchNo}: ${domResult.error || 'không lấy được comment'}`);
+        continue;
+      }
+      const imported = await importTikTokDomVideos(domResult.videos || [], prefix);
+      allComments.push(...(imported.comments || []));
+      totalMatched += Number(imported.matched_count || 0);
+      totalPhones += Number(imported.phone_count || 0);
+      storage = imported.storage || storage;
+      if (imported.warning) warnings.push(String(imported.warning));
+      setTiktokRows([...allComments]);
+      await loadTiktokStats((imported.comments || [])[0]?.post_id || '');
+    }
+
+    if (!allComments.length) {
+      throw new Error(warnings.slice(0, 3).join(' | ') || 'Extension chạy xong nhưng chưa có comment nào.');
+    }
+
+    setTiktokRows(allComments);
+    setTiktokStatus(`${prefix}: hoàn tất quét sâu ${videos.length} video · ${allComments.length} comment · khớp ${totalMatched} · có SĐT ${totalPhones} · lưu ${storage}${warnings.length ? ` · cảnh báo: ${warnings.slice(0, 2).join(' | ')}` : ''}`);
+    return {
+      comments: allComments,
+      matched_count: totalMatched,
+      phone_count: totalPhones,
+      video_count: videos.length,
+      storage,
+    };
+  }
+
   async function fetchTiktokCommentsForFilter() {
     const url = tiktokUrl.trim();
     const selectedChannel = channels.find((item) => item.id === tiktokManagedChannelId);
@@ -1203,6 +1295,27 @@ export function MonitorPage() {
               max_videos: tiktokMaxVideos,
               limit_per_video: tiktokLimitPerVideo,
             };
+      const prefix = tiktokMode === 'video'
+        ? 'Video'
+        : tiktokMode === 'managed'
+          ? `${selectedChannel?.channel_name || 'Các kênh đã lưu'}`
+          : `Kênh ${url}`;
+      const shouldUseExtensionBatchFirst = tiktokMode !== 'video'
+        && tiktokBridgeReady
+        && (tiktokMode === 'channel' || Boolean(tiktokManagedChannelId))
+        && (tiktokMaxVideos > 30 || tiktokLimitPerVideo > 200);
+      if (shouldUseExtensionBatchFirst) {
+        const channel = tiktokMode === 'managed'
+          ? (selectedChannel?.link || selectedChannel?.target_id || selectedChannel?.channel_name || '')
+          : url;
+        await collectTikTokByExtensionBatches(prefix, {
+          channel,
+          max_videos: tiktokMaxVideos,
+          limit_per_video: tiktokLimitPerVideo,
+        });
+        setTiktokBusy(false);
+        return;
+      }
       const collectHint = '';
       const r = await api(endpoint, {
         method: 'POST',
@@ -1222,11 +1335,6 @@ export function MonitorPage() {
               return `${label}: ${count} cmt${error}`;
             }).join(' | ')}`
           : '';
-        const prefix = tiktokMode === 'video'
-          ? 'Video'
-          : tiktokMode === 'managed'
-            ? `${selectedChannel?.channel_name || 'Các kênh đã lưu'}`
-            : `Kênh ${url}`;
         setTiktokStatus(`${prefix}: đã đọc ${d.fetched_comment_count || d.comment_count || 0} comment · ${d.video_count ? `${d.video_count} video · ` : ''}khớp ${d.matched_count || 0} · có SĐT ${d.phone_count || 0} · lưu ${d.storage}${collectHint}${warn}${reportText}`);
         void loadTiktokStats(d.post_id || '');
 
@@ -1250,29 +1358,7 @@ export function MonitorPage() {
                 limit_per_video: tiktokLimitPerVideo,
               };
           setTiktokStatus(`${prefix}: backend chưa lấy được comment. Đang dùng Chrome extension để mở TikTok và scrape comment từ giao diện...`);
-          const domResult = await requestTiktokExtensionDomComments(domPayload);
-          if (domResult.ok && Array.isArray(domResult.videos) && domResult.videos.length) {
-            const importResponse = await api('/api/tiktok/dom-comments/import', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                videos: domResult.videos,
-                keywords: parseKeywordInput(tiktokKeywords),
-              }),
-              timeoutMs: PUBLISH_TIMEOUT_MS,
-            });
-            const imported = await readTikTokJson(importResponse, '/api/tiktok/dom-comments/import');
-            if (imported.ok) {
-              setTiktokRows(imported.comments || []);
-              const importWarn = imported.warning ? ` · ${imported.warning}` : '';
-              setTiktokStatus(`${prefix}: Chrome extension đã scrape ${imported.fetched_comment_count || imported.comment_count || 0} comment · ${imported.video_count || domResult.video_count || 0} video · khớp ${imported.matched_count || 0} · có SĐT ${imported.phone_count || 0} · lưu ${imported.storage}${importWarn}`);
-              await loadTiktokStats((imported.comments || [])[0]?.post_id || '');
-            } else {
-              setTiktokStatus(`${prefix}: extension có mở TikTok nhưng backend chưa lưu được comment DOM (${imported.error || 'không rõ lỗi'}).`);
-            }
-          } else {
-            setTiktokStatus(`${prefix}: backend 0 comment; extension cũng chưa scrape được comment (${domResult.error || 'không rõ lỗi'}). Hãy reload extension bản mới rồi thử lại.`);
-          }
+          await collectTikTokByExtensionBatches(prefix, domPayload);
         } else if (initialCount === 0 && !tiktokBridgeReady) {
           setTiktokStatus(`${prefix}: backend chưa lấy được comment và chưa thấy Chrome extension. Reload/cài extension rồi thử lại để scrape từ giao diện TikTok.${warn}${reportText}`);
         }
@@ -1427,6 +1513,47 @@ export function MonitorPage() {
         {
           source: 'streal-web-page',
           type: 'STREAL_TIKTOK_COLLECT_DOM_COMMENTS_REQUEST',
+          requestId,
+          payload,
+        },
+        window.location.origin,
+      );
+    });
+  }
+
+  function requestTiktokExtensionVideos(payload: Record<string, unknown>): Promise<TikTokVideoCollectResult> {
+    return new Promise((resolve) => {
+      if (typeof window === 'undefined') {
+        resolve({ ok: false, videos: [], error: 'Chỉ gom được video TikTok trên Chrome có cài extension' });
+        return;
+      }
+
+      const requestId = `tiktok_videos_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const timer = window.setTimeout(() => {
+        cleanup();
+        resolve({ ok: false, videos: [], error: 'Extension chưa phản hồi khi gom video TikTok' });
+      }, 180000);
+
+      const handleMessage = (event: MessageEvent) => {
+        if (event.source !== window) return;
+        const data = event.data || {};
+        if (data.source !== 'streal-tiktok-extension') return;
+        if (data.type !== 'STREAL_TIKTOK_COLLECT_VIDEOS_RESPONSE') return;
+        if (data.requestId !== requestId) return;
+        cleanup();
+        resolve(data as TikTokVideoCollectResult);
+      };
+
+      function cleanup() {
+        window.removeEventListener('message', handleMessage);
+        window.clearTimeout(timer);
+      }
+
+      window.addEventListener('message', handleMessage);
+      window.postMessage(
+        {
+          source: 'streal-web-page',
+          type: 'STREAL_TIKTOK_COLLECT_VIDEOS_REQUEST',
           requestId,
           payload,
         },
