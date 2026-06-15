@@ -184,6 +184,151 @@ async function publishCommentFromBackground(payload, url, previousError) {
   };
 }
 
+function normalizeTikTokApiComment(item, videoId, depth = 0, parentId = '') {
+  const user = item?.user || {};
+  const cid = String(item?.cid || item?.id || item?.comment_id || '').trim();
+  const text = String(item?.text || item?.share_info?.desc || '').trim();
+  if (!cid || !text) return null;
+  const authorName = String(user.nickname || user.unique_id || user.uid || 'Ẩn danh').trim();
+  return {
+    id: cid,
+    cid,
+    text,
+    author_name: authorName,
+    author_id: String(user.uid || user.sec_uid || user.unique_id || authorName || '').trim(),
+    create_time: item.create_time || null,
+    depth,
+    parent_comment_id: parentId,
+    source: 'chrome_api',
+    video_id: videoId,
+  };
+}
+
+async function fetchTikTokCommentsByApi(video, limit, cookieInfo) {
+  const url = normalizeTikTokUrl(video) || String(video.post_url || video.url || '').trim();
+  const videoId = getVideoId(video, url);
+  if (!videoId || !url) {
+    return { ok: false, comments: [], error: 'Khong xac dinh duoc video TikTok de doc API.' };
+  }
+  if (!cookieInfo?.cookieHeader) {
+    return { ok: false, comments: [], error: 'Chrome chua co cookie TikTok de doc API nhanh.' };
+  }
+
+  const comments = [];
+  const headers = {
+    'Accept': 'application/json, text/plain, */*',
+    'Referer': url,
+    'Origin': TIKTOK_HOST,
+  };
+  if (cookieInfo.csrf) {
+    headers['X-Secsdk-Csrf-Token'] = cookieInfo.csrf;
+    headers['x-secsdk-csrf-token'] = cookieInfo.csrf;
+  }
+
+  async function requestJson(path, params) {
+    const response = await fetch(`${TIKTOK_HOST}${path}?${params.toString()}`, {
+      method: 'GET',
+      credentials: 'include',
+      headers,
+    });
+    let data = {};
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+    if (!response.ok) {
+      throw new Error(`TikTok API ${path} loi ${response.status}: ${friendlyTikTokError(data, response.statusText)}`);
+    }
+    const statusCode = data.status_code;
+    if (statusCode !== 0 && statusCode !== '0' && statusCode !== undefined) {
+      throw new Error(`TikTok API ${path}: ${friendlyTikTokError(data, 'TikTok khong tra comment.')}`);
+    }
+    return data;
+  }
+
+  async function fetchReplies(parentId, remain) {
+    const rows = [];
+    let cursor = 0;
+    for (let page = 0; page < 3 && rows.length < remain; page += 1) {
+      const count = Math.min(30, remain - rows.length);
+      const params = new URLSearchParams({
+        item_id: videoId,
+        comment_id: parentId,
+        cursor: String(cursor),
+        count: String(count),
+        aid: '1988',
+        app_language: 'vi-VN',
+        browser_language: 'vi-VN',
+        device_platform: 'webapp',
+        region: 'VN',
+        os: 'windows',
+      });
+      const data = await requestJson('/api/comment/list/reply/', params);
+      const batch = Array.isArray(data.comments) ? data.comments : [];
+      if (!batch.length) break;
+      for (const item of batch) {
+        const row = normalizeTikTokApiComment(item, videoId, 1, parentId);
+        if (row) rows.push(row);
+        if (rows.length >= remain) break;
+      }
+      const nextCursor = Number(data.cursor ?? cursor);
+      if (!data.has_more || nextCursor === cursor) break;
+      cursor = nextCursor;
+    }
+    return rows;
+  }
+
+  try {
+    let cursor = 0;
+    for (let page = 0; page < 8 && comments.length < limit; page += 1) {
+      const count = Math.min(50, limit - comments.length);
+      const params = new URLSearchParams({
+        aweme_id: videoId,
+        cursor: String(cursor),
+        count: String(count),
+        aid: '1988',
+        app_language: 'vi-VN',
+        browser_language: 'vi-VN',
+        device_platform: 'webapp',
+        region: 'VN',
+        os: 'windows',
+      });
+      const data = await requestJson('/api/comment/list/', params);
+      const batch = Array.isArray(data.comments) ? data.comments : [];
+      if (!batch.length) {
+        const msg = data.status_msg || data.message || 'TikTok API khong tra comment.';
+        return { ok: false, comments, error: msg };
+      }
+      for (const item of batch) {
+        const row = normalizeTikTokApiComment(item, videoId, 0, '');
+        if (row) comments.push(row);
+        const replyTotal = Number(item.reply_comment_total || item.reply_comment_count || 0);
+        if (row?.id && replyTotal > 0 && comments.length < limit) {
+          try {
+            const replies = await fetchReplies(row.id, Math.min(20, limit - comments.length));
+            comments.push(...replies);
+          } catch {
+            // Reply API is best-effort; keep root comments.
+          }
+        }
+        if (comments.length >= limit) break;
+      }
+      const nextCursor = Number(data.cursor ?? cursor);
+      if (!data.has_more || nextCursor === cursor) break;
+      cursor = nextCursor;
+    }
+    return {
+      ok: comments.length > 0,
+      comments: comments.slice(0, limit),
+      error: comments.length ? '' : 'TikTok API khong tra comment.',
+      method: 'chrome-api',
+    };
+  } catch (error) {
+    return { ok: false, comments, error: error?.message || String(error), method: 'chrome-api' };
+  }
+}
+
 function waitForTabLoaded(tabId, timeoutMs = 30000) {
   return new Promise((resolve) => {
     let done = false;
@@ -420,9 +565,24 @@ async function collectTikTokDomComments(request) {
   }
 
   const results = [];
+  const cookieInfo = await getTikTokCookies();
   for (const video of videos.slice(0, maxVideos)) {
     const url = normalizeTikTokUrl(video) || String(video.post_url || video.url || '').trim();
     if (!url) continue;
+    const apiResult = await fetchTikTokCommentsByApi(video, limitPerVideo, cookieInfo);
+    if (apiResult.ok && apiResult.comments.length) {
+      results.push({
+        ...video,
+        video_id: video.video_id || getVideoId(video, url),
+        post_url: url,
+        video_title: video.video_title || `Video ${getVideoId(video, url)}`,
+        comments: apiResult.comments,
+        error: '',
+        method: 'chrome-api',
+      });
+      continue;
+    }
+
     const tab = await chrome.tabs.create({ url, active: true });
     await waitForTabLoaded(tab.id, 35000);
     await sleep(3500);
@@ -594,7 +754,8 @@ async function collectTikTokDomComments(request) {
       post_url: url,
       video_title: video.video_title || result.page_title || `Video ${getVideoId(video, url)}`,
       comments: result.comments || [],
-      error: result.error || '',
+      error: result.error || apiResult.error || '',
+      method: result.comments?.length ? 'chrome-dom' : 'chrome-dom-failed',
     });
 
     try {
@@ -610,7 +771,7 @@ async function collectTikTokDomComments(request) {
     videos: results,
     comment_count: totalComments,
     video_count: results.length,
-    message: `Chrome da scrape ${totalComments} comment tu ${results.length} video TikTok`,
+    message: `Chrome da lay ${totalComments} comment tu ${results.length} video TikTok`,
     error: totalComments ? '' : 'Chrome da mo video TikTok nhung chua scrape duoc comment nao tu DOM.',
   };
 }
