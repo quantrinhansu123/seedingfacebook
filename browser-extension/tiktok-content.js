@@ -22,6 +22,36 @@
     return false;
   }
 
+  function elementText(el) {
+    return normalizeText(el?.innerText || el?.textContent || '');
+  }
+
+  function rightSideVisible(el) {
+    if (!isVisible(el)) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.left > window.innerWidth * 0.45 && rect.width > 80 && rect.height > 18;
+  }
+
+  function clickCommentsTab() {
+    const candidates = Array.from(document.querySelectorAll('button, [role="tab"], [role="button"], div, span')).filter((node) => {
+      if (!rightSideVisible(node)) return false;
+      const text = elementText(node);
+      return text === 'bình luận' || text === 'comments' || text === 'comment';
+    });
+    const target = candidates.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      return ar.top - br.top || ar.left - br.left;
+    })[0];
+    if (!target) return false;
+    try {
+      target.click();
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
   function maybeOpenCommentPanel() {
     const selectors = [
       '[data-e2e="comment-icon"]',
@@ -30,6 +60,7 @@
       'div[role="button"][aria-label*="comment" i]',
     ];
     selectors.some(clickIfVisible);
+    clickCommentsTab();
   }
 
   function tiktokPageError() {
@@ -296,10 +327,10 @@
     while (node && node !== document.body) {
       const style = window.getComputedStyle(node);
       const canScroll = /(auto|scroll)/i.test(`${style.overflowY} ${style.overflow}`) && node.scrollHeight > node.clientHeight + 20;
-      if (canScroll) return node;
+      if (canScroll && node.getBoundingClientRect().left > window.innerWidth * 0.45) return node;
       node = node.parentElement;
     }
-    return document.scrollingElement || document.documentElement;
+    return findCommentScroller();
   }
 
   function findCommentScroller() {
@@ -324,46 +355,44 @@
         const rect = node.getBoundingClientRect();
         const extraScroll = node.scrollHeight - node.clientHeight;
         if (extraScroll < 80 || rect.height < 220 || rect.width < 240) return;
+        if (rect.left < window.innerWidth * 0.46) return;
         const attr = `${node.className || ''} ${node.id || ''} ${node.getAttribute('data-e2e') || ''}`.toLowerCase();
         const text = normalizeText(node.innerText || node.textContent || '').slice(0, 500);
         let score = 0;
-        if (rect.left > window.innerWidth * 0.48) score += 200;
+        if (rect.left > window.innerWidth * 0.48) score += 240;
+        if (rect.right > window.innerWidth * 0.78) score += 80;
         if (attr.includes('comment')) score += 180;
         if (text.includes('bình luận') || text.includes('comment')) score += 120;
         if (text.includes('trả lời') || text.includes('reply')) score += 40;
+        if (text.includes('bạn có thể thích') || text.includes('you may like')) score -= 260;
+        if (attr.includes('recommend') || attr.includes('suggest')) score -= 220;
         score += Math.min(extraScroll / 20, 120);
         score -= Math.abs(rect.right - window.innerWidth) / 20;
         candidates.push({ node, score });
       });
     }
     candidates.sort((a, b) => b.score - a.score);
-    return candidates[0]?.node || document.scrollingElement || document.documentElement;
+    return candidates[0]?.score >= 120 ? candidates[0].node : null;
   }
 
   function scrollCommentPanel(scroller) {
-    const before = scroller.scrollTop || window.scrollY || 0;
-    const delta = Math.max(420, Math.floor((scroller.clientHeight || window.innerHeight || 760) * 0.72));
+    if (!scroller) return null;
+    const before = scroller.scrollTop || 0;
+    const delta = Math.max(360, Math.floor((scroller.clientHeight || 760) * 0.68));
     try {
       scroller.scrollBy({ top: delta, behavior: 'smooth' });
     } catch (error) {
       scroller.scrollTop = before + delta;
     }
-    const eventTarget = scroller === document.scrollingElement || scroller === document.documentElement
-      ? document.elementFromPoint(window.innerWidth - 180, Math.max(180, window.innerHeight * 0.45)) || document.body
-      : scroller;
-    eventTarget.dispatchEvent(new WheelEvent('wheel', {
-      bubbles: true,
-      cancelable: true,
-      deltaY: delta,
-      clientX: window.innerWidth - 180,
-      clientY: Math.max(180, window.innerHeight * 0.45),
-    }));
+    scroller.dispatchEvent(new Event('scroll', { bubbles: false }));
     return before;
   }
 
-  function expandVisibleReplies(limit = 4) {
+  function expandVisibleReplies(limit = 4, root = null) {
     let clicked = 0;
-    const buttons = Array.from(document.querySelectorAll('button, [role="button"], div, span')).filter((node) => {
+    const scope = root || findCommentScroller();
+    if (!scope) return 0;
+    const buttons = Array.from(scope.querySelectorAll('button, [role="button"], div, span')).filter((node) => {
       if (!isVisible(node)) return false;
       if (node.closest('[data-streal-comment-context-card="true"], [data-streal-comment-badge="true"]')) return false;
       const rect = node.getBoundingClientRect();
@@ -389,12 +418,12 @@
 
   function scrollToCommentElement(target) {
     const scroller = nearestScrollableParent(target);
+    if (!scroller) return false;
     const targetRect = target.getBoundingClientRect();
-    const scrollerRect = scroller === document.scrollingElement || scroller === document.documentElement
-      ? { top: 0, height: window.innerHeight }
-      : scroller.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
     const nextTop = scroller.scrollTop + targetRect.top - scrollerRect.top - Math.max(48, scrollerRect.height * 0.25);
     scroller.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' });
+    return true;
   }
 
   function highlightCommentElement(target, payload) {
@@ -435,20 +464,24 @@
     }
   }
 
-  function findCommentCandidate(payload) {
+  function findCommentCandidate(payload, root = null) {
+    const scope = root || findCommentScroller();
+    if (!scope) return null;
     const targetText = normalizeText(payload.comment_text).slice(0, 180);
     const targetLoose = looseText(payload.comment_text).slice(0, 180);
     const targetLooseShort = targetLoose.slice(0, Math.min(70, Math.max(24, targetLoose.length)));
     const author = normalizeText(payload.author_name).slice(0, 80);
     const authorLoose = looseText(payload.author_name).slice(0, 80);
     const rawCommentId = stripTiktokPrefix(payload.comment_id);
-    const nodes = Array.from(document.querySelectorAll(
+    const nodes = Array.from(scope.querySelectorAll(
       '[data-e2e*="comment"], [class*="Comment"], [class*="comment"], div, p, span',
     ));
     const scored = [];
     for (const node of nodes) {
       if (!isVisible(node)) continue;
       if (node.closest('[data-streal-comment-context-card="true"], [data-streal-comment-badge="true"]')) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.left < window.innerWidth * 0.45) continue;
       const text = normalizeText(node.innerText || node.textContent || '');
       if (!text || text.length > 1600) continue;
       const loose = looseText(text);
@@ -476,12 +509,22 @@
     await sleep(900);
 
     let scroller = findCommentScroller();
+    if (!scroller) {
+      clickCommentsTab();
+      await sleep(700);
+      scroller = findCommentScroller();
+    }
+    if (!scroller) {
+      if (status) status('Không xác định được panel bình luận TikTok, đã dừng để tránh cuộn nhầm video.');
+      return { target: null, scanned: 0, scrolled: 0, error: 'comment-scroller-not-found' };
+    }
+
     let stagnant = 0;
     let lastTop = -1;
     for (let i = 0; i <= maxScrolls; i += 1) {
-      expandVisibleReplies(3);
+      expandVisibleReplies(3, scroller);
       await sleep(i === 0 ? 250 : 150);
-      const target = findCommentCandidate(payload);
+      const target = findCommentCandidate(payload, scroller);
       if (target) {
         highlightCommentElement(target, payload);
         return { target, scanned: i + 1, scrolled: i };
@@ -489,24 +532,21 @@
 
       if (i === maxScrolls) break;
       if (status) status(`Đang tìm comment... lượt ${i + 1}/${maxScrolls + 1}`);
-      scroller = findCommentScroller() || scroller;
+      const latestScroller = findCommentScroller();
+      if (latestScroller) scroller = latestScroller;
       const before = scrollCommentPanel(scroller);
+      if (before === null) {
+        if (status) status('Không còn xác định được panel bình luận TikTok, đã dừng để tránh cuộn nhầm video.');
+        break;
+      }
       await sleep(delayMs);
-      const after = scroller.scrollTop || window.scrollY || 0;
+      const after = scroller.scrollTop || 0;
       if (Math.abs(after - lastTop) < 8 || Math.abs(after - before) < 8) stagnant += 1;
       else stagnant = 0;
       lastTop = after;
       if (stagnant >= 6) {
-        const fallbackTarget = document.elementFromPoint(window.innerWidth - 160, Math.max(220, window.innerHeight * 0.52)) || scroller;
-        fallbackTarget.dispatchEvent(new WheelEvent('wheel', {
-          bubbles: true,
-          cancelable: true,
-          deltaY: 720,
-          clientX: window.innerWidth - 160,
-          clientY: Math.max(220, window.innerHeight * 0.52),
-        }));
-        await sleep(900);
-        stagnant = 0;
+        if (status) status('Panel bình luận không tải thêm comment mới. Đã dừng để tránh cuộn nhầm video.');
+        break;
       }
     }
     return { target: null, scanned: maxScrolls + 1, scrolled: maxScrolls };

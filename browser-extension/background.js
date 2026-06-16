@@ -635,10 +635,11 @@ async function collectTikTokDomComments(request) {
               let score = extra / 20;
               if (attr.includes('comment')) score += 220;
               if (text.includes('bình luận') || text.includes('comment')) score += 120;
+              if (text.includes('bạn có thể thích') || text.includes('you may like')) score -= 260;
               candidates.push({ node, score });
             });
             candidates.sort((a, b) => b.score - a.score);
-            return candidates[0]?.node || document.scrollingElement || document.documentElement;
+            return candidates[0]?.score >= 120 ? candidates[0].node : null;
           };
           const expandReplies = () => {
             Array.from(document.querySelectorAll('button, [role="button"], div, span')).slice(0, 1500).forEach((node) => {
@@ -717,19 +718,22 @@ async function collectTikTokDomComments(request) {
           clickCommentPanel();
           await sleep(1200);
           let scroller = findCommentScroller();
+          if (!scroller) {
+            return {
+              ok: false,
+              comments: [],
+              comment_count: 0,
+              page_title: document.title,
+              url: window.location.href,
+              error: 'Khong xac dinh duoc panel binh luan TikTok, bo qua de tranh cuon nham video.',
+            };
+          }
           let rows = collect();
           for (let i = 0; i < 22 && rows.length < limit; i += 1) {
             expandReplies();
             const delta = Math.max(420, Math.floor((scroller.clientHeight || window.innerHeight || 800) * 0.75));
             try { scroller.scrollBy({ top: delta, behavior: 'smooth' }); } catch { scroller.scrollTop += delta; }
-            const wheelTarget = document.elementFromPoint(window.innerWidth - 180, Math.max(220, window.innerHeight * 0.55)) || scroller;
-            wheelTarget.dispatchEvent(new WheelEvent('wheel', {
-              bubbles: true,
-              cancelable: true,
-              deltaY: delta,
-              clientX: window.innerWidth - 180,
-              clientY: Math.max(220, window.innerHeight * 0.55),
-            }));
+            scroller.dispatchEvent(new Event('scroll', { bubbles: false }));
             await sleep(950);
             scroller = findCommentScroller() || scroller;
             rows = collect();
