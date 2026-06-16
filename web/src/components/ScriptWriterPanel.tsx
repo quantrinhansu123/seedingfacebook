@@ -567,15 +567,12 @@ export function ScriptWriterPanel() {
     setNotice('Đã copy toàn bộ kịch bản.');
   }
 
-  function printCompleteVersion() {
-    if (!selected) return;
-    const popup = window.open('', '_blank', 'noopener,noreferrer');
-    if (!popup) {
-      setNotice('Trình duyệt chặn cửa sổ in. Cho phép popup rồi thử lại.');
-      return;
-    }
+  function buildPrintableHtml() {
+    if (!selected) return '';
+    const post = facebookPost || buildFacebookPost(selected);
     const printedAt = new Date().toLocaleDateString('vi-VN');
-    popup.document.write(`<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8"><title>${escapeHtml(selected.title)}</title><style>
+    const bodyHtml = post.html || '<p style="color:#9CA3AF">Kịch bản chưa có nội dung.</p>';
+    return `<!DOCTYPE html><html lang="vi"><head><meta charset="UTF-8"><title>${escapeHtml(selected.title)}</title><style>
       @page { margin: 18mm; }
       body { font-family: "Segoe UI", Arial, sans-serif; max-width: 680px; margin: 36px auto; color: #1E1B4B; padding: 0 18px; }
       .head { border-bottom: 3px solid #1877F2; padding-bottom: 12px; margin-bottom: 22px; }
@@ -593,15 +590,56 @@ export function ScriptWriterPanel() {
         <h1>${escapeHtml(selected.title)}</h1>
         <div class="meta">${escapeHtml(selected.writer)} · ${escapeHtml(selected.platform)} · ${escapeHtml(selected.date)}</div>
       </div>
-      <div class="post">${facebookPost?.html || '<p style="color:#9CA3AF">Kịch bản chưa có nội dung.</p>'}</div>
+      <div class="post">${bodyHtml}</div>
       <div class="foot">In ngày ${printedAt}</div>
-    </body></html>`);
-    popup.document.close();
-    window.setTimeout(() => {
-      popup.focus();
-      popup.print();
-    }, 400);
-    setNotice('Đã mở bản in.');
+    </body></html>`;
+  }
+
+  function printCompleteVersion() {
+    if (!selected) {
+      setNotice('Chọn kịch bản trước khi in.');
+      return;
+    }
+    const printable = buildPrintableHtml();
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+    document.body.appendChild(iframe);
+
+    const frameWindow = iframe.contentWindow;
+    const frameDoc = iframe.contentDocument || frameWindow?.document;
+    if (!frameWindow || !frameDoc) {
+      iframe.remove();
+      setNotice('Trình duyệt không hỗ trợ in. Thử Chrome hoặc Edge.');
+      return;
+    }
+
+    const cleanup = () => {
+      window.setTimeout(() => iframe.remove(), 500);
+    };
+
+    const triggerPrint = () => {
+      try {
+        frameWindow.focus();
+        frameWindow.print();
+        setNotice('Đã mở hộp thoại in.');
+      } catch {
+        setNotice('Không mở được hộp thoại in. Thử lại hoặc dùng Copy rồi dán vào Word.');
+      } finally {
+        window.setTimeout(cleanup, 60000);
+      }
+    };
+
+    frameDoc.open();
+    frameDoc.write(printable);
+    frameDoc.close();
+
+    if (frameWindow.document.readyState === 'complete') {
+      window.setTimeout(triggerPrint, 150);
+    } else {
+      frameWindow.onload = () => window.setTimeout(triggerPrint, 150);
+      window.setTimeout(triggerPrint, 600);
+    }
   }
 
   async function copyFacebookPost() {
@@ -809,7 +847,7 @@ export function ScriptWriterPanel() {
                 <button type="button" className="script-primary compact" onClick={() => void copyFacebookPost()} disabled={!facebookPost.hasContent}>
                   <Clipboard /> Copy FB
                 </button>
-                <button type="button" onClick={printCompleteVersion} disabled={!facebookPost.hasContent} title="In"><Printer /></button>
+                <button type="button" onClick={printCompleteVersion} title="In kịch bản"><Printer /></button>
                 <button type="button" onClick={() => void copyCompleteVersion()} disabled={!facebookPost.hasContent} title="Copy text"><Copy /></button>
                 <button type="button" onClick={exportScript} title="Xuất .txt"><FileDown /></button>
               </div>

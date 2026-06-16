@@ -37,8 +37,20 @@ export function HistoryPanel({ rows, status, onReload }: { rows: CommentLog[]; s
                   <td className="mono-cell">{item.post_id || '-'}</td>
                   <td>{item.comment_text || item.error_message || '-'}</td>
                   <td>
-                    <span className={item.status === 'success' ? 'status-pill ok' : 'status-pill fail'}>
-                      {item.status === 'success' ? 'Đã xử lý' : 'Lỗi'}
+                    <span
+                      className={
+                        item.status === 'failed'
+                          ? 'status-pill fail'
+                          : 'status-pill ok'
+                      }
+                    >
+                      {item.status === 'failed'
+                        ? 'Lỗi'
+                        : item.status === 'processed'
+                          ? 'Đã xử lý'
+                          : item.status === 'success'
+                            ? 'Đã comment'
+                            : item.status || '—'}
                     </span>
                   </td>
                 </tr>

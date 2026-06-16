@@ -5,7 +5,11 @@ const DEFAULT_API_PROXY_BASE_URL = 'https://seeding-fb.onrender.com';
 const webRoot = path.join(__dirname);
 
 function normalizeUrl(value?: string): string {
-  return (value || '').trim().replace(/\/$/, '');
+  let normalized = (value || '').trim().replace(/\/$/, '');
+  if (normalized.toLowerCase().endsWith('/api')) {
+    normalized = normalized.slice(0, -4).replace(/\/$/, '');
+  }
+  return normalized;
 }
 
 function hostOf(value: string): string {
@@ -14,6 +18,11 @@ function hostOf(value: string): string {
   } catch {
     return '';
   }
+}
+
+function isLocalBackend(url: string): boolean {
+  const host = hostOf(url);
+  return host === '127.0.0.1' || host === 'localhost';
 }
 
 function resolveApiProxyBase(): string {
@@ -29,15 +38,19 @@ function resolveApiProxyBase(): string {
       .filter(Boolean),
   );
 
+  // Local dev must hit Flask on this machine, even if .env.local still points to Render.
+  if (process.env.NODE_ENV === 'development') {
+    if (configured && isLocalBackend(configured)) {
+      return configured;
+    }
+    return 'http://127.0.0.1:5000';
+  }
+
   // API_PROXY_BASE_URL must point to the Flask backend. If it points back to the
   // Vercel frontend, /api rewrites loop to itself and the login page shows
   // "Không kết nối được server".
   if (configured && !frontendHosts.has(hostOf(configured))) {
     return configured;
-  }
-  // Local `npm run dev` should talk to Flask on this machine, not Render.
-  if (process.env.NODE_ENV === 'development') {
-    return 'http://127.0.0.1:5000';
   }
   return DEFAULT_API_PROXY_BASE_URL;
 }

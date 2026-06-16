@@ -5,7 +5,7 @@ function sleep(ms) {
 }
 
 function normalizeTikTokUrl(payload) {
-  const rawUrl = String(payload.post_url || payload.video_url || payload.url || '').trim();
+  const rawUrl = String(payload.comment_url || payload.post_url || payload.video_url || payload.url || '').trim();
   const videoIdFromUrl = rawUrl.match(/\/video\/(\d+)/)?.[1] || '';
   const rawVideoId = String(payload.video_id || payload.post_id || '').replace(/^tiktok_/, '').trim();
   const videoId = videoIdFromUrl || rawVideoId.match(/\d{8,}/)?.[0] || '';

@@ -29,6 +29,8 @@ create table if not exists public.staff_users (
     role             text not null default 'staff',
     cookie           text,
     facebook_user_id text,
+    managed_groups   jsonb not null default '[]'::jsonb,
+    facebook_cookies jsonb not null default '[]'::jsonb,
     enabled          boolean not null default true,
     created_at       timestamptz not null default now(),
     updated_at       timestamptz not null default now()

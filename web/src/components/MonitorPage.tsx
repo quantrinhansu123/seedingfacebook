@@ -22,9 +22,9 @@ import type {
   CommentSummary,
   ContentPipelineArticle,
   ContentPipelinePost,
+  FacebookCookieContext,
   FbPage,
   FbPost,
-  GroupRow,
   Lead,
   ManagedChannel,
   StaffAccount,
@@ -32,7 +32,7 @@ import type {
   TikTokCommentStat,
 } from '@/lib/types';
 import { CommentAuthorLink } from '@/components/CommentAuthorLink';
-import { classifyFacebookFeedError, extractSlug } from '@/lib/utils';
+import { classifyFacebookFeedError, facebookGroupIdFromChannel } from '@/lib/utils';
 
 type AiProviders = Record<string, { default_model?: string }>;
 type AiConfig = {
@@ -49,16 +49,6 @@ type ContentPipelineData = {
   posts?: ContentPipelinePost[];
   stats?: { sources?: number; articles?: number; new_articles?: number; draft_posts?: number };
 };
-type TikTokCookieConfig = {
-  has_cookie?: boolean;
-  has_login_cookie?: boolean;
-  cookie_masked?: string;
-  source?: string;
-  updated_at?: string;
-  updated_by?: string;
-  can_manage?: boolean;
-};
-
 type TikTokBridgeResult = {
   ok?: boolean;
   final?: boolean;
@@ -122,6 +112,10 @@ export function MonitorPage() {
   const [staffRows, setStaffRows] = useState<StaffAccount[]>([]);
   const [canManageStaff, setCanManageStaff] = useState(false);
   const [staffStatus, setStaffStatus] = useState('');
+  const [staffLoading, setStaffLoading] = useState(false);
+  const [facebookCookieContext, setFacebookCookieContext] = useState<FacebookCookieContext | null>(null);
+  const [facebookCookieBusy, setFacebookCookieBusy] = useState(false);
+  const [facebookCookieLoading, setFacebookCookieLoading] = useState(false);
   const [activeView, setActiveView] = useState<ViewKey>('home');
   const pathname = usePathname();
   const router = useRouter();
@@ -162,8 +156,6 @@ export function MonitorPage() {
   const [headerSub, setHeaderSub] = useState('Đang tải...');
 
   const [catFilter, setCatFilter] = useState('');
-  const [groupInp, setGroupInp] = useState('');
-  const [groupBusy, setGroupBusy] = useState(false);
   const [joinPrompt, setJoinPrompt] = useState<JoinPrompt | null>(null);
   const [joinMsg, setJoinMsg] = useState('');
   const [joinBusy, setJoinBusy] = useState(false);
@@ -211,10 +203,6 @@ export function MonitorPage() {
   const [tiktokCommentText, setTiktokCommentText] = useState('');
   const [tiktokCommentStatus, setTiktokCommentStatus] = useState('');
   const [tiktokCommentBusy, setTiktokCommentBusy] = useState(false);
-  const [tiktokCookieConfig, setTiktokCookieConfig] = useState<TikTokCookieConfig>({});
-  const [tiktokCookieInput, setTiktokCookieInput] = useState('');
-  const [tiktokCookieStatus, setTiktokCookieStatus] = useState('');
-  const [tiktokCookieBusy, setTiktokCookieBusy] = useState(false);
   const [tiktokBridgeReady, setTiktokBridgeReady] = useState(false);
   const [tiktokBridgeVersion, setTiktokBridgeVersion] = useState('');
 
@@ -299,30 +287,122 @@ export function MonitorPage() {
   }, []);
 
   const loadStaffCookies = useCallback(async () => {
+    setStaffLoading(true);
     try {
       const r = await api('/api/staff-cookies');
       const d = await r.json();
       setStaffRows(d.staff || []);
       setCanManageStaff(!!d.can_manage);
       if (d.warning) setStaffStatus(`⚠️ ${d.warning}`);
+      else setStaffStatus('');
     } catch {
       setStaffStatus('Không tải được cookie nhân sự');
+    } finally {
+      setStaffLoading(false);
     }
   }, []);
 
-  const loadTiktokCookieConfig = useCallback(async () => {
+  const loadFacebookCookieContext = useCallback(async () => {
+    setFacebookCookieLoading(true);
     try {
-      const r = await api('/api/tiktok/config');
-      const d = await r.json();
-      if (d.ok) {
-        setTiktokCookieConfig(d.config || {});
-        setTiktokCookieStatus('');
-      } else {
-        setTiktokCookieStatus('Không tải được TikTok cookie');
+      const r = await api('/api/facebook-cookie/context', { timeoutMs: 30000 });
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 401) {
+        setFacebookCookieContext({ ok: false, error: d.error || 'Vui lòng đăng nhập lại' });
+        return;
       }
-    } catch {
-      setTiktokCookieStatus('Không kết nối được backend khi tải TikTok cookie');
+      if (r.status === 404) {
+        try {
+          const r2 = await api('/api/staff-cookies', { timeoutMs: 15000 });
+          const d2 = await r2.json().catch(() => ({}));
+          if (r2.ok && d2.facebook_context?.ok) {
+            setFacebookCookieContext(d2.facebook_context);
+            return;
+          }
+        } catch {
+          /* fallback below */
+        }
+        setFacebookCookieContext({ ok: true, cookies: [] });
+        return;
+      }
+      if (!r.ok || !d.ok) {
+        setFacebookCookieContext({ ok: false, error: d.error || `Lỗi server ${r.status}` });
+        return;
+      }
+      setFacebookCookieContext(d);
+      if (d.active_facebook_name || d.active_facebook_user_id) {
+        setCurrentStaff((prev) => (prev ? {
+          ...prev,
+          active_facebook_name: d.active_facebook_name || prev.active_facebook_name,
+          facebook_user_id: d.active_facebook_user_id || prev.facebook_user_id,
+          active_cookie_id: d.active_cookie_id || prev.active_cookie_id,
+          facebook_cookies: d.cookies || prev.facebook_cookies,
+        } : prev));
+      }
+    } catch (err: unknown) {
+      const aborted = err instanceof DOMException && err.name === 'AbortError';
+      setFacebookCookieContext((prev) => ({
+        ...(prev || { ok: true }),
+        ok: true,
+        error: aborted ? 'Đang đọc tên Facebook... thử bấm «Làm mới tên»' : prev?.error,
+      }));
+    } finally {
+      setFacebookCookieLoading(false);
     }
+  }, []);
+
+  const refreshFacebookCookieNames = useCallback(async () => {
+    setFacebookCookieLoading(true);
+    try {
+      const r = await api('/api/facebook-cookie/refresh-names', {
+        method: 'POST',
+        timeoutMs: 60000,
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        setFacebookCookieContext((prev) => ({
+          ...(prev || { ok: true }),
+          ok: true,
+          error: d.error || `Không đọc được tên (${r.status})`,
+        }));
+        return;
+      }
+      setFacebookCookieContext(d);
+      if (d.message) setToolStatus(d.message);
+      setCurrentStaff((prev) => (prev ? {
+        ...prev,
+        active_facebook_name: d.active_facebook_name || prev.active_facebook_name,
+        facebook_user_id: d.active_facebook_user_id || prev.facebook_user_id,
+        active_cookie_id: d.active_cookie_id || prev.active_cookie_id,
+        facebook_cookies: d.cookies || prev.facebook_cookies,
+      } : prev));
+    } catch {
+      setFacebookCookieContext((prev) => ({
+        ...(prev || { ok: true }),
+        ok: true,
+        error: 'Không đọc được tên Facebook. Cookie có thể hết hạn.',
+      }));
+    } finally {
+      setFacebookCookieLoading(false);
+    }
+  }, []);
+
+  const syncFacebookGroupsFromChannels = useCallback((rows: ManagedChannel[]) => {
+    const gIds: string[] = [];
+    const gn: Record<string, string> = {};
+    for (const item of rows) {
+      const platform = (item.platform || '').trim().toLowerCase();
+      const type = (item.channel_type || '').trim().toLowerCase();
+      if (platform !== 'facebook' || !['nhóm', 'nhom', 'group'].includes(type)) continue;
+      const gid = facebookGroupIdFromChannel(item);
+      if (!gid || gIds.includes(gid)) continue;
+      gIds.push(gid);
+      gn[gid] = item.channel_name || gid;
+    }
+    groupsRef.current = gIds;
+    setGroups(gIds);
+    setGroupNames((prev) => ({ ...prev, ...gn }));
+    return gIds;
   }, []);
 
   const loadChannels = useCallback(async () => {
@@ -333,6 +413,7 @@ export function MonitorPage() {
         const rows = d.channels || [];
         channelsRef.current = rows;
         setChannels(rows);
+        syncFacebookGroupsFromChannels(rows);
         setChannelStatus('');
         return rows as ManagedChannel[];
       } else {
@@ -342,7 +423,7 @@ export function MonitorPage() {
       setChannelStatus('❌ Lỗi kết nối khi tải kênh');
     }
     return [] as ManagedChannel[];
-  }, []);
+  }, [syncFacebookGroupsFromChannels]);
 
   const loadContentPipeline = useCallback(async () => {
     setPipelineBusy(true);
@@ -421,9 +502,8 @@ export function MonitorPage() {
         setChannels(rows);
         setChannelStatus(id ? '✅ Đã cập nhật kênh' : '✅ Đã thêm kênh');
         const saved = d.channel || payload;
-        if ((saved.platform || '').toLowerCase() === 'facebook' && ['Nhóm', 'Nhom', 'Group'].includes(saved.channel_type || '') && saved.target_id) {
-          setGroups((prev) => (prev.includes(saved.target_id) ? prev : [...prev, saved.target_id]));
-          setGroupNames((prev) => ({ ...prev, [saved.target_id]: saved.channel_name || saved.target_id }));
+        if ((saved.platform || '').toLowerCase() === 'facebook' && ['Nhóm', 'Nhom', 'Group', 'nhóm', 'nhom', 'group'].includes(saved.channel_type || '') && saved.target_id) {
+          syncFacebookGroupsFromChannels(rows);
         }
         return true;
       }
@@ -435,7 +515,7 @@ export function MonitorPage() {
     } finally {
       setChannelBusy(false);
     }
-  }, []);
+  }, [syncFacebookGroupsFromChannels]);
 
   const deleteChannel = useCallback(async (id: string) => {
     if (!confirm('Xoá kênh này?')) return;
@@ -447,6 +527,7 @@ export function MonitorPage() {
         const rows = d.channels || [];
         channelsRef.current = rows;
         setChannels(rows);
+        syncFacebookGroupsFromChannels(rows);
         setChannelStatus('✅ Đã xoá kênh');
       } else {
         setChannelStatus('❌ ' + (d.error || 'Không xoá được kênh'));
@@ -454,7 +535,7 @@ export function MonitorPage() {
     } catch {
       setChannelStatus('❌ Lỗi kết nối khi xoá kênh');
     }
-  }, []);
+  }, [syncFacebookGroupsFromChannels]);
 
   const loadGroupMembership = useCallback(async (gIds: string[]) => {
     const ids = [...new Set(gIds.map((id) => String(id || '').trim()).filter(Boolean))];
@@ -485,6 +566,7 @@ export function MonitorPage() {
         const rows = Array.isArray(d.channels) ? d.channels : [];
         channelsRef.current = rows;
         setChannels(rows);
+        syncFacebookGroupsFromChannels(rows);
         setChannelStatus(`✅ Đã đồng bộ Page Facebook: thêm ${d.added || 0}, cập nhật ${d.updated || 0}`);
       } else {
         setChannelStatus('❌ ' + (d.error || 'Không đồng bộ được Page Facebook'));
@@ -494,7 +576,7 @@ export function MonitorPage() {
     } finally {
       setChannelBusy(false);
     }
-  }, []);
+  }, [syncFacebookGroupsFromChannels]);
 
   const loadCommentLogs = useCallback(async () => {
     setHistoryStatus('Đang tải lịch sử...');
@@ -524,6 +606,27 @@ export function MonitorPage() {
       setAllPosts((prev) => prev.filter((p) => p.id !== postId));
     }
   }, [loadTodayCommentStats]);
+
+  const handleMarkProcessed = useCallback(async (post: FbPost) => {
+    const r = await api('/api/posts/mark-processed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        post_id: post.id,
+        group_id: post._group_id || post.group_id || '',
+        post_url: post.permalink_url || '',
+        message: post.message || '',
+      }),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      throw new Error(
+        d.error || (r.status === 404 ? 'Backend chưa có API này — hãy khởi động lại Flask (app.py)' : 'Không đánh dấu được'),
+      );
+    }
+    setAllPosts((prev) => prev.filter((p) => p.id !== post.id));
+    void loadCommentLogs();
+  }, [loadCommentLogs]);
 
   useEffect(() => {
     void checkAuth();
@@ -643,6 +746,41 @@ export function MonitorPage() {
     }
   }, []);
 
+  const switchFacebookCookie = useCallback(async (cookieId: string) => {
+    if (!cookieId || facebookCookieBusy) return;
+    setFacebookCookieBusy(true);
+    try {
+      const r = await api('/api/facebook-cookie/switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookie_id: cookieId }),
+        timeoutMs: 45000,
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setFacebookCookieContext(d);
+        setCurrentStaff((prev) => (prev ? {
+          ...prev,
+          active_facebook_name: d.active_facebook_name || prev.active_facebook_name,
+          facebook_user_id: d.active_facebook_user_id || prev.facebook_user_id,
+          active_cookie_id: d.active_cookie_id || prev.active_cookie_id,
+          facebook_cookies: d.cookies || prev.facebook_cookies,
+        } : prev));
+        setToolStatus(d.message || 'Đã đổi cookie Facebook');
+        setFeedError('');
+        setGroupMembership({});
+        await loadPages();
+        await loadPosts();
+      } else {
+        setToolStatus(`❌ ${d.error || 'Không đổi được cookie'}`);
+      }
+    } catch {
+      setToolStatus('❌ Không đổi được cookie Facebook');
+    } finally {
+      setFacebookCookieBusy(false);
+    }
+  }, [facebookCookieBusy, loadPages, loadPosts]);
+
   useEffect(() => {
     if (groups.length === 1) {
       const n = groupNames[groups[0]!] || groups[0];
@@ -674,6 +812,53 @@ export function MonitorPage() {
   useEffect(() => {
     if (!authChecked || !authenticated) return;
     let cancelled = false;
+
+    const loadAiBundle = async (): Promise<boolean> => {
+      try {
+        const [pRes, cRes, clRes, lRes, csRes] = await Promise.all([
+          api('/api/ai/providers'),
+          api('/api/ai/config'),
+          api('/api/ai/classifications'),
+          api('/api/ai/leads'),
+          api('/api/ai/comment-summaries'),
+        ]);
+        if (cancelled) return false;
+        setAiProviders(await pRes.json());
+        const cfg = await cRes.json();
+        setAiConfig(cfg);
+        setAiProvider(cfg.provider || 'gemini');
+        const autoClassify = !!cfg.auto_classify;
+        setAiAutoClassify(autoClassify);
+        setClassifications(await clRes.json());
+        setLeads(await lRes.json());
+        setCommentSummaries(await csRes.json());
+        return autoClassify;
+      } catch {
+        return false;
+      }
+    };
+
+    const loadManageHeavy = async (autoClassify: boolean) => {
+      const gIds = groupsRef.current;
+      await Promise.allSettled(gIds.map((g) => loadGroupName(g)));
+      await Promise.allSettled([loadContentPipeline(), loadTodayCommentStats()]);
+      const posts = await loadPosts();
+      if (cancelled || !autoClassify || !posts?.length) return;
+      try {
+        const r = await api('/api/ai/classify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ posts }),
+        });
+        const d = await r.json();
+        if (d.ok && !cancelled) {
+          setClassifications((c) => ({ ...c, ...d.classifications }));
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+
     (async () => {
       try {
         const sr = await api('/api/settings');
@@ -686,86 +871,24 @@ export function MonitorPage() {
         if (!cancelled) setAutoOn(true);
       }
 
-      let autoClassify = false;
-      try {
-        const [pRes, cRes, clRes, lRes, csRes] = await Promise.all([
-          api('/api/ai/providers'),
-          api('/api/ai/config'),
-          api('/api/ai/classifications'),
-          api('/api/ai/leads'),
-          api('/api/ai/comment-summaries'),
-        ]);
-        if (cancelled) return;
-        setAiProviders(await pRes.json());
-        const cfg = await cRes.json();
-        setAiConfig(cfg);
-        setAiProvider(cfg.provider || 'gemini');
-        autoClassify = !!cfg.auto_classify;
-        setAiAutoClassify(autoClassify);
-        setClassifications(await clRes.json());
-        setLeads(await lRes.json());
-        setCommentSummaries(await csRes.json());
-      } catch {
-        /* ignore */
-      }
-
-      let rows: GroupRow[] = [];
-      try {
-        const r = await api('/api/groups');
-        rows = await r.json();
-      } catch {
-        /* ignore */
-      }
+      await Promise.allSettled([
+        loadStaffCookies(),
+        loadTg(),
+        loadPages(),
+        loadChannels(),
+      ]);
       if (cancelled) return;
-      const gIds = rows.map((x) => x.id);
-      const gn: Record<string, string> = {};
-      rows.forEach((row) => {
-        if (row.name) gn[row.id] = row.name;
-      });
-      groupsRef.current = gIds;
-      setGroups(gIds);
-      setGroupNames((prev) => ({ ...prev, ...gn }));
 
-      await Promise.allSettled(gIds.map((g) => loadGroupName(g)));
-      await Promise.allSettled(
-        gIds.map((g) =>
-          api('/api/groups', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: g, name: gn[g] || '' }),
-          }),
-        ),
-      );
-      await loadTg();
-      await loadPages();
-      await loadStaffCookies();
-      await loadTiktokCookieConfig();
-      await loadChannels();
-      await loadContentPipeline();
-      await loadTodayCommentStats();
-
-      const posts = await loadPosts();
+      const autoClassify = await loadAiBundle();
       if (cancelled) return;
-      if (autoClassify && posts?.length) {
-        try {
-          const r = await api('/api/ai/classify', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ posts }),
-          });
-          const d = await r.json();
-          if (d.ok && !cancelled) {
-            setClassifications((c) => ({ ...c, ...d.classifications }));
-          }
-        } catch {
-          /* ignore */
-        }
-      }
+
+      void loadManageHeavy(autoClassify);
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [authChecked, authenticated, loadChannels, loadContentPipeline, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTiktokCookieConfig, loadTodayCommentStats]);
+  }, [authChecked, authenticated, loadChannels, loadContentPipeline, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTodayCommentStats]);
 
   useEffect(() => {
     if (autoTimerRef.current) {
@@ -819,56 +942,19 @@ export function MonitorPage() {
     setKeywords((k) => k.filter((x) => x !== kw));
   }
 
-  async function addGroup() {
-    const raw = groupInp.trim();
-    if (!raw) return;
-    setGroupInp('');
-    setGroupBusy(true);
-    const slug = extractSlug(raw);
-    const prev = statusBaseRef.current || toolStatus;
-    setToolStatus(`🔍 Đang tìm "${slug}"...`);
-    try {
-      const r = await api('/api/groups/resolve?slug=' + encodeURIComponent(slug));
-      const d = await r.json();
-      if (d.ok) {
-        if (d.name) setGroupNames((g) => ({ ...g, [d.id]: d.name }));
-        if (!d.is_member) {
-          setToolStatus(prev);
-          setJoinPrompt({ id: d.id, name: d.name || d.id });
-        } else {
-          await api('/api/groups', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: d.id, name: d.name || '' }),
-          });
-          setGroups((g) => (g.includes(d.id) ? g : [...g, d.id]));
-          setToolStatus(`✅ Đã thêm: ${d.name || d.id}`);
-          setTimeout(() => setToolStatus(prev), 5000);
-        }
-      } else {
-        if (/^\d{10,}$/.test(slug)) {
-          setToolStatus(prev);
-          setJoinPrompt({ id: slug, name: slug });
-        } else {
-          setToolStatus(`❌ Không tìm được: ${d.error}`);
-          setTimeout(() => setToolStatus(prev), 4000);
-        }
-      }
-    } catch {
-      setToolStatus('❌ Lỗi kết nối');
-      setTimeout(() => setToolStatus(prev), 4000);
-    }
-    setGroupBusy(false);
+  async function saveGroupToChannels(gid: string, gname: string) {
+    return saveChannel({
+      platform: 'Facebook',
+      channel_name: gname || gid,
+      channel_type: 'Nhóm',
+      link: `https://www.facebook.com/groups/${gid}`,
+      target_id: gid,
+      note: '',
+    });
   }
 
   async function forceAddGroup(gid: string, gname: string) {
-    await api('/api/groups', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: gid, name: gname }),
-    });
-    setGroups((g) => (g.includes(gid) ? g : [...g, gid]));
-    setGroupNames((prev) => ({ ...prev, [gid]: gname }));
+    await saveGroupToChannels(gid, gname);
     setJoinPrompt(null);
     setJoinMsg('');
   }
@@ -882,12 +968,7 @@ export function MonitorPage() {
       const d = await r.json();
       if (d.ok) {
         if (d.already_member) {
-          await api('/api/groups', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: gid, name: gname }),
-          });
-          setGroups((g) => (g.includes(gid) ? g : [...g, gid]));
+          await saveGroupToChannels(gid, gname);
           setGroupMembership((prev) => ({ ...prev, [gid]: true }));
           setJoinPrompt(null);
           setJoinMsg('✅ Đã tham gia nhóm');
@@ -937,6 +1018,13 @@ export function MonitorPage() {
       }
       if (Number(d.removed_channels || 0) > 0) {
         await loadChannels();
+      } else {
+        syncFacebookGroupsFromChannels(channelsRef.current.filter((item) => {
+          const platform = (item.platform || '').trim().toLowerCase();
+          const type = (item.channel_type || '').trim().toLowerCase();
+          if (platform !== 'facebook' || !['nhóm', 'nhom', 'group'].includes(type)) return true;
+          return facebookGroupIdFromChannel(item) !== gid;
+        }));
       }
       setToolStatus(`✅ Đã xoá nhóm "${name}" khỏi danh sách quét`);
     } catch {
@@ -1977,7 +2065,6 @@ export function MonitorPage() {
         setCurrentStaff(d.staff || null);
         setAuthStatus('');
         await loadStaffCookies();
-        await loadTiktokCookieConfig();
         await loadTodayCommentStats();
       } else {
         if (d.already_setup || d.setup_required === false) {
@@ -1997,8 +2084,6 @@ export function MonitorPage() {
     setAuthenticated(false);
     setCurrentStaff(null);
     setStaffRows([]);
-    setTiktokCookieConfig({});
-    setTiktokCookieInput('');
     setAllPosts([]);
     setHeaderSub('Đã đăng xuất');
   }
@@ -2008,8 +2093,14 @@ export function MonitorPage() {
       setStaffStatus('Nhập đủ tên và tài khoản đăng nhập');
       return false;
     }
-    if (!staffId && (!payload.password || !payload.cookie.trim())) {
-      setStaffStatus('Nhập đủ mật khẩu và cookie khi thêm nhân sự');
+    const cookies = (payload.facebook_cookies || []).filter((item) => String(item.cookie || '').trim());
+    if (!staffId && (!payload.password || !cookies.length)) {
+      setStaffStatus('Nhập đủ mật khẩu và ít nhất một cookie Facebook khi thêm nhân sự');
+      return false;
+    }
+    const invalidCookie = cookies.find((item) => !String(item.cookie || '').includes('c_user='));
+    if (invalidCookie) {
+      setStaffStatus(`Cookie "${invalidCookie.label || 'Facebook'}" chưa có c_user`);
       return false;
     }
     setStaffStatus(staffId ? 'Đang cập nhật nhân sự...' : 'Đang lưu nhân sự...');
@@ -2027,7 +2118,10 @@ export function MonitorPage() {
         setStaffRows(d.staff || []);
         setCanManageStaff(!!d.can_manage);
         const storageText = d.storage === 'supabase' ? 'Supabase' : 'local';
-        setStaffStatus(`${staffId ? '✅ Đã cập nhật nhân sự' : '✅ Đã thêm nhân sự'} (${storageText})${d.warning ? ` · ${d.warning}` : ''}`);
+        const savedStaff = (d.staff || []).find((item: StaffAccount) => item.id === staffId);
+        const cookieCount = savedStaff?.facebook_cookies?.length || 0;
+        const cookieNote = cookieCount > 1 ? ` · ${cookieCount} cookie FB` : '';
+        setStaffStatus(`${staffId ? '✅ Đã cập nhật nhân sự' : '✅ Đã thêm nhân sự'} (${storageText})${cookieNote}${d.warning ? ` · ${d.warning}` : ''}`);
         return true;
       } else {
         setStaffStatus('❌ ' + (d.error || 'Lỗi lưu nhân sự'));
@@ -2060,76 +2154,6 @@ export function MonitorPage() {
     }
   }
 
-  async function saveTiktokCookie() {
-    const cookie = tiktokCookieInput.trim();
-    if (!cookie) {
-      setTiktokCookieStatus('Dán cookie TikTok trước khi lưu');
-      return;
-    }
-    setTiktokCookieBusy(true);
-    setTiktokCookieStatus('Đang lưu TikTok cookie...');
-    try {
-      const r = await api('/api/tiktok/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookie }),
-      });
-      const d = await r.json();
-      if (d.ok) {
-        setTiktokCookieConfig(d.config || {});
-        setTiktokCookieInput('');
-        setTiktokCookieStatus(`Đã lưu TikTok cookie (${d.storage === 'supabase' ? 'Supabase' : 'local'})`);
-      } else {
-        setTiktokCookieStatus('Lỗi: ' + (d.error || 'Không lưu được TikTok cookie'));
-      }
-    } catch {
-      setTiktokCookieStatus('Lỗi kết nối backend');
-    }
-    setTiktokCookieBusy(false);
-  }
-
-  async function deleteTiktokCookie() {
-    if (!confirm('Xoá TikTok cookie đang lưu?')) return;
-    setTiktokCookieBusy(true);
-    setTiktokCookieStatus('Đang xoá TikTok cookie...');
-    try {
-      const r = await api('/api/tiktok/config', { method: 'DELETE' });
-      const d = await r.json();
-      if (d.ok) {
-        setTiktokCookieConfig(d.config || {});
-        setTiktokCookieInput('');
-        setTiktokCookieStatus('Đã xoá TikTok cookie');
-      } else {
-        setTiktokCookieStatus('Lỗi: ' + (d.error || 'Không xoá được TikTok cookie'));
-      }
-    } catch {
-      setTiktokCookieStatus('Lỗi kết nối backend');
-    }
-    setTiktokCookieBusy(false);
-  }
-
-  async function testTiktokCookie() {
-    setTiktokCookieBusy(true);
-    setTiktokCookieStatus('Đang kiểm tra TikTok cookie...');
-    try {
-      const r = await api('/api/tiktok/config/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookie: tiktokCookieInput.trim() }),
-      });
-      const d = await r.json();
-      if (d.ok) {
-        if (d.config) setTiktokCookieConfig(d.config);
-        setTiktokCookieStatus(`${d.valid ? '✅' : '❌'} ${d.message || 'Đã kiểm tra cookie'}`);
-      } else {
-        setTiktokCookieStatus('Lỗi: ' + (d.error || 'Không kiểm tra được TikTok cookie'));
-      }
-    } catch {
-      setTiktokCookieStatus('Lỗi kết nối backend');
-    }
-    setTiktokCookieBusy(false);
-  }
-
   const masked = (aiConfig.keys_masked || {})[aiProvider] || '';
   const hasKey = Boolean(masked && masked !== '***' && masked.length > 3);
   const fbMatchedRows = fbCommentRows.filter((row) => row.is_matched);
@@ -2152,12 +2176,17 @@ export function MonitorPage() {
   useEffect(() => {
     if (!authenticated) return;
     if (activeView === 'history') void loadCommentLogs();
-    if (activeView === 'channels') void loadChannels();
+    if (activeView === 'channels' || activeView === 'manage') void loadChannels();
+    if (activeView === 'manage') void loadFacebookCookieContext();
+    if (activeView === 'staff') {
+      void loadStaffCookies();
+      void loadChannels();
+    }
     if (activeView === 'marketing') {
       void loadContentPipeline();
       void loadChannels();
     }
-  }, [activeView, authenticated, loadChannels, loadCommentLogs, loadContentPipeline]);
+  }, [activeView, authenticated, loadChannels, loadCommentLogs, loadContentPipeline, loadFacebookCookieContext, loadStaffCookies, refreshFacebookCookieNames]);
 
   if (!authChecked) {
     return (
@@ -2250,70 +2279,29 @@ export function MonitorPage() {
             />
           ) : null}
           {activeView === 'staff' ? (
-            <>
-              <section className="module-panel tiktok-cookie-panel">
-                <div className="module-head">
-                  <div>
-                    <div className="module-kicker">TikTok</div>
-                    <h2>Cookie TikTok</h2>
-                  </div>
-                  <button type="button" className="btn-cancel" onClick={() => void loadTiktokCookieConfig()}>
-                    Tải lại
-                  </button>
-                </div>
-                <div className="tiktok-cookie-status-row">
-                  <span className={`status-pill ${tiktokCookieConfig.has_login_cookie ? 'ok' : 'fail'}`}>
-                    {tiktokCookieConfig.has_login_cookie ? 'Cookie đăng nhập hợp lệ' : tiktokCookieConfig.has_cookie ? 'Thiếu session login' : 'Chưa có cookie'}
-                  </span>
-                  <span className="mono-cell">{tiktokCookieConfig.cookie_masked || '-'}</span>
-                  {tiktokCookieConfig.source ? <span>Nguồn: {tiktokCookieConfig.source === 'web' ? 'Web' : '.env'}</span> : null}
-                  {tiktokCookieConfig.updated_at ? <span>Cập nhật: {formatDateTime(tiktokCookieConfig.updated_at)}</span> : null}
-                </div>
-                <p className="tiktok-cookie-note">
-                  Cookie này chỉ hỗ trợ đọc bình luận khi TikTok chặn API. Gửi bình luận TikTok dùng Chrome extension, không dùng cookie lưu trên server.
-                </p>
-                {canManageStaff ? (
-                  <>
-                    <textarea
-                      className="tiktok-cookie-textarea"
-                      value={tiktokCookieInput}
-                      onChange={(e) => setTiktokCookieInput(e.target.value)}
-                      placeholder="Dán cookie TikTok đầy đủ từ tiktok.com, ví dụ có sessionid / sid_tt / ttwid..."
-                    />
-                    <div className="tiktok-cookie-actions">
-                      <button type="button" className="btn-submit" disabled={tiktokCookieBusy} onClick={() => void saveTiktokCookie()}>
-                        {tiktokCookieBusy ? 'Đang lưu...' : 'Lưu TikTok cookie'}
-                      </button>
-                      <button type="button" className="btn-cancel" disabled={tiktokCookieBusy || (!tiktokCookieInput.trim() && !tiktokCookieConfig.has_cookie)} onClick={() => void testTiktokCookie()}>
-                        Test cookie
-                      </button>
-                      <button type="button" className="btn-cancel" disabled={tiktokCookieBusy || !tiktokCookieConfig.has_cookie} onClick={() => void deleteTiktokCookie()}>
-                        Xoá cookie
-                      </button>
-                      <span className="modal-result">{tiktokCookieStatus}</span>
-                    </div>
-                  </>
-                ) : (
-                  <div className="modal-result">Chỉ admin được nhập hoặc xoá TikTok cookie.</div>
-                )}
-              </section>
               <StaffCookiePanel
                 staff={staffRows}
+                channels={channels}
                 currentStaff={currentStaff}
                 canManage={canManageStaff}
-                status={staffStatus}
+                status={staffLoading ? 'Đang tải danh sách nhân sự...' : staffStatus}
                 title="Nhân sự"
                 kicker="Quản lý tài khoản"
                 onSave={saveStaffCookie}
                 onDelete={deleteStaffCookie}
               />
-            </>
           ) : null}
 
       {activeView === 'manage' ? (
         <ManageDashboardPanel
           staffName={currentStaff?.name || currentStaff?.username}
           staffRole={currentStaff?.role}
+          currentStaff={currentStaff}
+          facebookCookieContext={facebookCookieContext}
+          facebookCookieBusy={facebookCookieBusy}
+          facebookCookieLoading={facebookCookieLoading}
+          onRefreshFacebookCookie={() => void refreshFacebookCookieNames()}
+          onSwitchFacebookCookie={(cookieId) => void switchFacebookCookie(cookieId)}
           headerSub={headerSub}
           onLogout={() => void logout()}
           onOpenView={openView}
@@ -2321,11 +2309,8 @@ export function MonitorPage() {
           groups={groups}
           groupNames={groupNames}
           facebookPageChannels={facebookPageChannels}
+          facebookGroupChannels={facebookGroupChannels}
           tiktokManagedChannels={tiktokManagedChannels}
-          groupInp={groupInp}
-          setGroupInp={setGroupInp}
-          groupBusy={groupBusy}
-          onAddGroup={() => void addGroup()}
           onRemoveGroup={(id) => void removeGroup(id)}
           joinPrompt={joinPrompt}
           joinBusy={joinBusy}
@@ -2360,7 +2345,6 @@ export function MonitorPage() {
           onClassifyAll={() => void classifyAll()}
           leadsBusy={leadsBusy}
           onExtractLeads={() => void extractLeadsAll()}
-          onOpenTiktokModal={() => { setTiktokModal(true); setTiktokStatus(''); }}
           onOpenTiktokStats={() => { setTiktokStatsModal(true); void loadTiktokStats(); }}
           catFilter={catFilter}
           setCatFilter={setCatFilter}
@@ -2383,6 +2367,7 @@ export function MonitorPage() {
           onSummarizeComments={summarizeComments}
           onExploreComments={openFbCommentExplorer}
           onCommentSent={handleCommentSent}
+          onMarkProcessed={handleMarkProcessed}
           onOpenLightbox={setLightbox}
           saleSetupProps={{
             aiProvider,
@@ -2753,7 +2738,7 @@ export function MonitorPage() {
                     ) : (
                       <tr>
                         <td colSpan={6} className="empty-table-cell">
-                          Chưa có dữ liệu TikTok. Bấm “TikTok CMT” để lấy comment trước.
+                          Chưa có dữ liệu TikTok. Mở trang Bình luận để lấy comment trước.
                         </td>
                       </tr>
                     )}

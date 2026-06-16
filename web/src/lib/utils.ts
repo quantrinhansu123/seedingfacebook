@@ -39,6 +39,19 @@ export function socialAuthorProfileUrl(row: {
   return '';
 }
 
+export function facebookGroupIdFromChannel(item: {
+  target_id?: string;
+  link?: string;
+}): string {
+  const id = String(item.target_id || '').trim();
+  if (id) return id;
+  const link = String(item.link || '').trim();
+  if (!link) return '';
+  const match = link.match(/facebook\.com\/groups\/([^/?#]+)/i);
+  if (match?.[1]) return match[1];
+  return extractSlug(link);
+}
+
 export function extractSlug(raw: string): string {
   try {
     const url = new URL(raw.includes('://') ? raw : 'https://' + raw);
@@ -74,4 +87,19 @@ export function classifyFacebookFeedError(message: string): 'network' | 'auth' |
     return 'auth';
   }
   return 'other';
+}
+
+export function buildTikTokCommentUrl(row: {
+  comment_url?: string;
+  post_url?: string;
+  comment_id?: string;
+}): string {
+  const direct = String(row.comment_url || '').trim();
+  if (direct) return direct;
+  const postUrl = String(row.post_url || '').trim();
+  const commentId = String(row.comment_id || '').replace(/^tiktok_/i, '').trim();
+  if (!postUrl) return '';
+  if (!commentId) return postUrl;
+  const joiner = postUrl.includes('?') ? '&' : '?';
+  return `${postUrl}${joiner}comment=${encodeURIComponent(commentId)}`;
 }

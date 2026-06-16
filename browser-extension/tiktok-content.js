@@ -22,100 +22,6 @@
     return false;
   }
 
-  function elementText(el) {
-    return normalizeText(el?.innerText || el?.textContent || '');
-  }
-
-  function rightSideVisible(el) {
-    if (!isVisible(el)) return false;
-    const rect = el.getBoundingClientRect();
-    return rect.left > window.innerWidth * 0.45 && rect.width > 12 && rect.height > 12;
-  }
-
-  function hardClick(el) {
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    const init = {
-      bubbles: true,
-      cancelable: true,
-      clientX: rect.left + rect.width / 2,
-      clientY: rect.top + rect.height / 2,
-    };
-    try {
-      el.dispatchEvent(new PointerEvent('pointerdown', init));
-      el.dispatchEvent(new MouseEvent('mousedown', init));
-      el.dispatchEvent(new PointerEvent('pointerup', init));
-      el.dispatchEvent(new MouseEvent('mouseup', init));
-      el.dispatchEvent(new MouseEvent('click', init));
-      if (typeof el.click === 'function') el.click();
-      return true;
-    } catch (error) {
-      try {
-        if (typeof el.click === 'function') el.click();
-        return true;
-      } catch {
-        return false;
-      }
-    }
-  }
-
-  function bestClickableTabNode(node) {
-    let current = node;
-    for (let i = 0; i < 4 && current && current !== document.body; i += 1) {
-      const role = current.getAttribute?.('role') || '';
-      const tag = current.tagName || '';
-      const rect = current.getBoundingClientRect();
-      if (
-        rightSideVisible(current) &&
-        (role === 'tab' || role === 'button' || tag === 'BUTTON' || current.tabIndex >= 0) &&
-        rect.width < 260 &&
-        rect.height < 80
-      ) {
-        return current;
-      }
-      current = current.parentElement;
-    }
-    return node;
-  }
-
-  function clickCommentsTab() {
-    const candidates = Array.from(document.querySelectorAll('button, [role="tab"], [role="button"], div, span')).filter((node) => {
-      if (!rightSideVisible(node)) return false;
-      if (node.closest('[data-streal-comment-context-card="true"], [data-streal-comment-badge="true"]')) return false;
-      const rawLines = String(node.innerText || node.textContent || '')
-        .toLowerCase()
-        .split(/\n+/)
-        .map((line) => normalizeText(line))
-        .filter(Boolean);
-      const text = elementText(node);
-      if (!text) return false;
-      if (text.includes('bạn có thể thích') || text.includes('you may like')) return false;
-      return text === 'bình luận' || text === 'comments' || text === 'comment' || rawLines.includes('bình luận') || rawLines.includes('comments');
-    });
-    const target = candidates.sort((a, b) => {
-      const ar = a.getBoundingClientRect();
-      const br = b.getBoundingClientRect();
-      const at = elementText(a);
-      const bt = elementText(b);
-      const exactScoreA = at === 'bình luận' || at === 'comments' || at === 'comment' ? -1000 : 0;
-      const exactScoreB = bt === 'bình luận' || bt === 'comments' || bt === 'comment' ? -1000 : 0;
-      return exactScoreA - exactScoreB || ar.top - br.top || ar.width - br.width;
-    })[0];
-    if (!target) return false;
-    return hardClick(bestClickableTabNode(target));
-  }
-
-  async function ensureCommentsTab(status) {
-    for (let i = 0; i < 4; i += 1) {
-      clickCommentsTab();
-      await sleep(i === 0 ? 500 : 800);
-      const scroller = findCommentScroller();
-      if (scroller) return scroller;
-      if (status) status(`Đang chuyển về tab Bình luận... lần ${i + 1}/4`);
-    }
-    return null;
-  }
-
   function maybeOpenCommentPanel() {
     const selectors = [
       '[data-e2e="comment-icon"]',
@@ -124,7 +30,6 @@
       'div[role="button"][aria-label*="comment" i]',
     ];
     selectors.some(clickIfVisible);
-    clickCommentsTab();
   }
 
   function tiktokPageError() {
@@ -137,25 +42,92 @@
     );
   }
 
-  function findCommentInput() {
+  function inputHints(el) {
+    let hints = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('placeholder') || ''} ${el.getAttribute('data-placeholder') || ''}`;
+    let parent = el.parentElement;
+    for (let depth = 0; depth < 5 && parent; depth += 1) {
+      hints += ` ${parent.getAttribute('aria-label') || ''} ${parent.getAttribute('placeholder') || ''}`;
+      const labeled = parent.querySelector?.('[placeholder], [data-placeholder], [aria-label]');
+      if (labeled) {
+        hints += ` ${labeled.getAttribute('placeholder') || ''} ${labeled.getAttribute('aria-label') || ''} ${labeled.getAttribute('data-placeholder') || ''}`;
+      }
+      parent = parent.parentElement;
+    }
+    return normalizeText(hints);
+  }
+
+  function isReplyInput(el) {
+    const hints = inputHints(el);
+    return hints.includes('cau tra loi')
+      || hints.includes('add a reply')
+      || hints.includes('reply to')
+      || (hints.includes('tra loi') && hints.includes('them'));
+  }
+
+  function isMainCommentInput(el) {
+    const hints = inputHints(el);
+    if (isReplyInput(el)) return false;
+    return hints.includes('them binh luan') || hints.includes('add comment');
+  }
+
+  function findEditableInputs() {
     const selectors = [
       '[data-e2e="comment-input"] [contenteditable="true"]',
       '[data-e2e="comment-input"] textarea',
+      '[data-e2e*="reply"] [contenteditable="true"]',
       'div.public-DraftEditor-content[contenteditable="true"]',
       'div[contenteditable="true"][role="textbox"]',
       'textarea[placeholder*="comment" i]',
       'textarea[placeholder*="bình luận" i]',
+      'textarea[placeholder*="trả lời" i]',
       'div[contenteditable="true"]',
       'textarea',
     ];
+    const seen = new Set();
+    const rows = [];
     for (const selector of selectors) {
-      const found = Array.from(document.querySelectorAll(selector)).find((el) => {
-        if (!isVisible(el)) return false;
-        const label = `${el.getAttribute('aria-label') || ''} ${el.getAttribute('placeholder') || ''}`.toLowerCase();
-        const text = `${el.textContent || ''}`.toLowerCase();
-        return !label.includes('search') && !label.includes('tìm kiếm') && !text.includes('search');
+      for (const el of document.querySelectorAll(selector)) {
+        if (!isVisible(el) || seen.has(el)) continue;
+        const selfText = normalizeText(`${el.getAttribute('aria-label') || ''} ${el.textContent || ''}`);
+        if (selfText.includes('search') || selfText.includes('tìm kiếm')) continue;
+        seen.add(el);
+        rows.push(el);
+      }
+    }
+    return rows;
+  }
+
+  function findReplyInput() {
+    return findEditableInputs().find(isReplyInput) || null;
+  }
+
+  function findCommentInput(mode = 'any') {
+    const inputs = findEditableInputs();
+    if (mode === 'reply') return findReplyInput();
+    if (mode === 'main') return inputs.find(isMainCommentInput) || inputs[0] || null;
+    return findReplyInput() || inputs.find(isMainCommentInput) || inputs[0] || null;
+  }
+
+  function findReplySendButton(nearInput) {
+    const scopes = [];
+    if (nearInput) {
+      scopes.push(nearInput.closest('form'));
+      scopes.push(nearInput.parentElement);
+      scopes.push(nearInput.parentElement?.parentElement);
+      scopes.push(nearInput.closest('[class*="comment"], [class*="Comment"], [data-e2e*="comment"]'));
+    }
+    scopes.push(document.body);
+    for (const scope of scopes) {
+      if (!scope) continue;
+      const buttons = Array.from(scope.querySelectorAll('button, div[role="button"]')).filter(isVisible);
+      const match = buttons.find((btn) => {
+        if (isDisabled(btn)) return false;
+        const text = buttonText(btn);
+        if (text.includes('comment-post') || text === 'đăng' || text === 'post' || text === 'gửi') return true;
+        const aria = normalizeText(btn.getAttribute('aria-label') || '');
+        return aria.includes('post') || aria.includes('gui') || aria.includes('dang');
       });
-      if (found) return found;
+      if (match) return match;
     }
     return null;
   }
@@ -302,6 +274,8 @@
     const commentText = compact(payload.comment_text, '(Comment không có nội dung chữ)');
     const replyText = String(payload.reply_text || '').replace(/\s+/g, ' ').trim();
     const authorName = compact(payload.author_name, 'Ẩn danh');
+    const scrolled = Number(scanInfo.scrolled || 0);
+    const videoChanged = Boolean(scanInfo.videoChanged);
     const card = document.createElement('section');
     card.setAttribute('data-streal-comment-context-card', 'true');
     card.style.position = 'fixed';
@@ -323,7 +297,9 @@
       ? `Đã tìm thấy comment gần khớp${scanInfo.scrolled ? ` sau ${scanInfo.scrolled} lượt cuộn` : ''}, cuộn tới vị trí đó và tô xanh.`
       : scanInfo.searching
         ? 'Đang tự cuộn panel bình luận TikTok để tìm comment. Có thể mất vài chục giây nếu comment nằm sâu.'
-        : `Chưa thấy comment sau ${scanInfo.scanned || 0} lượt quét. Bấm "Tìm tự động" để tiếp tục cuộn panel bình luận và dò comment.`;
+        : videoChanged
+          ? 'Đã dừng cuộn vì TikTok đổi video. Mở lại từ web hoặc bấm "Tìm tự động".'
+          : `Chưa thấy comment sau ${scanInfo.scanned || 0} lượt quét. Bấm "Tìm tự động" để tiếp tục cuộn panel bình luận và dò comment.`;
 
     card.innerHTML = `
       <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px">
@@ -343,6 +319,7 @@
       </div>
       <div style="color:#cbd5e1;margin-bottom:12px">${safeFoundText}</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button type="button" data-streal-type-reply="true" style="border:0;background:#16a34a;color:#fff;border-radius:12px;padding:10px 12px;font-weight:800;cursor:pointer">Trả lời trực tiếp</button>
         <button type="button" data-streal-copy-reply="true" style="border:0;background:#2563eb;color:#fff;border-radius:12px;padding:10px 12px;font-weight:800;cursor:pointer">Copy câu trả lời</button>
         <button type="button" data-streal-copy-comment="true" style="border:1px solid rgba(148,163,184,.5);background:transparent;color:#fff;border-radius:12px;padding:10px 12px;font-weight:800;cursor:pointer">Copy comment gốc</button>
         <button type="button" data-streal-auto-search="true" style="border:1px solid rgba(148,163,184,.5);background:transparent;color:#fff;border-radius:12px;padding:10px 12px;font-weight:800;cursor:pointer">Tìm tự động</button>
@@ -356,6 +333,16 @@
       if (status) status.textContent = text;
     };
     card.querySelector('[data-streal-close-card="true"]')?.addEventListener('click', () => card.remove());
+    card.querySelector('[data-streal-type-reply="true"]')?.addEventListener('click', async () => {
+      const focused = document.querySelector('[data-streal-focused-comment="true"]');
+      const typed = await openReplyAndType(payload, focused);
+      if (typed.ok && typed.filled) {
+        setStatus(typed.reply_mode
+          ? 'Đã gõ vào ô "Thêm câu trả lời...". Kiểm tra rồi bấm gửi.'
+          : 'Đã gõ nội dung. Bấm Trả lời trên comment nếu chưa đúng thread.');
+      } else if (typed.ok) setStatus('Đã mở ô trả lời. Gõ nội dung rồi bấm gửi.');
+      else setStatus(typed.error || 'Không gõ được vào ô comment.');
+    });
     card.querySelector('[data-streal-copy-reply="true"]')?.addEventListener('click', async () => {
       await copyText(replyText);
       setStatus('Đã copy câu trả lời. Dán vào ô bình luận TikTok để gửi thủ công.');
@@ -379,9 +366,8 @@
     });
     card.querySelector('[data-streal-open-search="true"]')?.addEventListener('click', async () => {
       await copyText(commentText);
-      setStatus('Đã copy comment gốc. TikTok web không hỗ trợ deep-link tới từng comment ổn định, nên không tự cuộn.');
+      setStatus('Đã copy comment gốc. Nhấn Ctrl+F trên TikTok và dán để tìm.');
     });
-
     document.body.appendChild(card);
     if (replyText) void copyText(replyText);
   }
@@ -391,10 +377,10 @@
     while (node && node !== document.body) {
       const style = window.getComputedStyle(node);
       const canScroll = /(auto|scroll)/i.test(`${style.overflowY} ${style.overflow}`) && node.scrollHeight > node.clientHeight + 20;
-      if (canScroll && node.getBoundingClientRect().left > window.innerWidth * 0.45) return node;
+      if (canScroll) return node;
       node = node.parentElement;
     }
-    return findCommentScroller();
+    return document.scrollingElement || document.documentElement;
   }
 
   function findCommentScroller() {
@@ -419,16 +405,10 @@
         const rect = node.getBoundingClientRect();
         const extraScroll = node.scrollHeight - node.clientHeight;
         if (extraScroll < 80 || rect.height < 220 || rect.width < 240) return;
-        if (rect.left < window.innerWidth * 0.46) return;
         const attr = `${node.className || ''} ${node.id || ''} ${node.getAttribute('data-e2e') || ''}`.toLowerCase();
         const text = normalizeText(node.innerText || node.textContent || '').slice(0, 500);
-        const isRecommendationPanel = text.includes('bạn có thể thích') || text.includes('you may like') || attr.includes('recommend') || attr.includes('suggest');
-        const hasCommentSignal = attr.includes('comment') || text.includes('bình luận') || text.includes('comment') || text.includes('trả lời') || text.includes('reply');
-        if (isRecommendationPanel && !hasCommentSignal) return;
-        if (!hasCommentSignal) return;
         let score = 0;
-        if (rect.left > window.innerWidth * 0.48) score += 240;
-        if (rect.right > window.innerWidth * 0.78) score += 80;
+        if (rect.left > window.innerWidth * 0.48) score += 200;
         if (attr.includes('comment')) score += 180;
         if (text.includes('bình luận') || text.includes('comment')) score += 120;
         if (text.includes('trả lời') || text.includes('reply')) score += 40;
@@ -438,27 +418,33 @@
       });
     }
     candidates.sort((a, b) => b.score - a.score);
-    return candidates[0]?.score >= 120 ? candidates[0].node : null;
+    return candidates[0]?.node || document.scrollingElement || document.documentElement;
   }
 
   function scrollCommentPanel(scroller) {
-    if (!scroller) return null;
-    const before = scroller.scrollTop || 0;
-    const delta = Math.max(360, Math.floor((scroller.clientHeight || 760) * 0.68));
+    const before = scroller.scrollTop || window.scrollY || 0;
+    const delta = Math.max(420, Math.floor((scroller.clientHeight || window.innerHeight || 760) * 0.72));
     try {
       scroller.scrollBy({ top: delta, behavior: 'smooth' });
     } catch (error) {
       scroller.scrollTop = before + delta;
     }
-    scroller.dispatchEvent(new Event('scroll', { bubbles: false }));
+    const eventTarget = scroller === document.scrollingElement || scroller === document.documentElement
+      ? document.elementFromPoint(window.innerWidth - 180, Math.max(180, window.innerHeight * 0.45)) || document.body
+      : scroller;
+    eventTarget.dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true,
+      cancelable: true,
+      deltaY: delta,
+      clientX: window.innerWidth - 180,
+      clientY: Math.max(180, window.innerHeight * 0.45),
+    }));
     return before;
   }
 
-  function expandVisibleReplies(limit = 4, root = null) {
+  function expandVisibleReplies(limit = 4) {
     let clicked = 0;
-    const scope = root || findCommentScroller();
-    if (!scope) return 0;
-    const buttons = Array.from(scope.querySelectorAll('button, [role="button"], div, span')).filter((node) => {
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"], div, span')).filter((node) => {
       if (!isVisible(node)) return false;
       if (node.closest('[data-streal-comment-context-card="true"], [data-streal-comment-badge="true"]')) return false;
       const rect = node.getBoundingClientRect();
@@ -484,12 +470,79 @@
 
   function scrollToCommentElement(target) {
     const scroller = nearestScrollableParent(target);
-    if (!scroller) return false;
     const targetRect = target.getBoundingClientRect();
-    const scrollerRect = scroller.getBoundingClientRect();
+    const scrollerRect = scroller === document.scrollingElement || scroller === document.documentElement
+      ? { top: 0, height: window.innerHeight }
+      : scroller.getBoundingClientRect();
     const nextTop = scroller.scrollTop + targetRect.top - scrollerRect.top - Math.max(48, scrollerRect.height * 0.25);
     scroller.scrollTo({ top: Math.max(0, nextTop), behavior: 'smooth' });
-    return true;
+  }
+
+  function findReplyButton(container) {
+    if (!container) return null;
+    const scope = container.closest('[data-e2e*="comment"], [class*="Comment"], [class*="comment"]') || container;
+    const nodes = Array.from(scope.querySelectorAll('button, div[role="button"], span, a, p, div')).filter(isVisible);
+    return nodes.find((btn) => {
+      const text = normalizeText(`${btn.textContent || ''} ${btn.getAttribute('aria-label') || ''}`);
+      return text === 'trả lời' || text === 'reply';
+    }) || null;
+  }
+
+  async function fillCommentInput(text, options = {}) {
+    const replyText = String(text || '').trim();
+    const mode = options.mode || 'any';
+    maybeOpenCommentPanel();
+    await sleep(options.delayMs || 350);
+    const input = await waitFor(
+      () => findCommentInput(mode),
+      options.timeoutMs || 9000,
+      () => maybeOpenCommentPanel(),
+    );
+    if (!input) {
+      return {
+        ok: false,
+        error: mode === 'reply' ? 'Không thấy ô Thêm câu trả lời' : 'Không thấy ô Thêm bình luận',
+      };
+    }
+    if (replyText) setTextValue(input, replyText);
+    else input.focus();
+    try {
+      input.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    } catch (error) {
+      // ignore scroll errors
+    }
+    return { ok: true, filled: Boolean(replyText), reply_mode: isReplyInput(input) };
+  }
+
+  async function openReplyAndType(payload, commentElement) {
+    let replyOpened = false;
+    if (commentElement) {
+      const replyBtn = findReplyButton(commentElement);
+      if (replyBtn) {
+        replyBtn.click();
+        replyOpened = true;
+        await sleep(900);
+      }
+    }
+    const filled = await fillCommentInput(payload.reply_text || payload.message || '', {
+      delayMs: 300,
+      mode: replyOpened ? 'reply' : 'any',
+      timeoutMs: 12000,
+    });
+    return { ...filled, reply_opened: replyOpened };
+  }
+
+  async function submitReplyFromInput(input, autoSend) {
+    if (!autoSend) return { sent: false };
+    const button = findReplySendButton(input) || findPostButton();
+    if (!button) {
+      submitCommentByKeyboard(input);
+      await sleep(1200);
+      return { sent: true, method: 'keyboard' };
+    }
+    button.click();
+    await sleep(1400);
+    return { sent: true, method: 'click' };
   }
 
   function highlightCommentElement(target, payload) {
@@ -504,7 +557,7 @@
     if (oldBadge) oldBadge.remove();
     const badge = document.createElement('div');
     badge.setAttribute('data-streal-comment-badge', 'true');
-    badge.textContent = 'Lead Hunter: comment cần trả lời đang được tô xanh. Câu trả lời đã copy, dán Ctrl+V để gửi thủ công.';
+    badge.textContent = 'Lead Hunter: đã mở Trả lời trực tiếp. Kiểm tra ô "Thêm câu trả lời..." rồi bấm nút gửi.';
     badge.style.position = 'fixed';
     badge.style.zIndex = '2147483647';
     badge.style.top = '16px';
@@ -530,15 +583,55 @@
     }
   }
 
-  function findCommentCandidate(payload, root = null) {
-    const scope = root || findCommentScroller();
-    if (!scope) return null;
+  function getVideoKey() {
+    const match = window.location.href.match(/\/video\/(\d+)/);
+    return match?.[1] || window.location.href;
+  }
+
+  function findCommentListScroller() {
+    const selectors = [
+      '[data-e2e="comment-list"]',
+      '[data-e2e="browse-comment-list"]',
+      '[class*="CommentListContainer"]',
+      '[class*="comment-list-container"]',
+    ];
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (el && isVisible(el) && el.scrollHeight > el.clientHeight + 40) return el;
+    }
+
+    const input = findCommentInput();
+    let node = input?.parentElement || null;
+    for (let depth = 0; depth < 14 && node; depth += 1) {
+      const style = window.getComputedStyle(node);
+      const scrollable = (style.overflowY === 'auto' || style.overflowY === 'scroll')
+        && node.scrollHeight > node.clientHeight + 60;
+      if (scrollable && node.querySelector('[data-e2e*="comment"], [class*="Comment"]')) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+
+    return Array.from(document.querySelectorAll('div'))
+      .filter((el) => {
+        if (!isVisible(el)) return false;
+        const style = window.getComputedStyle(el);
+        const scrollable = (style.overflowY === 'auto' || style.overflowY === 'scroll')
+          && el.scrollHeight > el.clientHeight + 100;
+        if (!scrollable) return false;
+        return Boolean(el.querySelector('[data-e2e*="comment"], [class*="Comment"], [class*="comment"]'));
+      })
+      .sort((a, b) => b.scrollHeight - a.scrollHeight)[0] || null;
+  }
+
+  function findCommentCandidate(payload, root) {
     const targetText = normalizeText(payload.comment_text).slice(0, 180);
     const targetLoose = looseText(payload.comment_text).slice(0, 180);
     const targetLooseShort = targetLoose.slice(0, Math.min(70, Math.max(24, targetLoose.length)));
     const author = normalizeText(payload.author_name).slice(0, 80);
     const authorLoose = looseText(payload.author_name).slice(0, 80);
     const rawCommentId = stripTiktokPrefix(payload.comment_id);
+    const scope = root && root.querySelectorAll ? root : document;
     const nodes = Array.from(scope.querySelectorAll(
       '[data-e2e*="comment"], [class*="Comment"], [class*="comment"], div, p, span',
     ));
@@ -546,8 +639,6 @@
     for (const node of nodes) {
       if (!isVisible(node)) continue;
       if (node.closest('[data-streal-comment-context-card="true"], [data-streal-comment-badge="true"]')) continue;
-      const rect = node.getBoundingClientRect();
-      if (rect.left < window.innerWidth * 0.45) continue;
       const text = normalizeText(node.innerText || node.textContent || '');
       if (!text || text.length > 1600) continue;
       const loose = looseText(text);
@@ -572,25 +663,15 @@
     const delayMs = Number(options.delayMs || 900);
     const status = typeof options.status === 'function' ? options.status : null;
     maybeOpenCommentPanel();
-    await sleep(500);
+    await sleep(900);
 
-    let scroller = await ensureCommentsTab(status);
-    if (!scroller) {
-      clickCommentsTab();
-      await sleep(700);
-      scroller = findCommentScroller();
-    }
-    if (!scroller) {
-      if (status) status('Không xác định được panel bình luận TikTok, đã dừng để tránh cuộn nhầm video.');
-      return { target: null, scanned: 0, scrolled: 0, error: 'comment-scroller-not-found' };
-    }
-
+    let scroller = findCommentScroller();
     let stagnant = 0;
     let lastTop = -1;
     for (let i = 0; i <= maxScrolls; i += 1) {
-      expandVisibleReplies(3, scroller);
+      expandVisibleReplies(3);
       await sleep(i === 0 ? 250 : 150);
-      const target = findCommentCandidate(payload, scroller);
+      const target = findCommentCandidate(payload);
       if (target) {
         highlightCommentElement(target, payload);
         return { target, scanned: i + 1, scrolled: i };
@@ -598,28 +679,24 @@
 
       if (i === maxScrolls) break;
       if (status) status(`Đang tìm comment... lượt ${i + 1}/${maxScrolls + 1}`);
-      const latestScroller = findCommentScroller();
-      if (latestScroller) scroller = latestScroller;
-      else {
-        scroller = await ensureCommentsTab(status);
-        if (!scroller) {
-          if (status) status('Không xác định được panel Bình luận, đã dừng để tránh quét Bạn có thể thích.');
-          break;
-        }
-      }
+      scroller = findCommentScroller() || scroller;
       const before = scrollCommentPanel(scroller);
-      if (before === null) {
-        if (status) status('Không còn xác định được panel bình luận TikTok, đã dừng để tránh cuộn nhầm video.');
-        break;
-      }
       await sleep(delayMs);
-      const after = scroller.scrollTop || 0;
+      const after = scroller.scrollTop || window.scrollY || 0;
       if (Math.abs(after - lastTop) < 8 || Math.abs(after - before) < 8) stagnant += 1;
       else stagnant = 0;
       lastTop = after;
       if (stagnant >= 6) {
-        if (status) status('Panel bình luận không tải thêm comment mới. Đã dừng để tránh cuộn nhầm video.');
-        break;
+        const fallbackTarget = document.elementFromPoint(window.innerWidth - 160, Math.max(220, window.innerHeight * 0.52)) || scroller;
+        fallbackTarget.dispatchEvent(new WheelEvent('wheel', {
+          bubbles: true,
+          cancelable: true,
+          deltaY: 720,
+          clientX: window.innerWidth - 160,
+          clientY: Math.max(220, window.innerHeight * 0.52),
+        }));
+        await sleep(900);
+        stagnant = 0;
       }
     }
     return { target: null, scanned: maxScrolls + 1, scrolled: maxScrolls };
@@ -637,13 +714,20 @@
     };
     const result = await searchAndFocusComment(payload, { maxScrolls: 28, delayMs: 850, status: setCardStatus });
     const target = result.target;
-    renderCommentContextCard(payload, Boolean(target), result);
+    let typed = { ok: false, filled: false };
+    if (target) {
+      typed = await openReplyAndType(payload, target);
+    }
+    renderCommentContextCard(payload, Boolean(target), { ...result, typed });
+    const typedNote = typed.ok && typed.filled ? ' và đã gõ vào ô bình luận' : typed.ok ? ' và đã mở ô bình luận' : '';
     return {
       ok: true,
       final: FINAL,
       target_found: Boolean(target),
+      typed: Boolean(typed.ok && typed.filled),
+      scrolled: result.scrolled || 0,
       message: target
-        ? `Đã mở video, tự cuộn và tô xanh comment sau ${result.scrolled} lượt.`
+        ? `Đã mở video, tự cuộn và tô xanh comment sau ${result.scrolled} lượt${typedNote}.`
         : `Đã mở video nhưng chưa thấy comment sau ${result.scanned} lượt quét. Có thể TikTok chưa tải/đã ẩn comment này.`,
       url: window.location.href,
       method: target ? 'auto-scroll-focus-comment' : 'open-context-card',
@@ -737,14 +821,34 @@
       throw new Error('Khung binh luan TikTok dang loi hoac TikTok chan phien gui tu Chrome.');
     }
 
+    const replyToComment = Boolean(String(payload.comment_text || payload.comment_id || '').trim());
     maybeOpenCommentPanel();
+    await sleep(1000);
+
+    let target = null;
+    if (replyToComment) {
+      target = findCommentCandidate(payload);
+      if (!target) {
+        const search = await scrollToFindComment(payload, { maxAttempts: 22 });
+        target = search.target;
+      }
+      if (target) {
+        const replyBtn = findReplyButton(target);
+        if (replyBtn) {
+          replyBtn.click();
+          await sleep(900);
+        }
+      }
+    }
+
     let sawTikTokError = false;
     const input = await waitFor(() => {
       if (tiktokPageError()) {
         sawTikTokError = true;
         return null;
       }
-      return findCommentInput();
+      if (replyToComment) return findReplyInput() || findCommentInput('main');
+      return findCommentInput('main');
     }, 30000, () => {
       if (!sawTikTokError) maybeOpenCommentPanel();
     });
@@ -761,7 +865,7 @@
     setTextValue(input, message);
     await sleep(800);
 
-    const button = await waitFor(findPostButton, 12000);
+    const button = findReplySendButton(input) || await waitFor(findPostButton, 12000);
     if (!button) {
       if (tiktokPageError()) {
         throw new Error('Khung binh luan TikTok dang loi hoac TikTok chan phien gui tu Chrome.');
@@ -788,9 +892,11 @@
       ok: true,
       final: FINAL,
       comment_id: `extension_${Date.now()}`,
-      message: 'Extension da bam gui binh luan TikTok',
+      message: replyToComment && isReplyInput(input)
+        ? 'Extension da gui tra loi truc tiep vao comment TikTok'
+        : 'Extension da bam gui binh luan TikTok',
       url: window.location.href,
-      method: 'dom-click',
+      method: replyToComment && isReplyInput(input) ? 'reply-thread' : 'dom-click',
     };
   }
 

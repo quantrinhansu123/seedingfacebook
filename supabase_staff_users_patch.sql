@@ -20,6 +20,8 @@ alter table public.staff_users
   add column if not exists role text default 'staff',
   add column if not exists cookie text,
   add column if not exists facebook_user_id text,
+  add column if not exists managed_groups jsonb default '[]'::jsonb,
+  add column if not exists facebook_cookies jsonb default '[]'::jsonb,
   add column if not exists enabled boolean default true,
   add column if not exists created_at timestamptz default now(),
   add column if not exists updated_at timestamptz default now();

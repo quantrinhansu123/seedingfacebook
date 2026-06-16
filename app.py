@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+import time as time_module
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import uuid
@@ -18,7 +19,8 @@ from flask import Flask, jsonify, render_template, request, session, copy_curren
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-from core.group_api import FacebookGroupAPI, load_token, load_cookie, refresh_token, friendly_graph_error, GRAPH_URL
+from core.group_api import FacebookGroupAPI, load_token, load_cookie, refresh_token, friendly_graph_error, GRAPH_URL, FB_CLIENT_ID
+from core.token_gen import FacebookTokenGenerator
 from core.ai_classifier import AIClassifier, DEFAULT_MODEL, DEFAULT_API_KEY, DEFAULT_CATEGORIES, PROVIDERS, extract_phones, normalize_phone
 from core import supabase_store as sb
 
@@ -171,6 +173,10 @@ _reply_suggestions: dict = {}  # {post_id: latest suggestion}
 _business_profile: dict = {}  # {business_name, phone, address, why_choose_us, extra_notes}
 _staff_cookies: dict = {}  # {active_staff_id, staff: [{id, name, cookie, enabled}]}
 _session_staff_cache: dict = {}  # server-only cache for Supabase staff cookies
+_fb_profile_cache: dict = {}  # facebook_user_id -> {ok, name, id, error, ts}
+_staff_fb_display_names: dict = {}  # staff_id -> facebook display name
+_staff_list_cache: dict = {'rows': None, 'warning': '', 'at': 0.0}
+_STAFF_LIST_CACHE_TTL = 20
 _comment_logs: list = []
 _comment_summaries: dict = {}
 _post_comments: list = []
@@ -1232,8 +1238,536 @@ def _public_tiktok_config() -> dict:
     }
 
 
+def _normalize_staff_managed_groups(raw) -> list[dict]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            return []
+    if isinstance(raw, dict):
+        raw = raw.get('groups') or raw.get('items') or []
+    if not isinstance(raw, list):
+        return []
+    rows = []
+    for item in raw:
+        if isinstance(item, str):
+            gid = item.strip()
+            if gid:
+                rows.append({'id': gid, 'name': ''})
+            continue
+        if not isinstance(item, dict):
+            continue
+        gid = str(item.get('id') or item.get('group_id') or '').strip()
+        name = str(item.get('name') or item.get('group_name') or '').strip()
+        platform = str(item.get('platform') or '').strip()
+        channel_type = str(item.get('channel_type') or item.get('type') or '').strip()
+        if gid or name:
+            row = {'id': gid, 'name': name}
+            if platform:
+                row['platform'] = platform
+            if channel_type:
+                row['channel_type'] = channel_type
+            rows.append(row)
+    return rows
+
+
+def _mask_proxy_url(url: str) -> str:
+    text = str(url or '').strip()
+    if not text:
+        return ''
+    return re.sub(r'(:)([^:@/]+)(@)', r':***\3', text, count=1)
+
+
+def _normalize_staff_facebook_cookies(raw, fallback_cookie: str = '') -> list[dict]:
+    if raw is None:
+        raw = []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            raw = []
+        else:
+            try:
+                raw = json.loads(text)
+            except json.JSONDecodeError:
+                raw = []
+    if isinstance(raw, dict):
+        raw = raw.get('facebook_cookies') or raw.get('cookies') or raw.get('items') or []
+    if not isinstance(raw, list):
+        raw = []
+    rows = []
+    for index, item in enumerate(raw):
+        if isinstance(item, str):
+            cookie = item.strip()
+            if cookie:
+                rows.append({
+                    'id': uuid.uuid4().hex[:10],
+                    'label': f'Cookie {index + 1}',
+                    'cookie': cookie,
+                    'facebook_user_id': _extract_cookie_user(cookie),
+                })
+            continue
+        if not isinstance(item, dict):
+            continue
+        cookie = str(item.get('cookie') or item.get('value') or '').strip()
+        label = str(item.get('label') or item.get('name') or '').strip()
+        cookie_id = str(item.get('id') or '').strip() or uuid.uuid4().hex[:10]
+        if cookie:
+            rows.append({
+                'id': cookie_id,
+                'label': label or f'Cookie {len(rows) + 1}',
+                'cookie': cookie,
+                'facebook_user_id': str(item.get('facebook_user_id') or _extract_cookie_user(cookie) or ''),
+                'facebook_name': str(item.get('facebook_name') or item.get('name_fb') or '').strip(),
+            })
+    fallback = str(fallback_cookie or '').strip()
+    if not rows and fallback:
+        rows.append({
+            'id': 'primary',
+            'label': 'Cookie chính',
+            'cookie': fallback,
+            'facebook_user_id': _extract_cookie_user(fallback),
+        })
+    return rows
+
+
+def _primary_staff_cookie(row: dict) -> str:
+    cookies = _normalize_staff_facebook_cookies(row.get('facebook_cookies'), row.get('cookie', ''))
+    active_id = str(row.get('active_cookie_id') or '').strip()
+    if active_id:
+        for item in cookies:
+            if item.get('id') == active_id and item.get('cookie'):
+                return item['cookie']
+    for item in cookies:
+        if item.get('cookie'):
+            return item['cookie']
+    return str(row.get('cookie') or '').strip()
+
+
+def _sync_staff_cookie_fields(row: dict) -> dict:
+    cookies = _normalize_staff_facebook_cookies(row.get('facebook_cookies'), row.get('cookie', ''))
+    primary = _primary_staff_cookie({**row, 'facebook_cookies': cookies})
+    row['facebook_cookies'] = cookies
+    row['cookie'] = primary
+    if primary:
+        row['facebook_user_id'] = _extract_cookie_user(primary)
+    return row
+
+
+def _merge_staff_facebook_cookies(incoming_raw, existing_row: dict) -> list[dict]:
+    existing = _normalize_staff_facebook_cookies(
+        existing_row.get('facebook_cookies'),
+        existing_row.get('cookie', ''),
+    )
+    if incoming_raw is None:
+        return existing
+    existing_by_id = {str(item.get('id') or ''): item for item in existing}
+    incoming = _normalize_staff_facebook_cookies(incoming_raw, '')
+    merged = []
+    for item in incoming:
+        cookie = str(item.get('cookie') or '').strip()
+        cookie_id = str(item.get('id') or '').strip()
+        if not cookie and cookie_id and cookie_id in existing_by_id:
+            cookie = str(existing_by_id[cookie_id].get('cookie') or '').strip()
+        if cookie:
+            merged.append({
+                **item,
+                'cookie': cookie,
+                'facebook_user_id': _extract_cookie_user(cookie),
+            })
+    return merged if merged else existing
+
+
+def _combine_staff_facebook_cookies(*rows: dict) -> list[dict]:
+    combined: dict[str, dict] = {}
+    order: list[str] = []
+    for row in rows:
+        if not row:
+            continue
+        for item in _normalize_staff_facebook_cookies(row.get('facebook_cookies'), row.get('cookie', '')):
+            cookie = str(item.get('cookie') or '').strip()
+            if not cookie:
+                continue
+            cookie_id = str(item.get('id') or '').strip() or uuid.uuid4().hex[:10]
+            if cookie_id not in combined:
+                order.append(cookie_id)
+            combined[cookie_id] = {**combined.get(cookie_id, {}), **item, 'id': cookie_id, 'cookie': cookie}
+    return [combined[cookie_id] for cookie_id in order]
+
+
+def _supabase_staff_write_warning(dropped: list[str]) -> str:
+    if not dropped:
+        return ''
+    labels = {
+        'facebook_cookies': 'facebook_cookies (nhiều cookie FB)',
+        'managed_groups': 'managed_groups (nhóm quản lý)',
+        'active_cookie_id': 'active_cookie_id',
+    }
+    missing = ', '.join(labels.get(key, key) for key in dropped)
+    return (
+        f'Supabase thiếu cột {missing}. '
+        'Chạy file supabase_staff_facebook_cookies_patch.sql và supabase_staff_managed_groups_patch.sql '
+        'trong Supabase SQL Editor rồi lưu lại.'
+    )
+
+
+def _validate_staff_cookies(cookies: list[dict], required: bool = True) -> str:
+    rows = [item for item in cookies if str(item.get('cookie') or '').strip()]
+    if required and not rows:
+        return 'Thiếu cookie Facebook'
+    for item in rows:
+        if 'c_user=' not in str(item.get('cookie') or ''):
+            label = str(item.get('label') or 'Cookie').strip() or 'Cookie'
+            return f'{label} chưa có c_user, vui lòng kiểm tra lại'
+    return ''
+
+
+def _staff_with_active_cookie(staff: dict) -> dict:
+    if not staff:
+        return {}
+    merged = dict(staff)
+    active_id = str(session.get('active_cookie_id') or merged.get('active_cookie_id') or '').strip()
+    if active_id:
+        merged['active_cookie_id'] = active_id
+    return merged
+
+
+def _decode_facebook_name(raw: str) -> str:
+    text = unescape(str(raw or '').strip())
+    if not text:
+        return ''
+    try:
+        if '\\u' in text or '\\x' in text:
+            text = text.encode('utf-8').decode('unicode_escape')
+    except Exception:
+        pass
+    text = re.sub(r'\s*[\|\-–]\s*Facebook.*$', '', text, flags=re.I).strip()
+    if text.lower() in ('facebook', 'log in', 'đăng nhập', 'login'):
+        return ''
+    return text
+
+
+def _facebook_cookie_headers(cookie: str) -> dict:
+    return {
+        'cookie': cookie,
+        'user-agent': (
+            'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) '
+            'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1'
+        ),
+        'accept-language': 'vi-VN,vi;q=0.9,en;q=0.8',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
+
+
+def _parse_facebook_name_from_html(html: str, user_id: str) -> str:
+    if not html:
+        return ''
+    patterns = (
+        rf'"USER_ID":"{re.escape(user_id)}","NAME":"([^"]+)"',
+        rf'"actorID":"{re.escape(user_id)}","name":"([^"]+)"',
+        rf'"entity_id":"{re.escape(user_id)}","name":"([^"]+)"',
+        rf'"userID":"{re.escape(user_id)}","name":"([^"]+)"',
+        rf'"id":"{re.escape(user_id)}","name":"([^"]+)"',
+        r'id="cover-name"[^>]*>([^<]+)<',
+        r'class="[^"]*profileName[^"]*"[^>]*>([^<]+)<',
+        r'"SHORT_NAME":"([^"]+)"',
+        r'property="og:title"\s+content="([^"]+)"',
+        r'<title>([^<|]+)',
+        r'<strong[^>]*>([^<]{2,80})</strong>',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html, flags=re.I | re.S)
+        if not match:
+            continue
+        name = _decode_facebook_name(match.group(1))
+        if name:
+            return name
+    return ''
+
+
+def _remember_facebook_display_name(staff: dict, name: str) -> None:
+    text = str(name or '').strip()
+    if not text:
+        return
+    staff_id = str(staff.get('id') or '')
+    if staff_id:
+        _staff_fb_display_names[staff_id] = text
+    try:
+        session['facebook_display_name'] = text
+    except Exception:
+        pass
+
+
+def _cached_facebook_display_name(staff: dict, user_id: str = '') -> str:
+    staff_id = str(staff.get('id') or '')
+    if staff_id and _staff_fb_display_names.get(staff_id):
+        return _staff_fb_display_names[staff_id]
+    try:
+        cached = str(session.get('facebook_display_name') or '').strip()
+        if cached:
+            return cached
+    except Exception:
+        pass
+    if user_id:
+        cached = _fb_profile_cache.get(user_id)
+        if cached and cached.get('name'):
+            return str(cached.get('name') or '')
+    cookies = _normalize_staff_facebook_cookies(staff.get('facebook_cookies'), staff.get('cookie', ''))
+    active_id = str(staff.get('active_cookie_id') or '').strip()
+    for item in cookies:
+        if active_id and str(item.get('id') or '') != active_id:
+            continue
+        name = str(item.get('facebook_name') or '').strip()
+        if name:
+            return name
+    for item in cookies:
+        name = str(item.get('facebook_name') or '').strip()
+        if name:
+            return name
+    return ''
+
+
+def _prefetch_facebook_display_name(staff: dict) -> None:
+    cookie = _primary_staff_cookie(staff)
+    if not cookie:
+        return
+    user_id = _extract_cookie_user(cookie)
+    if not user_id or _cached_facebook_display_name(staff, user_id):
+        return
+
+    def _job():
+        profile = _fetch_facebook_profile(cookie, allow_token=False, fast=True)
+        if not profile.get('ok'):
+            profile = _fetch_facebook_profile(cookie, allow_token=True, fast=False)
+        if profile.get('ok') and profile.get('name'):
+            _staff_fb_display_names[str(staff.get('id') or '')] = profile['name']
+
+    threading.Thread(target=_job, daemon=True).start()
+
+
+def _fetch_facebook_profile(cookie: str, *, allow_token: bool = True, fast: bool = False) -> dict:
+    user_id = _extract_cookie_user(cookie)
+    if not user_id:
+        return {'ok': False, 'name': '', 'id': '', 'error': 'Cookie thiếu c_user'}
+    cached = _fb_profile_cache.get(user_id)
+    if cached and (time_module.time() - float(cached.get('ts') or 0)) < 3600:
+        return {k: cached[k] for k in ('ok', 'name', 'id', 'error') if k in cached}
+
+    try:
+        scrape_urls = (
+            f'https://mbasic.facebook.com/profile.php?id={user_id}',
+            f'https://m.facebook.com/profile.php?id={user_id}',
+        ) if fast else (
+            f'https://mbasic.facebook.com/profile.php?id={user_id}',
+            f'https://m.facebook.com/profile.php?id={user_id}',
+            f'https://www.facebook.com/profile.php?id={user_id}',
+            'https://www.facebook.com/me',
+            'https://www.facebook.com/',
+        )
+        req_timeout = 4 if fast else 8
+        for url in scrape_urls:
+            resp = _req.get(
+                url,
+                headers=_facebook_cookie_headers(cookie),
+                timeout=req_timeout,
+                allow_redirects=True,
+            )
+            if 'login.php' in (resp.url or '').lower():
+                continue
+            name = _parse_facebook_name_from_html(resp.text or '', user_id)
+            if name:
+                result = {'ok': True, 'name': name, 'id': user_id, 'error': ''}
+                _fb_profile_cache[user_id] = {**result, 'ts': time_module.time()}
+                return result
+    except Exception:
+        pass
+
+    if fast or not allow_token:
+        return {'ok': False, 'name': '', 'id': user_id, 'error': 'Không đọc được tên Facebook'}
+
+    token_file = _staff_token_file(_current_staff_id() or 'default')
+    token = FacebookTokenGenerator(FB_CLIENT_ID, cookie, token_file).GetToken()
+    if token:
+        try:
+            resp = _req.get(
+                f'{GRAPH_URL}/me',
+                params={'fields': 'id,name', 'access_token': token},
+                timeout=12,
+            )
+            data = resp.json()
+            if data.get('name'):
+                result = {
+                    'ok': True,
+                    'name': str(data.get('name') or '').strip(),
+                    'id': str(data.get('id') or user_id),
+                    'error': '',
+                }
+                _fb_profile_cache[user_id] = {**result, 'ts': time_module.time()}
+                return result
+            error = data.get('error', {}).get('message') or 'Không đọc được tên Facebook'
+            return {'ok': False, 'name': '', 'id': user_id, 'error': error}
+        except Exception as exc:
+            return {'ok': False, 'name': '', 'id': user_id, 'error': friendly_graph_error(exc)}
+
+    return {'ok': False, 'name': '', 'id': user_id, 'error': 'Không đọc được tên Facebook'}
+
+
+def _enrich_staff_facebook_cookies_with_names(cookies: list[dict]) -> list[dict]:
+    enriched = []
+    profile_cache: dict[str, dict] = {}
+    for item in cookies:
+        row = dict(item)
+        cookie_val = str(row.get('cookie') or '').strip()
+        fb_name = str(row.get('facebook_name') or '').strip()
+        fb_id = str(row.get('facebook_user_id') or _extract_cookie_user(cookie_val) or '')
+        if cookie_val and not fb_name:
+            cache_key = fb_id or cookie_val[:24]
+            if cache_key not in profile_cache:
+                profile_cache[cache_key] = _fetch_facebook_profile(cookie_val)
+            profile = profile_cache[cache_key]
+            if profile.get('ok'):
+                row['facebook_name'] = profile.get('name', '')
+                row['facebook_user_id'] = profile.get('id') or fb_id
+        enriched.append(row)
+    return enriched
+
+
+def _persist_facebook_cookie_names(staff: dict, cookies: list[dict]) -> None:
+    global _staff_cookies
+    staff_id = str(staff.get('id') or '')
+    if not staff_id or not cookies:
+        return
+    normalized = _normalize_staff_facebook_cookies(cookies, staff.get('cookie', ''))
+    changed = False
+    merged = []
+    for item in normalized:
+        row = dict(item)
+        if row.get('cookie') and row.get('facebook_name'):
+            changed = True
+        merged.append(row)
+    if not changed:
+        return
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    remote_row = {'facebook_cookies': merged, 'updated_at': now}
+    if USE_SUPABASE:
+        try:
+            _, _dropped = sb.update_staff_user_by_id(staff_id, remote_row, SUPABASE_STAFF_TABLE)
+        except Exception:
+            pass
+    local_target = next((entry for entry in _staff_accounts() if entry.get('id') == staff_id), None)
+    if local_target:
+        local_target['facebook_cookies'] = merged
+        local_target['updated_at'] = now
+        _save_staff_cookies()
+    token = session.get('staff_cache_token', '')
+    if token and token in _session_staff_cache:
+        cached = dict(_session_staff_cache[token])
+        cached['facebook_cookies'] = merged
+        _session_staff_cache[token] = cached
+
+
+def _facebook_cookie_context_payload(staff: dict, *, resolve_name: bool = False) -> dict:
+    staff = _staff_with_active_cookie(staff)
+    cookies = _normalize_staff_facebook_cookies(staff.get('facebook_cookies'), staff.get('cookie', ''))
+    active_id = str(staff.get('active_cookie_id') or '').strip()
+    if not active_id and cookies:
+        active_id = str(cookies[0].get('id') or '')
+    profile_cache: dict[str, dict] = {}
+    items = []
+    updated_cookies = []
+    for item in cookies:
+        cookie_id = str(item.get('id') or '')
+        cookie_val = str(item.get('cookie') or '').strip()
+        fb_id = str(item.get('facebook_user_id') or _extract_cookie_user(cookie_val) or '')
+        fb_name = str(item.get('facebook_name') or '').strip()
+        if not fb_name:
+            fb_name = _cached_facebook_display_name(staff, fb_id)
+        if resolve_name and cookie_val and not fb_name and cookie_id == active_id:
+            cache_key = fb_id or cookie_id
+            if cache_key not in profile_cache:
+                profile = _fetch_facebook_profile(cookie_val, allow_token=False, fast=True)
+                if not profile.get('ok'):
+                    profile = _fetch_facebook_profile(cookie_val, allow_token=True, fast=False)
+                profile_cache[cache_key] = profile
+            profile = profile_cache[cache_key]
+            if profile.get('ok'):
+                fb_name = profile.get('name', '')
+                _remember_facebook_display_name(staff, fb_name)
+        updated_cookies.append({**item, 'facebook_name': fb_name})
+        items.append({
+            'id': cookie_id,
+            'label': item.get('label', ''),
+            'facebook_user_id': fb_id,
+            'facebook_name': fb_name,
+            'cookie_masked': _mask_cookie(cookie_val),
+            'active': cookie_id == active_id,
+        })
+    if resolve_name:
+        _persist_facebook_cookie_names(staff, updated_cookies)
+    active_item = next((row for row in items if row.get('active')), items[0] if items else {})
+    active_name = active_item.get('facebook_name', '') or _cached_facebook_display_name(staff, active_item.get('facebook_user_id', ''))
+    return {
+        'ok': True,
+        'active_cookie_id': active_id,
+        'active_facebook_name': active_name,
+        'active_facebook_user_id': active_item.get('facebook_user_id', ''),
+        'cookies': items,
+    }
+
+
+def _persist_active_cookie_choice(staff: dict, cookie_id: str, cookie: str) -> None:
+    global _staff_cookies
+    staff_id = str(staff.get('id') or '')
+    if not staff_id:
+        return
+    session['active_cookie_id'] = cookie_id
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    remote_row = {
+        'active_cookie_id': cookie_id,
+        'cookie': cookie,
+        'facebook_user_id': _extract_cookie_user(cookie),
+        'updated_at': now,
+    }
+    if USE_SUPABASE:
+        try:
+            _, _dropped = sb.update_staff_user_by_id(staff_id, remote_row, SUPABASE_STAFF_TABLE)
+        except Exception:
+            pass
+    local_target = next((item for item in _staff_accounts() if item.get('id') == staff_id), None)
+    if local_target:
+        local_target['active_cookie_id'] = cookie_id
+        local_target['cookie'] = cookie
+        local_target['facebook_user_id'] = _extract_cookie_user(cookie)
+        local_target['updated_at'] = now
+        local_target['facebook_cookies'] = _normalize_staff_facebook_cookies(
+            local_target.get('facebook_cookies'),
+            cookie,
+        )
+        _save_staff_cookies()
+    token = session.get('staff_cache_token', '')
+    if token and token in _session_staff_cache:
+        cached = dict(_session_staff_cache[token])
+        cached.update(remote_row)
+        cached['active_cookie_id'] = cookie_id
+        cached['facebook_cookies'] = _normalize_staff_facebook_cookies(
+            cached.get('facebook_cookies'),
+            cookie,
+        )
+        _session_staff_cache[token] = cached
+    _invalidate_facebook_cache(staff_id)
+
+
 def _public_staff_cookie(row: dict) -> dict:
+    row = _sync_staff_cookie_fields(_staff_with_active_cookie(dict(row or {})))
     cookie = row.get('cookie', '')
+    cookies = row.get('facebook_cookies') or []
+    active_id = str(row.get('active_cookie_id') or '').strip()
+    if not active_id and cookies:
+        active_id = str(cookies[0].get('id') or '')
     return {
         'id': row.get('id', ''),
         'name': row.get('name', ''),
@@ -1241,6 +1775,23 @@ def _public_staff_cookie(row: dict) -> dict:
         'role': row.get('role', 'staff'),
         'cookie_masked': _mask_cookie(cookie),
         'facebook_user_id': row.get('facebook_user_id') or _extract_cookie_user(cookie),
+        'active_cookie_id': active_id,
+        'active_facebook_name': next(
+            (str(item.get('facebook_name') or '') for item in cookies if str(item.get('id') or '') == active_id),
+            str(cookies[0].get('facebook_name') or '') if cookies else '',
+        ) or _cached_facebook_display_name(row, row.get('facebook_user_id') or _extract_cookie_user(cookie)),
+        'facebook_cookies': [
+            {
+                'id': item.get('id', ''),
+                'label': item.get('label', ''),
+                'cookie': item.get('cookie', ''),
+                'cookie_masked': _mask_cookie(item.get('cookie', '')),
+                'facebook_user_id': item.get('facebook_user_id') or _extract_cookie_user(item.get('cookie', '')),
+                'facebook_name': item.get('facebook_name', ''),
+            }
+            for item in cookies
+        ],
+        'managed_groups': _normalize_staff_managed_groups(row.get('managed_groups')),
         'enabled': bool(row.get('enabled', True)),
         'created_at': row.get('created_at', ''),
         'updated_at': row.get('updated_at', ''),
@@ -1276,6 +1827,9 @@ def _normalize_supabase_staff(row: dict) -> dict:
         'role': role,
         'enabled': _as_enabled(row.get('enabled', True)),
         'facebook_user_id': str(row.get('facebook_user_id') or _extract_cookie_user(cookie) or ''),
+        'managed_groups': _normalize_staff_managed_groups(row.get('managed_groups')),
+        'facebook_cookies': _normalize_staff_facebook_cookies(row.get('facebook_cookies'), cookie),
+        'active_cookie_id': str(row.get('active_cookie_id') or '').strip(),
         'created_at': row.get('created_at', ''),
         'updated_at': row.get('updated_at', ''),
         '_auth_source': 'supabase',
@@ -1318,10 +1872,25 @@ def _load_supabase_staff(username: str) -> tuple[dict, str]:
 def _list_supabase_staff() -> tuple[list, str]:
     if not USE_SUPABASE:
         return [], ''
+    global _staff_list_cache
+    now = time_module.monotonic()
+    cached_rows = _staff_list_cache.get('rows')
+    if cached_rows is not None and now - float(_staff_list_cache.get('at') or 0) < _STAFF_LIST_CACHE_TTL:
+        return cached_rows, ''
     try:
-        return [_normalize_supabase_staff(row) for row in sb.list_staff_users(SUPABASE_STAFF_TABLE)], ''
+        rows = [_normalize_supabase_staff(row) for row in sb.list_staff_users(SUPABASE_STAFF_TABLE)]
+        _staff_list_cache = {'rows': rows, 'warning': '', 'at': now}
+        return rows, ''
     except Exception as e:
-        return [], str(e)
+        warning = str(e)
+        if cached_rows is not None:
+            return cached_rows, ''
+        return [], warning
+
+
+def _invalidate_staff_list_cache() -> None:
+    global _staff_list_cache
+    _staff_list_cache = {'rows': None, 'warning': '', 'at': 0.0}
 
 
 def _merged_public_staff_rows() -> tuple[list, str]:
@@ -1338,8 +1907,22 @@ def _merged_public_staff_rows() -> tuple[list, str]:
         if not _as_enabled(item.get('enabled', True)):
             continue
         key = item.get('id') or item.get('username')
-        if key:
-            merged[key] = item
+        if not key:
+            continue
+        local_item = merged.get(key) or {}
+        cookies = _combine_staff_facebook_cookies(local_item, item)
+        primary_cookie = _primary_staff_cookie({
+            'facebook_cookies': cookies,
+            'active_cookie_id': item.get('active_cookie_id') or local_item.get('active_cookie_id'),
+            'cookie': item.get('cookie') or local_item.get('cookie', ''),
+        })
+        merged[key] = {
+            **local_item,
+            **item,
+            'facebook_cookies': cookies,
+            'cookie': primary_cookie,
+            'facebook_user_id': _extract_cookie_user(primary_cookie),
+        }
 
     current = _current_staff()
     if current:
@@ -1355,11 +1938,18 @@ def _set_logged_in_staff(staff: dict) -> None:
     session['staff_id'] = staff.get('id', '')
     session['staff_username'] = staff.get('username', '')
     session['staff_source'] = staff.get('_auth_source', 'local')
+    active_cookie_id = str(staff.get('active_cookie_id') or '').strip()
+    if active_cookie_id:
+        session['active_cookie_id'] = active_cookie_id
+    else:
+        session.pop('active_cookie_id', None)
 
     if staff.get('_auth_source') == 'supabase':
         token = uuid.uuid4().hex
         _session_staff_cache[token] = staff
         session['staff_cache_token'] = token
+
+    _prefetch_facebook_display_name(staff)
 
 
 def _clear_logged_in_staff() -> None:
@@ -1369,6 +1959,8 @@ def _clear_logged_in_staff() -> None:
     session.pop('staff_id', None)
     session.pop('staff_username', None)
     session.pop('staff_source', None)
+    session.pop('active_cookie_id', None)
+    session.pop('facebook_display_name', None)
 
 
 def _setup_required() -> bool:
@@ -1383,12 +1975,12 @@ def _current_staff() -> dict:
         return {}
     local = next((item for item in _staff_accounts() if item.get('id') == staff_id and item.get('enabled', True)), {})
     if local:
-        return local
+        return _staff_with_active_cookie(local)
 
     token = session.get('staff_cache_token', '')
     cached = _session_staff_cache.get(token) if token else None
     if cached and cached.get('id') == staff_id and cached.get('enabled', True):
-        return cached
+        return _staff_with_active_cookie(cached)
 
     if session.get('staff_source') == 'supabase':
         row, _ = _load_supabase_staff(session.get('staff_username', ''))
@@ -1396,6 +1988,7 @@ def _current_staff() -> dict:
             staff = _normalize_supabase_staff(row)
             if staff.get('id') == staff_id and staff.get('enabled', True):
                 token = uuid.uuid4().hex
+                staff = _staff_with_active_cookie(staff)
                 _session_staff_cache[token] = staff
                 session['staff_cache_token'] = token
                 return staff
@@ -1423,7 +2016,7 @@ def _active_staff() -> dict:
         return {}
     active_id = _staff_cookies.get('active_staff_id', '')
     active = next((item for item in _staff_accounts() if item.get('id') == active_id and item.get('enabled', True)), None)
-    return active or {}
+    return _staff_with_active_cookie(active or {})
 
 
 def _active_staff_id() -> str:
@@ -1431,7 +2024,7 @@ def _active_staff_id() -> str:
 
 
 def _active_cookie() -> str:
-    return _active_staff().get('cookie', '')
+    return _primary_staff_cookie(_active_staff())
 
 
 def _staff_token_file(staff_id: str) -> str:
@@ -1439,9 +2032,21 @@ def _staff_token_file(staff_id: str) -> str:
     return os.path.join(STAFF_TOKEN_DIR, f'{safe_id}.txt')
 
 
-def _invalidate_facebook_cache():
+def _clear_staff_access_token(staff_id: str = '') -> None:
+    staff_id = str(staff_id or _active_staff_id() or '').strip()
+    if not staff_id:
+        return
+    try:
+        os.remove(_staff_token_file(staff_id))
+    except OSError:
+        pass
+
+
+def _invalidate_facebook_cache(staff_id: str = '') -> None:
     _api_cache.clear()
     _pages_cache.clear()
+    if staff_id:
+        _clear_staff_access_token(staff_id)
 
 
 def _clean_business_profile(body: dict) -> dict:
@@ -2397,6 +3002,7 @@ def _flatten_tiktok_comment_rows(
             'post_title': video_meta['video_title'],
             'group_id': '',
             'post_url': video_url,
+            'comment_url': _comment_url_for_row('tiktok', video_url, f'tiktok_{cid}'),
             'comment_id': f'tiktok_{cid}',
             'parent_comment_id': f'tiktok_{parent_cid}' if parent_cid else '',
             'depth': depth,
@@ -2998,7 +3604,7 @@ def _staff_processed_post_ids(staff_id: str) -> set:
     for item in _comment_logs:
         if str(item.get('staff_id') or '').strip() != staff_id:
             continue
-        if item.get('status') != 'success':
+        if item.get('status') not in ('success', 'processed'):
             continue
         post_id = str(item.get('post_id') or '').strip()
         if post_id:
@@ -3007,7 +3613,7 @@ def _staff_processed_post_ids(staff_id: str) -> set:
 
 
 def _filter_posts_for_staff(posts: list, staff_id: str) -> tuple[list, int]:
-    if not staff_id or _is_admin():
+    if not staff_id:
         return posts, 0
     processed_ids = _staff_processed_post_ids(staff_id)
     if not processed_ids:
@@ -3138,7 +3744,8 @@ def _get_classifier() -> AIClassifier:
 
 def get_api(group_id: str) -> FacebookGroupAPI:
     staff_id = _active_staff_id()
-    cache_key = f'{staff_id or "default"}:{group_id}'
+    active_cookie_id = str(session.get('active_cookie_id') or _active_staff().get('active_cookie_id') or '')
+    cache_key = f'{staff_id or "default"}:{active_cookie_id}:{group_id}'
     if cache_key not in _api_cache:
         token_file = _staff_token_file(staff_id) if staff_id else None
         _api_cache[cache_key] = FacebookGroupAPI(group_id, cookie=_active_cookie(), token_file=token_file)
@@ -3425,9 +4032,18 @@ def api_posts():
                     report.append(item)
 
         if (group_ids or page_ids) and not all_posts and any(not item.get('ok') for item in report):
+            failed_errors = [
+                f"{item.get('group_name') or item.get('target_id') or 'Nguồn'}: {item.get('error')}"
+                for item in report
+                if not item.get('ok') and item.get('error')
+            ]
+            detail = failed_errors[0] if failed_errors else ''
             payload = {
                 'ok': False,
-                'error': 'Không lấy được bài từ Facebook. Kiểm tra cookie nhân sự, quyền nhóm/Page và quyền quản trị Page.',
+                'error': (
+                    'Không lấy được bài từ Facebook. Kiểm tra cookie nhân sự, quyền nhóm/Page và quyền quản trị Page.'
+                    + (f' Chi tiết: {detail}' if detail else '')
+                ),
                 'posts': [],
                 'report': report,
                 'source': 'facebook_graph',
@@ -3758,6 +4374,38 @@ def api_reply_post_comment():
         if log.get('storage_warning'):
             payload['warning'] = f"Đã lưu local, Supabase chưa ghi được: {log['storage_warning']}"
         return jsonify(payload), 500
+
+
+@app.route('/api/posts/mark-processed', methods=['POST'])
+def api_mark_post_processed():
+    body = request.get_json() or {}
+    post_id = str(body.get('post_id') or '').strip()
+    if not post_id:
+        return jsonify({'ok': False, 'error': 'Thiếu ID bài viết'}), 400
+    staff = _current_staff()
+    if not staff:
+        return jsonify({'ok': False, 'error': 'Chưa đăng nhập'}), 401
+
+    staff_id = str(staff.get('id') or '')
+    if post_id in _staff_processed_post_ids(staff_id):
+        return jsonify({'ok': True, 'post_id': post_id, 'already': True})
+
+    group_id = str(body.get('group_id') or body.get('_group_id') or '').strip()
+    post_url = str(body.get('post_url') or body.get('permalink_url') or '').strip()
+    preview = str(body.get('message') or body.get('post_message') or '').strip()[:240]
+    comment_text = preview or 'Đã đánh dấu xử lý — không cần quét lại'
+    log = _record_comment_log(
+        post_id,
+        group_id,
+        post_url,
+        comment_text,
+        '',
+        'processed',
+    )
+    payload = {'ok': True, 'post_id': post_id, 'log': log}
+    if log.get('storage_warning'):
+        payload['warning'] = log['storage_warning']
+    return jsonify(payload)
 
 
 @app.route('/api/comment-logs', methods=['GET'])
@@ -5255,8 +5903,9 @@ def tg_remove(chat_id):
 
 @app.route('/api/groups', methods=['GET'])
 def groups_get():
+    """Danh sách nhóm Facebook — chỉ từ bảng managed_channels (/kenh)."""
     _refresh_managed_channels_from_supabase()
-    return jsonify(_merged_facebook_groups())
+    return jsonify(_facebook_group_channels())
 
 
 @app.route('/api/groups', methods=['POST'])
@@ -5332,9 +5981,61 @@ def staff_cookies_get():
         'can_manage': _is_admin(),
         'fallback_cookie': bool(load_cookie()),
     }
+    current = _current_staff()
+    if current:
+        payload['facebook_context'] = _facebook_cookie_context_payload(current, resolve_name=False)
     if warning:
         payload['warning'] = warning
     return jsonify(payload)
+
+
+@app.route('/api/facebook-cookie/context', methods=['GET'])
+def facebook_cookie_context():
+    staff = _current_staff()
+    if not staff:
+        return jsonify({'ok': False, 'error': 'Chưa đăng nhập'}), 401
+    return jsonify(_facebook_cookie_context_payload(staff, resolve_name=True))
+
+
+@app.route('/api/facebook-cookie/refresh-names', methods=['POST'])
+def facebook_cookie_refresh_names():
+    staff = _current_staff()
+    if not staff:
+        return jsonify({'ok': False, 'error': 'Chưa đăng nhập'}), 401
+    context = _facebook_cookie_context_payload(staff, resolve_name=True)
+    active_name = context.get('active_facebook_name') or ''
+    if active_name:
+        context['message'] = f'Đã cập nhật tên Facebook: {active_name}'
+    else:
+        context['message'] = 'Không đọc được tên Facebook. Kiểm tra cookie còn hợp lệ.'
+    return jsonify(context)
+
+
+@app.route('/api/facebook-cookie/switch', methods=['POST'])
+def facebook_cookie_switch():
+    staff = _current_staff()
+    if not staff:
+        return jsonify({'ok': False, 'error': 'Chưa đăng nhập'}), 401
+    body = request.get_json() or {}
+    cookie_id = str(body.get('cookie_id') or body.get('id') or '').strip()
+    cookies = _normalize_staff_facebook_cookies(staff.get('facebook_cookies'), staff.get('cookie', ''))
+    target = next((item for item in cookies if str(item.get('id') or '') == cookie_id), None)
+    if not target:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy cookie'}), 404
+    cookie = str(target.get('cookie') or '').strip()
+    if not cookie:
+        return jsonify({'ok': False, 'error': 'Cookie rỗng'}), 400
+    _persist_active_cookie_choice(staff, cookie_id, cookie)
+    _invalidate_staff_list_cache()
+    profile = _fetch_facebook_profile(cookie, allow_token=True)
+    context = _facebook_cookie_context_payload(_current_staff(), resolve_name=False)
+    if profile.get('ok') and profile.get('name'):
+        context['active_facebook_name'] = profile.get('name', '')
+        for item in context.get('cookies') or []:
+            if item.get('id') == cookie_id:
+                item['facebook_name'] = profile.get('name', '')
+    context['message'] = f"Đã chuyển sang {profile.get('name') or target.get('label') or 'cookie mới'}"
+    return jsonify(context)
 
 
 @app.route('/api/staff-cookies', methods=['POST'])
@@ -5346,17 +6047,23 @@ def staff_cookies_save():
     name = str(body.get('name') or '').strip()[:80]
     username = str(body.get('username') or '').strip().lower()[:60]
     password = str(body.get('password') or '')
-    cookie = str(body.get('cookie') or '').strip()
+    managed_groups = _normalize_staff_managed_groups(body.get('managed_groups'))
+    facebook_cookies = _normalize_staff_facebook_cookies(
+        body.get('facebook_cookies'),
+        body.get('cookie', ''),
+    )
+    facebook_cookies = [item for item in facebook_cookies if str(item.get('cookie') or '').strip()]
+    facebook_cookies = _enrich_staff_facebook_cookies_with_names(facebook_cookies)
+    cookie = _primary_staff_cookie({'facebook_cookies': facebook_cookies, 'cookie': ''})
+    cookie_error = _validate_staff_cookies(facebook_cookies, required=True)
+    if cookie_error:
+        return jsonify({'ok': False, 'error': cookie_error}), 400
     if not name:
         return jsonify({'ok': False, 'error': 'Thiếu tên nhân sự'}), 400
     if not username:
         return jsonify({'ok': False, 'error': 'Thiếu tài khoản đăng nhập'}), 400
     if len(password) < 6:
         return jsonify({'ok': False, 'error': 'Mật khẩu tối thiểu 6 ký tự'}), 400
-    if not cookie:
-        return jsonify({'ok': False, 'error': 'Thiếu cookie'}), 400
-    if 'c_user=' not in cookie:
-        return jsonify({'ok': False, 'error': 'Cookie chưa có c_user, vui lòng kiểm tra lại'}), 400
 
     staff = _staff_cookies.setdefault('staff', [])
     if any(item.get('username') == username for item in staff):
@@ -5378,18 +6085,24 @@ def staff_cookies_save():
         'role': 'staff',
         'cookie': cookie,
         'facebook_user_id': _extract_cookie_user(cookie),
+        'managed_groups': managed_groups,
+        'facebook_cookies': facebook_cookies,
         'enabled': True,
     }
     if USE_SUPABASE:
+        write_warning = ''
         try:
             if existing_row and not _as_enabled(existing_row.get('enabled', True)):
                 remote_row['id'] = existing_row.get('id') or saved_id
-                sb.update_staff_user(username, remote_row, SUPABASE_STAFF_TABLE)
+                _, dropped = sb.update_staff_user(username, remote_row, SUPABASE_STAFF_TABLE)
                 saved_id = remote_row['id']
             else:
-                sb.insert_staff_user(remote_row, SUPABASE_STAFF_TABLE)
+                _, dropped = sb.insert_staff_user(remote_row, SUPABASE_STAFF_TABLE)
+            write_warning = _supabase_staff_write_warning(dropped)
         except Exception as e:
             return jsonify({'ok': False, 'error': f'Không lưu được nhân sự lên Supabase: {e}'}), 500
+    else:
+        write_warning = ''
 
     local_row = {
         'id': saved_id,
@@ -5399,6 +6112,8 @@ def staff_cookies_save():
         'password_hash': digest,
         'cookie': cookie,
         'role': 'staff',
+        'managed_groups': managed_groups,
+        'facebook_cookies': facebook_cookies,
         'enabled': True,
         'created_at': now,
         'updated_at': now,
@@ -5408,14 +6123,16 @@ def staff_cookies_save():
         _staff_cookies['active_staff_id'] = saved_id
     _save_staff_cookies()
     _invalidate_facebook_cache()
+    _invalidate_staff_list_cache()
     staff_rows, warning = _merged_public_staff_rows()
+    warnings = [part for part in [warning, write_warning] if part]
     return jsonify({
         'ok': True,
         'active_staff_id': _current_staff_id(),
         'staff': staff_rows,
         'can_manage': True,
         'storage': 'supabase' if USE_SUPABASE else 'local',
-        'warning': warning,
+        'warning': ' | '.join(warnings),
     })
 
 
@@ -5442,7 +6159,15 @@ def staff_cookies_update(staff_id):
     name = str(body.get('name', target.get('name', '')) or '').strip()[:80]
     username = str(body.get('username', target.get('username', '')) or '').strip().lower()[:60]
     password = str(body.get('password') or '')
-    cookie = str(body.get('cookie') or '').strip()
+    managed_groups = _normalize_staff_managed_groups(
+        body.get('managed_groups') if 'managed_groups' in body else target.get('managed_groups'),
+    )
+    incoming_cookies = body.get('facebook_cookies') if 'facebook_cookies' in body else None
+    if incoming_cookies is None and body.get('cookie'):
+        incoming_cookies = [{'id': 'primary', 'label': 'Cookie chính', 'cookie': body.get('cookie', '')}]
+    facebook_cookies = _merge_staff_facebook_cookies(incoming_cookies, target)
+    facebook_cookies = _enrich_staff_facebook_cookies_with_names(facebook_cookies)
+    cookie = _primary_staff_cookie({'facebook_cookies': facebook_cookies, 'cookie': target.get('cookie', '')})
 
     if not name:
         return jsonify({'ok': False, 'error': 'Thiếu tên nhân sự'}), 400
@@ -5450,8 +6175,9 @@ def staff_cookies_update(staff_id):
         return jsonify({'ok': False, 'error': 'Thiếu tài khoản đăng nhập'}), 400
     if password and len(password) < 6:
         return jsonify({'ok': False, 'error': 'Mật khẩu tối thiểu 6 ký tự'}), 400
-    if cookie and 'c_user=' not in cookie:
-        return jsonify({'ok': False, 'error': 'Cookie chưa có c_user, vui lòng kiểm tra lại'}), 400
+    cookie_error = _validate_staff_cookies(facebook_cookies, required=False)
+    if cookie_error:
+        return jsonify({'ok': False, 'error': cookie_error}), 400
 
     for item in staff:
         if item.get('id') != staff_id and item.get('username') == username and _as_enabled(item.get('enabled', True)):
@@ -5468,39 +6194,60 @@ def staff_cookies_update(staff_id):
         'name': name,
         'username': username,
         'role': target.get('role') or 'staff',
+        'managed_groups': managed_groups,
+        'facebook_cookies': facebook_cookies,
+        'cookie': cookie,
+        'facebook_user_id': _extract_cookie_user(cookie),
         'enabled': True,
         'updated_at': now,
     }
     if password:
         remote_row['password'] = password
-    if cookie:
-        remote_row['cookie'] = cookie
-        remote_row['facebook_user_id'] = _extract_cookie_user(cookie)
 
     if USE_SUPABASE:
+        write_warning = ''
         try:
-            sb.update_staff_user_by_id(staff_id, remote_row, SUPABASE_STAFF_TABLE)
+            _, dropped = sb.update_staff_user_by_id(staff_id, remote_row, SUPABASE_STAFF_TABLE)
+            write_warning = _supabase_staff_write_warning(dropped)
         except Exception as e:
-            return jsonify({'ok': False, 'error': f'Không cập nhật được nhân sự trên Supabase: {e}'}), 500
+            err = str(e)
+            if sb.is_missing_column_error(err):
+                missing = []
+                if 'facebook_cookies' in err:
+                    missing.append('facebook_cookies')
+                if 'managed_groups' in err:
+                    missing.append('managed_groups')
+                if 'active_cookie_id' in err:
+                    missing.append('active_cookie_id')
+                write_warning = _supabase_staff_write_warning(missing or ['facebook_cookies'])
+            else:
+                return jsonify({'ok': False, 'error': f'Không cập nhật được nhân sự trên Supabase: {e}'}), 500
+    else:
+        write_warning = ''
 
     if local_target:
         local_target['name'] = name
         local_target['username'] = username
         local_target['role'] = target.get('role') or local_target.get('role') or 'staff'
+        local_target['managed_groups'] = managed_groups
+        local_target['facebook_cookies'] = facebook_cookies
+        local_target['cookie'] = cookie
+        local_target['facebook_user_id'] = _extract_cookie_user(cookie)
         local_target['updated_at'] = now
         if password:
             salt, digest = _hash_password(password)
             local_target['password_salt'] = salt
             local_target['password_hash'] = digest
-        if cookie:
-            local_target['cookie'] = cookie
-            local_target['facebook_user_id'] = _extract_cookie_user(cookie)
     else:
         local_row = {
             'id': staff_id,
             'name': name,
             'username': username,
             'role': target.get('role') or 'staff',
+            'managed_groups': managed_groups,
+            'facebook_cookies': facebook_cookies,
+            'cookie': cookie,
+            'facebook_user_id': _extract_cookie_user(cookie),
             'enabled': True,
             'created_at': target.get('created_at') or now,
             'updated_at': now,
@@ -5509,13 +6256,11 @@ def staff_cookies_update(staff_id):
             salt, digest = _hash_password(password)
             local_row['password_salt'] = salt
             local_row['password_hash'] = digest
-        if cookie:
-            local_row['cookie'] = cookie
-            local_row['facebook_user_id'] = _extract_cookie_user(cookie)
         staff.append(local_row)
 
     _save_staff_cookies()
     _invalidate_facebook_cache()
+    _invalidate_staff_list_cache()
 
     if staff_id == _current_staff_id():
         refreshed_staff = {
@@ -5525,24 +6270,20 @@ def staff_cookies_update(staff_id):
             'created_at': target.get('created_at') or now,
             '_auth_source': 'supabase' if USE_SUPABASE else target.get('_auth_source', 'local'),
         }
-        refreshed_staff['cookie'] = cookie or target.get('cookie', '')
-        refreshed_staff['facebook_user_id'] = (
-            remote_row.get('facebook_user_id')
-            or target.get('facebook_user_id')
-            or _extract_cookie_user(refreshed_staff.get('cookie', ''))
-        )
+        refreshed_staff['cookie'] = cookie
+        refreshed_staff['facebook_cookies'] = facebook_cookies
+        refreshed_staff['facebook_user_id'] = _extract_cookie_user(cookie)
         _set_logged_in_staff(refreshed_staff)
 
     staff_rows, warning = _merged_public_staff_rows()
-    if remote_warning and not warning:
-        warning = remote_warning
+    warnings = [part for part in [warning, remote_warning, write_warning] if part]
     return jsonify({
         'ok': True,
         'active_staff_id': _current_staff_id(),
         'staff': staff_rows,
         'can_manage': True,
         'storage': 'supabase' if USE_SUPABASE else 'local',
-        'warning': warning,
+        'warning': ' | '.join(warnings),
     })
 
 
@@ -5573,6 +6314,7 @@ def staff_cookies_delete(staff_id):
         pass
     _save_staff_cookies()
     _invalidate_facebook_cache()
+    _invalidate_staff_list_cache()
     staff_rows, warning = _merged_public_staff_rows()
     return jsonify({'ok': True, 'active_staff_id': _current_staff_id(), 'staff': staff_rows, 'can_manage': True, 'warning': warning})
 

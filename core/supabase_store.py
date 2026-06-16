@@ -147,51 +147,156 @@ def get_staff_user(username: str, table: Optional[str] = None) -> Optional[dict]
     return rows[0] if rows else None
 
 
+_OPTIONAL_STAFF_JSON_COLUMNS = (
+    'managed_groups',
+    'facebook_cookies',
+    'active_cookie_id',
+)
+_KNOWN_MISSING_STAFF_COLUMNS: set[str] = set()
+_SENSITIVE_STAFF_FIELDS = frozenset({
+    'password',
+    'password_hash',
+    'password_salt',
+})
+
+
+def _sanitize_staff_row_read(row: dict) -> dict:
+    cleaned = dict(row or {})
+    for key in _SENSITIVE_STAFF_FIELDS:
+        cleaned.pop(key, None)
+    cleaned.setdefault('managed_groups', [])
+    cleaned.setdefault('facebook_cookies', [])
+    return cleaned
+
+
+def is_missing_column_error(message: str) -> bool:
+    return _is_missing_supabase_column_error(message)
+
+
+def _write_staff_payload(row: dict) -> dict:
+    return {k: v for k, v in (row or {}).items() if k not in _SENSITIVE_STAFF_FIELDS}
+
+
+def _is_missing_supabase_column_error(message: str) -> bool:
+    text = str(message or '')
+    return (
+        '42703' in text
+        or 'PGRST204' in text
+        or ("Could not find" in text and 'column' in text.lower())
+    )
+
+
+def _missing_column_from_error(message: str, candidates: list[str]) -> str:
+    text = str(message or '')
+    for key in candidates:
+        if f"'{key}'" in text or f'"{key}"' in text or f'.{key}' in text or f' {key} ' in text:
+            return key
+    return ''
+
+
+def _drop_optional_staff_columns(payload: dict, optional_keys: list[str], error: Exception) -> tuple[dict, list[str], list[str]]:
+    err = str(error)
+    if not _is_missing_supabase_column_error(err):
+        raise error
+    remaining = list(optional_keys)
+    missing = _missing_column_from_error(err, list(_OPTIONAL_STAFF_JSON_COLUMNS))
+    if missing and missing in payload:
+        drop_key = missing
+    elif remaining:
+        drop_key = remaining.pop()
+    else:
+        removable = [key for key in _OPTIONAL_STAFF_JSON_COLUMNS if key in payload]
+        if not removable:
+            raise error
+        drop_key = removable[0]
+    if drop_key in remaining:
+        remaining.remove(drop_key)
+    next_payload = dict(payload)
+    next_payload.pop(drop_key, None)
+    _KNOWN_MISSING_STAFF_COLUMNS.add(drop_key)
+    return next_payload, remaining, [drop_key]
+
+
+def _staff_write_payload(row: dict) -> tuple[dict, list[str]]:
+    payload = _write_staff_payload(row)
+    for column in list(_KNOWN_MISSING_STAFF_COLUMNS):
+        payload.pop(column, None)
+    optional_keys = [key for key in _OPTIONAL_STAFF_JSON_COLUMNS if key in payload]
+    return payload, optional_keys
+
+
+def _request_staff_write(method: str, path: str, row: dict, *, prefer: str = 'return=representation') -> tuple[requests.Response, list[str]]:
+    payload, optional_keys = _staff_write_payload(row)
+    dropped: list[str] = []
+    while True:
+        try:
+            return _request(method, path, json=payload, prefer=prefer), dropped
+        except RuntimeError as e:
+            payload, optional_keys, removed = _drop_optional_staff_columns(payload, optional_keys, e)
+            dropped.extend(removed)
+
+
 def list_staff_users(table: Optional[str] = None) -> list:
     table_name = table or STAFF_USERS_TABLE
-    r = _request(
-        'GET',
-        f'{table_name}?select=id,name,username,role,cookie,facebook_user_id,'
-        'enabled,created_at,updated_at&enabled=eq.true&order=created_at.asc',
-    )
-    return r.json()
+    try:
+        r = _request(
+            'GET',
+            f'{table_name}?select=*&enabled=eq.true&order=created_at.asc',
+        )
+        return [_sanitize_staff_row_read(row) for row in r.json()]
+    except RuntimeError as e:
+        if not _is_missing_supabase_column_error(str(e)):
+            raise
+        r = _request(
+            'GET',
+            f'{table_name}?select=id,name,username,role,cookie,facebook_user_id,enabled,created_at,updated_at'
+            '&enabled=eq.true&order=created_at.asc',
+        )
+        return [_sanitize_staff_row_read(row) for row in r.json()]
 
 
-def insert_staff_user(row: dict, table: Optional[str] = None) -> dict:
+def insert_staff_user(row: dict, table: Optional[str] = None) -> tuple[dict, list[str]]:
     table_name = table or STAFF_USERS_TABLE
-    r = _request('POST', table_name, json=[row], prefer='return=representation')
-    rows = r.json()
-    return rows[0] if rows else {}
+    payload, optional_keys = _staff_write_payload(row)
+    dropped: list[str] = []
+    while True:
+        try:
+            r = _request('POST', table_name, json=[payload], prefer='return=representation')
+            rows = r.json()
+            return (_sanitize_staff_row_read(rows[0]) if rows else {}), dropped
+        except RuntimeError as e:
+            payload, optional_keys, removed = _drop_optional_staff_columns(payload, optional_keys, e)
+            dropped.extend(removed)
 
 
-def update_staff_user(username: str, row: dict, table: Optional[str] = None) -> dict:
+def update_staff_user(username: str, row: dict, table: Optional[str] = None) -> tuple[dict, list[str]]:
     table_name = table or STAFF_USERS_TABLE
     username = (username or '').strip().lower()
     if not username:
-        return {}
-    r = _request(
+        return {}, []
+    r, dropped = _request_staff_write(
         'PATCH',
         f'{table_name}?username=eq.{quote(username, safe="")}',
-        json=row,
+        row,
         prefer='return=representation',
     )
     rows = r.json()
-    return rows[0] if rows else {}
+    return (_sanitize_staff_row_read(rows[0]) if rows else {}), dropped
 
 
-def update_staff_user_by_id(staff_id: str, row: dict, table: Optional[str] = None) -> dict:
+def update_staff_user_by_id(staff_id: str, row: dict, table: Optional[str] = None) -> tuple[dict, list[str]]:
     table_name = table or STAFF_USERS_TABLE
     staff_id = (staff_id or '').strip()
     if not staff_id:
-        return {}
-    r = _request(
+        return {}, []
+    r, dropped = _request_staff_write(
         'PATCH',
         f'{table_name}?id=eq.{quote(staff_id, safe="")}',
-        json=row,
+        row,
         prefer='return=representation',
     )
     rows = r.json()
-    return rows[0] if rows else {}
+    return (_sanitize_staff_row_read(rows[0]) if rows else {}), dropped
 
 
 def delete_staff_user(staff_id: str = '', username: str = '', table: Optional[str] = None) -> None:

@@ -9,16 +9,121 @@ import type { StaffPayload } from '@/components/StaffCookiePanel';
 import type { ViewKey } from '@/lib/app-routes';
 import type {
   CommentSummary,
+  FacebookCookieContext,
   FbPage,
   FbPost,
   Lead,
   ManagedChannel,
   StaffAccount,
+  StaffFacebookCookie,
 } from '@/lib/types';
-import { classifyFacebookFeedError } from '@/lib/utils';
+import { classifyFacebookFeedError, facebookGroupIdFromChannel } from '@/lib/utils';
 import './manage-dashboard.css';
 
 type JoinPrompt = { id: string; name: string };
+
+function buildFacebookCookiesFromStaff(staff?: StaffAccount | null): StaffFacebookCookie[] {
+  if (!staff) return [];
+  const rows = staff.facebook_cookies || [];
+  if (rows.length) {
+    const activeId = staff.active_cookie_id || rows[0]?.id || '';
+    return rows.map((item, index) => ({
+      ...item,
+      id: item.id || `fb_${index}`,
+      active: item.id === activeId || (!activeId && index === 0),
+    }));
+  }
+  if (staff.facebook_user_id || staff.cookie_masked || staff.active_facebook_name) {
+    return [{
+      id: staff.active_cookie_id || 'primary',
+      label: 'Cookie chính',
+      facebook_user_id: staff.facebook_user_id,
+      facebook_name: staff.active_facebook_name,
+      cookie_masked: staff.cookie_masked,
+      active: true,
+    }];
+  }
+  return [];
+}
+
+function renderFacebookAccountBar(props: {
+  cookies: StaffFacebookCookie[];
+  activeId?: string;
+  activeName: string;
+  activeUserId: string;
+  busy?: boolean;
+  loading?: boolean;
+  error?: string;
+  onSwitch?: (cookieId: string) => void;
+  onRefresh?: () => void;
+  compact?: boolean;
+}) {
+  const {
+    cookies,
+    activeId,
+    activeName,
+    activeUserId,
+    busy,
+    loading,
+    error,
+    onSwitch,
+    onRefresh,
+    compact,
+  } = props;
+  const resolvedActiveId = activeId || cookies.find((item) => item.active)?.id || cookies[0]?.id || '';
+  const activeCookie = cookies.find((item) => item.id === resolvedActiveId) || cookies[0];
+  const displayName =
+    activeCookie?.facebook_name ||
+    activeName ||
+    activeCookie?.label ||
+    (activeUserId || activeCookie?.facebook_user_id ? `Facebook ID ${activeUserId || activeCookie?.facebook_user_id}` : 'Chưa có cookie Facebook');
+  const displayUserId = activeCookie?.facebook_user_id || activeUserId || '';
+  const showError = error && !displayName;
+  return (
+    <div className={`md-fb-account-bar${compact ? ' compact' : ''}`}>
+      <div className="md-fb-cookie-current">
+        <i className="fa-brands fa-facebook" />
+        <div className="md-fb-cookie-current-body">
+          <p className="md-fb-cookie-label">Tài khoản Facebook đang dùng</p>
+          <p className="md-fb-cookie-name">{loading && !displayName ? 'Đang đọc tên tài khoản...' : displayName}</p>
+          {displayUserId && displayName ? <small className="md-fb-cookie-id">ID: {displayUserId}</small> : null}
+          {showError ? <small className="md-fb-cookie-error">{error}</small> : null}
+          {cookies.length ? (
+            <div className="md-fb-cookie-list" role="tablist" aria-label="Chọn cookie Facebook">
+              {cookies.map((item, index) => {
+                const cookieId = item.id || `fb_${index}`;
+                const isActive = cookieId === resolvedActiveId;
+                const title = item.facebook_name || item.label || `Cookie ${index + 1}`;
+                const subtitle = item.facebook_user_id || item.cookie_masked || '';
+                return (
+                  <button
+                    key={cookieId}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    className={`md-fb-cookie-chip${isActive ? ' active' : ''}`}
+                    disabled={busy || loading || isActive}
+                    title={subtitle || title}
+                    onClick={() => onSwitch?.(cookieId)}
+                  >
+                    <span className="md-fb-cookie-chip-name">{title}</span>
+                    {item.facebook_user_id ? <small>{item.facebook_user_id}</small> : null}
+                    {isActive ? <span className="md-fb-cookie-chip-badge">Đang dùng</span> : null}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      <div className="md-fb-account-actions">
+        <button type="button" className="md-ghost-btn" disabled={busy || loading} onClick={() => onRefresh?.()}>
+          {loading ? 'Đang tải...' : 'Làm mới tên'}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 type PostFetchItem = {
   ok?: boolean;
@@ -32,6 +137,12 @@ type PostFetchItem = {
 export type ManageDashboardProps = {
   staffName?: string;
   staffRole?: string;
+  currentStaff?: StaffAccount | null;
+  facebookCookieContext?: FacebookCookieContext | null;
+  facebookCookieBusy?: boolean;
+  facebookCookieLoading?: boolean;
+  onSwitchFacebookCookie?: (cookieId: string) => void;
+  onRefreshFacebookCookie?: () => void;
   headerSub?: string;
   onLogout: () => void;
   onOpenView: (view: ViewKey) => void;
@@ -39,11 +150,8 @@ export type ManageDashboardProps = {
   groups: string[];
   groupNames: Record<string, string>;
   facebookPageChannels: ManagedChannel[];
+  facebookGroupChannels: ManagedChannel[];
   tiktokManagedChannels: ManagedChannel[];
-  groupInp: string;
-  setGroupInp: (v: string) => void;
-  groupBusy: boolean;
-  onAddGroup: () => void;
   onRemoveGroup: (id: string) => void;
   joinPrompt: JoinPrompt | null;
   joinBusy: boolean;
@@ -78,7 +186,6 @@ export type ManageDashboardProps = {
   onClassifyAll: () => void;
   leadsBusy: boolean;
   onExtractLeads: () => void;
-  onOpenTiktokModal: () => void;
   onOpenTiktokStats: () => void;
   catFilter: string;
   setCatFilter: (v: string) => void;
@@ -101,6 +208,7 @@ export type ManageDashboardProps = {
   onSummarizeComments: (post: FbPost) => Promise<string>;
   onExploreComments: (post: FbPost) => void;
   onCommentSent: (postId: string) => void | Promise<void>;
+  onMarkProcessed?: (post: FbPost) => void | Promise<void>;
   onOpenLightbox: (url: string) => void;
   saleSetupProps: React.ComponentProps<typeof SaleSetupPanel>;
 };
@@ -109,6 +217,12 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
   const {
     staffName,
     staffRole,
+    currentStaff,
+    facebookCookieContext,
+    facebookCookieBusy = false,
+    facebookCookieLoading = false,
+    onSwitchFacebookCookie,
+    onRefreshFacebookCookie,
     headerSub,
     onLogout,
     onOpenView,
@@ -116,11 +230,8 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
     groups,
     groupNames,
     facebookPageChannels,
+    facebookGroupChannels,
     tiktokManagedChannels,
-    groupInp,
-    setGroupInp,
-    groupBusy,
-    onAddGroup,
     onRemoveGroup,
     joinPrompt,
     joinBusy,
@@ -155,7 +266,6 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
     onClassifyAll,
     leadsBusy,
     onExtractLeads,
-    onOpenTiktokModal,
     onOpenTiktokStats,
     catFilter,
     setCatFilter,
@@ -178,6 +288,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
     onSummarizeComments,
     onExploreComments,
     onCommentSent,
+    onMarkProcessed,
     onOpenLightbox,
     saleSetupProps,
   } = props;
@@ -231,6 +342,25 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
   }
 
   const roleLabel = staffRole === 'admin' ? 'Administrator' : 'Nhân sự';
+  const fbCookies = facebookCookieContext?.cookies?.length
+    ? facebookCookieContext.cookies
+    : buildFacebookCookiesFromStaff(currentStaff);
+  const activeFbName =
+    facebookCookieContext?.active_facebook_name ||
+    fbCookies.find((item) => item.active)?.facebook_name ||
+    currentStaff?.active_facebook_name ||
+    '';
+  const activeFbId =
+    facebookCookieContext?.active_facebook_user_id ||
+    fbCookies.find((item) => item.active)?.facebook_user_id ||
+    currentStaff?.facebook_user_id ||
+    '';
+  const activeCookieId =
+    facebookCookieContext?.active_cookie_id ||
+    currentStaff?.active_cookie_id ||
+    fbCookies.find((item) => item.active)?.id ||
+    '';
+  const fbCookieError = facebookCookieContext?.ok === false ? facebookCookieContext.error : '';
   const feedErrorKind = classifyFacebookFeedError(feedError);
   const feedErrorTitle =
     feedErrorKind === 'network'
@@ -268,6 +398,18 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
           </div>
         </header>
 
+        {renderFacebookAccountBar({
+          cookies: fbCookies,
+          activeId: activeCookieId,
+          activeName: activeFbName,
+          activeUserId: activeFbId,
+          busy: facebookCookieBusy,
+          loading: facebookCookieLoading,
+          error: fbCookieError,
+          onSwitch: onSwitchFacebookCookie,
+          onRefresh: onRefreshFacebookCookie,
+        })}
+
         <div className="md-split">
           <div className="md-secondary no-scrollbar">
               <div className="md-secondary-head">
@@ -284,7 +426,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                       <i className="fa-solid fa-users" />
                       <span>Nhóm Facebook</span>
                     </div>
-                    <span className="md-source-block-count">{groups.length}</span>
+                    <span className="md-source-block-count">{facebookGroupChannels.length}</span>
                   </div>
 
                   {joinMsg && !joinPrompt ? (
@@ -292,11 +434,11 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                   ) : null}
 
                   <p className="md-join-hint">
-                    Nhóm kín thường không tự tham gia được qua hệ thống. Bấm <b>Mở FB</b> để gửi yêu cầu trên Facebook,
-                    sau đó tick nhóm và bấm <b>Kiểm tra lại</b>.
+                    Danh sách lấy từ <b>/kenh</b> (kênh loại Nhóm Facebook). Nhóm kín thường không tự tham gia được qua hệ thống —
+                    bấm <b>Mở FB</b> để gửi yêu cầu trên Facebook, sau đó tick nhóm và bấm <b>Kiểm tra lại</b>.
                   </p>
 
-                  {groups.length ? (
+                  {facebookGroupChannels.length ? (
                     <div className="md-membership-toolbar">
                       <label className="md-check-all">
                         <input
@@ -354,12 +496,14 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                   ) : null}
 
                   <div className="md-source-list">
-                    {groups.length ? groups.map((gid) => {
+                    {facebookGroupChannels.length ? facebookGroupChannels.map((item) => {
+                      const gid = facebookGroupIdFromChannel(item);
+                      if (!gid) return null;
                       const member = groupMembership[gid];
-                      const gname = groupNames[gid] || gid;
+                      const gname = item.channel_name || groupNames[gid] || gid;
                       const isChecking = checkingSet.has(gid);
                       return (
-                        <div key={gid} className={`md-source-item group${member !== true ? ' not-member' : ''}`}>
+                        <div key={item.id || gid} className={`md-source-item group${member !== true ? ' not-member' : ''}`}>
                           <label className="md-group-check">
                             <input
                               type="checkbox"
@@ -385,7 +529,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                                 </button>
                                 <a
                                   className="md-ghost-btn"
-                                  href={`https://www.facebook.com/groups/${gid}`}
+                                  href={item.link || `https://www.facebook.com/groups/${gid}`}
                                   target="_blank"
                                   rel="noreferrer"
                                 >
@@ -397,7 +541,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                               type="button"
                               className="md-delete-btn"
                               onClick={() => onRemoveGroup(gid)}
-                              title="Xoá khỏi danh sách quét"
+                              title="Xoá khỏi /kenh"
                             >
                               <i className="fa-solid fa-trash-can" />
                               Xoá
@@ -406,20 +550,12 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                         </div>
                       );
                     }) : (
-                      <span className="md-empty">Chưa có nhóm Facebook</span>
+                      <span className="md-empty">Chưa có nhóm Facebook — thêm tại /kenh</span>
                     )}
                   </div>
-                  <div className="md-input-row">
-                    <input
-                      type="text"
-                      placeholder="ID / URL nhóm Facebook..."
-                      value={groupInp}
-                      disabled={groupBusy}
-                      onChange={(e) => setGroupInp(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && onAddGroup()}
-                    />
-                    <button type="button" className="md-btn-icon dark" onClick={onAddGroup} disabled={groupBusy}>
-                      <i className="fa-solid fa-plus" />
+                  <div className="md-source-block-actions">
+                    <button type="button" className="md-btn-dark" onClick={onOpenChannels}>
+                      Thêm nhóm
                     </button>
                   </div>
                 </section>
@@ -616,9 +752,6 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                       <button type="button" className="md-tool-btn md-tool-btn-sm primary" onClick={onOpenPostModal}>
                         Đăng bài
                       </button>
-                      <button type="button" className="md-tool-btn md-tool-btn-sm blue" onClick={onOpenTiktokModal}>
-                        TikTok CMT
-                      </button>
                       <select className="md-select md-select-sm" value={catFilter} onChange={(e) => setCatFilter(e.target.value)}>
                         <option value="">Tất cả</option>
                         {catOptions.map((c) => (
@@ -728,6 +861,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                           onSummarizeComments={onSummarizeComments}
                           onExploreComments={onExploreComments}
                           onCommentSent={async (postId) => { await onCommentSent(postId); }}
+                          onMarkProcessed={onMarkProcessed ? async (post) => { await onMarkProcessed(post); } : undefined}
                           onOpenLightbox={onOpenLightbox}
                         />
                       ))

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { CommentAuthorHeading, CommentAuthorLink } from '@/components/CommentAuthorLink';
 import { api } from '@/lib/api';
+import { buildTikTokCommentUrl } from '@/lib/utils';
 import { extractPhones, phonesForComment } from '@/lib/phone-utils';
 import type { ManagedChannel, StoredPostComment } from '@/lib/types';
 import './omni-inbox.css';
@@ -50,6 +51,8 @@ type TikTokOpenCommentResult = {
   message?: string;
   method?: string;
   target_found?: boolean;
+  scrolled?: number;
+  typed?: boolean;
 };
 
 type TagMeta = {
@@ -1124,9 +1127,10 @@ export function CommentLeadInboxPanel() {
     markProcessed(row);
     const prefix = fallbackReason ? `TikTok chưa nhận gửi trực tiếp (${fallbackReason}). ` : '';
     if (openResult.ok && openResult.target_found) {
-      setReplyStatus(`✅ ${prefix}Đã copy câu trả lời, mở video, tô xanh comment đang hiển thị và ghim bảng xử lý. Dán Ctrl+V rồi gửi thủ công.`);
+      const scrollNote = openResult.scrolled ? ` (cuộn ${openResult.scrolled} lần)` : '';
+      setReplyStatus(`✅ ${prefix}Đã copy câu trả lời, tìm thấy comment${scrollNote}, tô xanh và ghim bảng xử lý. Dán Ctrl+V rồi gửi.`);
     } else if (openResult.ok) {
-      setReplyStatus(`✅ ${prefix}Đã copy câu trả lời và mở TikTok kèm bảng comment cần xử lý. Không tự cuộn để tránh TikTok nhảy video.`);
+      setReplyStatus(`✅ ${prefix}Đã mở video và cuộn tìm comment. Nếu chưa thấy, bấm "Tự cuộn tìm" trên bảng TikTok hoặc Ctrl+F.`);
     } else {
       setReplyStatus(`✅ ${prefix}Đã copy câu trả lời và mở video TikTok. Nếu chưa thấy comment, dùng Ctrl+F tìm: "${(row.message || '').slice(0, 80)}"${openResult.error ? ` · ${openResult.error}` : ''}`);
     }
@@ -1170,18 +1174,51 @@ export function CommentLeadInboxPanel() {
     setReplyStatus(`${openResult.error || 'Extension chưa định vị được comment'}, đã mở link TikTok thường.`);
   }
 
-  function openDirectMessage(row: StoredPostComment) {
+  async function openDirectMessage(row: StoredPostComment) {
     const src = sourceKey(row);
-    const author = (row.author_name || row.author_id || '').trim();
-    let url = row.comment_url || row.post_url || '';
     if (src === 'tiktok') {
-      url = author
-        ? `https://www.tiktok.com/search/user?q=${encodeURIComponent(author)}`
-        : (row.post_url || row.comment_url || 'https://www.tiktok.com/messages');
-      setReplyStatus('Đã mở TikTok để tìm tài khoản khách. Nếu TikTok chưa mở chat trực tiếp, vào profile khách và bấm Message.');
-    } else if (src === 'fb-page' || src === 'fb-group') {
-      url = row.comment_url || row.post_url || 'https://www.facebook.com/messages';
+      const url = buildTikTokCommentUrl(row);
+      if (!url) {
+        setReplyStatus('Comment TikTok này chưa có link video/comment để mở.');
+        return;
+      }
+      if (tiktokBridgeReady) {
+        setReplyStatus('Đang mở đúng video và định vị comment trên TikTok...');
+        const openResult = await requestTiktokOpenComment({
+          post_url: row.post_url || url,
+          comment_url: url,
+          post_id: row.post_id || '',
+          comment_id: row.comment_id || '',
+          comment_text: row.message || '',
+          author_name: row.author_name || '',
+          channel_name: row.channel_name || '',
+          video_title: row.video_title || '',
+          reply_text: selected?.comment_id === row.comment_id ? replyText.trim() : '',
+        });
+        if (openResult.ok) {
+          setReplyStatus(
+            openResult.target_found
+              ? openResult.typed
+                ? `✅ Đã tìm comment, tô xanh và gõ vào ô bình luận${openResult.scrolled ? ` (${openResult.scrolled} lần cuộn)` : ''}. Bấm gửi trên TikTok.`
+                : `✅ Đã mở TikTok và tô xanh comment${openResult.scrolled ? ` sau ${openResult.scrolled} lần cuộn` : ''}. Gõ nội dung vào ô bình luận hoặc dùng nút Gõ vào ô comment.`
+              : openResult.typed
+                ? '✅ Đã gõ câu trả lời vào ô Thêm bình luận trên TikTok. Kiểm tra rồi bấm gửi.'
+                : '✅ Đã mở video và cuộn tìm comment. Bấm "Tự cuộn tìm" hoặc "Gõ vào ô comment" trên bảng TikTok.',
+          );
+          return;
+        }
+      }
+      window.open(url, '_blank', 'noopener,noreferrer');
+      setReplyStatus('Đã mở link comment TikTok. Cài extension Chrome để tự định vị comment trên video.');
+      return;
+    }
+
+    const url = row.comment_url || row.post_url || '';
+    if (src === 'fb-page' || src === 'fb-group') {
+      const target = url || 'https://www.facebook.com/messages';
+      window.open(target, '_blank', 'noopener,noreferrer');
       setReplyStatus('Đã mở Facebook theo comment/bài viết để nhắn khách thủ công nếu cần.');
+      return;
     }
     if (url) window.open(url, '_blank', 'noopener,noreferrer');
   }
@@ -1495,8 +1532,8 @@ export function CommentLeadInboxPanel() {
                           role="button"
                           tabIndex={0}
                           className="omni-dm-link"
-                          onClick={(event) => { event.stopPropagation(); openDirectMessage(row); }}
-                          onKeyDown={(event) => { if (event.key === 'Enter') { event.stopPropagation(); openDirectMessage(row); } }}
+                          onClick={(event) => { event.stopPropagation(); void openDirectMessage(row); }}
+                          onKeyDown={(event) => { if (event.key === 'Enter') { event.stopPropagation(); void openDirectMessage(row); } }}
                         >
                           <MaterialIcon name="chat_bubble" style={{ fontSize: 14 }} />
                           Nhắn tin
@@ -1657,7 +1694,9 @@ export function CommentLeadInboxPanel() {
                       <div className="omni-composer-foot">
                         <p>
                           {selectedSrc === 'tiktok'
-                            ? (tiktokBridgeReady ? 'Gửi qua TikTok extension hoặc Playwright' : 'Cần Chrome extension để gửi TikTok tự động')
+                            ? (tiktokBridgeReady
+                              ? 'Trả lời trực tiếp: bấm Gửi TikTok Reply → extension bấm Trả lời + gõ vào "Thêm câu trả lời..."'
+                              : 'Cần Chrome extension để trả lời trực tiếp vào comment TikTok')
                             : 'Trả lời trực tiếp vào comment Facebook'}
                           {replyStatus ? ` · ${replyStatus}` : ''}
                         </p>

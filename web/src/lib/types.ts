@@ -47,6 +47,33 @@ export type FbPage = { id: string; name: string };
 
 export type GroupRow = { id: string; name: string };
 
+export type StaffFacebookCookie = {
+  id?: string;
+  label?: string;
+  cookie?: string;
+  cookie_masked?: string;
+  facebook_user_id?: string;
+  facebook_name?: string;
+  active?: boolean;
+};
+
+export type FacebookCookieContext = {
+  ok?: boolean;
+  active_cookie_id?: string;
+  active_facebook_name?: string;
+  active_facebook_user_id?: string;
+  cookies?: StaffFacebookCookie[];
+  message?: string;
+  error?: string;
+};
+
+export type StaffManagedGroup = {
+  id?: string;
+  name?: string;
+  platform?: string;
+  channel_type?: string;
+};
+
 export type StaffAccount = {
   id?: string;
   name?: string;
@@ -54,6 +81,10 @@ export type StaffAccount = {
   role?: 'admin' | 'staff' | string;
   cookie_masked?: string;
   facebook_user_id?: string;
+  facebook_cookies?: StaffFacebookCookie[];
+  active_cookie_id?: string;
+  active_facebook_name?: string;
+  managed_groups?: StaffManagedGroup[];
   enabled?: boolean;
   created_at?: string;
   updated_at?: string;
@@ -225,7 +256,7 @@ export type CommentLog = {
   comment_text?: string;
   comment_image_url?: string;
   comment_id?: string;
-  status?: 'success' | 'failed' | string;
+  status?: 'success' | 'failed' | 'processed' | string;
   error_message?: string;
   created_at?: string;
 };

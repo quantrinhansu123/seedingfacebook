@@ -28,7 +28,7 @@ Khi source có thay đổi extension:
 - Không cần dán cookie TikTok vào web để gửi comment.
 - Lấy comment theo kênh TikTok cần extension đang bật, vì TikTok chỉ hiện đủ danh sách video sau khi Chrome render/scroll trang kênh.
 - Khi bấm gửi TikTok từ UI, web sẽ thử gửi trực tiếp qua extension bằng tab TikTok đang đăng nhập. Nếu TikTok chặn/captcha/không nhận, web sẽ fallback sang copy nội dung và mở video để sale gửi thủ công.
-- Khi trả lời TikTok từ Inbox, extension sẽ mở đúng video, copy câu trả lời và ghim một bảng nổi chứa đúng comment cần xử lý. Extension không tự cuộn comment vì TikTok web dễ hiểu thành thao tác chuyển video.
+- Khi trả lời TikTok từ Inbox, extension sẽ mở đúng video, tự cuộn panel bình luận để tìm comment, tô xanh nếu thấy và ghim bảng xử lý. Chỉ cuộn trong panel comment, không cuộn feed video.
 - Facebook cookie chỉ được lấy khi admin bấm nút, không tự động thu thập nền.
 - Nếu TikTok hỏi đăng nhập lại, hãy đăng nhập trực tiếp trên tab TikTok rồi bấm gửi lại.
 - Extension chỉ gửi khi người dùng bấm nút, không có chế độ tự spam hoặc chạy nền hàng loạt.

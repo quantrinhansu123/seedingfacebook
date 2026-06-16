@@ -1,7 +1,7 @@
-import { MonitorPage } from '@/components/MonitorPage';
+import { MonitorPageLoader } from '@/components/MonitorPageLoader';
 
 export const dynamic = 'force-dynamic';
 
 export default function ConsoleSectionPage() {
-  return <MonitorPage />;
+  return <MonitorPageLoader />;
 }

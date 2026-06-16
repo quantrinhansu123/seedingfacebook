@@ -101,6 +101,147 @@
   margin-top: 2px;
 }
 
+.md-fb-cookie-switcher {
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+.md-fb-account-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid #e2e8f0;
+  background: linear-gradient(180deg, #f8fbff 0%, #f8fafc 100%);
+}
+.md-fb-account-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.md-fb-cookie-error {
+  display: block;
+  color: #dc2626;
+  font-size: 11px;
+  margin-top: 2px;
+}
+.md-fb-cookie-current {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.md-fb-cookie-current-body {
+  min-width: 0;
+  flex: 1;
+}
+.md-fb-cookie-list {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.md-fb-cookie-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 120px;
+  max-width: 220px;
+  padding: 8px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.md-fb-cookie-chip:hover:not(:disabled) {
+  border-color: #1877f2;
+  background: #f8fbff;
+}
+.md-fb-cookie-chip.active {
+  border-color: #1877f2;
+  background: #eff6ff;
+  box-shadow: inset 0 0 0 1px #1877f2;
+  cursor: default;
+}
+.md-fb-cookie-chip:disabled {
+  opacity: 1;
+}
+.md-fb-cookie-chip-name {
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.md-fb-cookie-chip small {
+  font-size: 10px;
+  color: #64748b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.md-fb-cookie-chip-badge {
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #15803d;
+}
+.md-fb-cookie-current i {
+  color: #1877f2;
+  font-size: 18px;
+}
+.md-fb-cookie-label {
+  margin: 0;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+}
+.md-fb-cookie-name {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e293b;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.md-fb-cookie-id {
+  display: block;
+  font-size: 10px;
+  color: #94a3b8;
+}
+.md-fb-cookie-select {
+  min-width: 160px;
+  max-width: 220px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  background: #fff;
+  color: #334155;
+}
+.md-fb-cookie-mobile {
+  display: none;
+}
+
 .md-avatar {
   width: 36px;
   height: 36px;

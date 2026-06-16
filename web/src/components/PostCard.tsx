@@ -83,6 +83,7 @@ export function PostCard({
   onSummarizeComments,
   onExploreComments,
   onCommentSent,
+  onMarkProcessed,
 }: {
   post: FbPost;
   groupNames: Record<string, string>;
@@ -95,6 +96,7 @@ export function PostCard({
   onSummarizeComments?: (post: FbPost) => Promise<string>;
   onExploreComments?: (post: FbPost) => void;
   onCommentSent?: (postId: string) => Promise<void>;
+  onMarkProcessed?: (post: FbPost) => Promise<void>;
 }) {
   const authorName = post.from?.name || 'Ẩn danh';
   const reactions = post.reactions?.summary?.total_count ?? 0;
@@ -126,6 +128,8 @@ export function PostCard({
   const [pageId, setPageId] = useState('');
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [summaryMsg, setSummaryMsg] = useState('');
+  const [markBusy, setMarkBusy] = useState(false);
+  const [markMsg, setMarkMsg] = useState('');
   const [imageUrl, setImageUrl] = useState('');
   const [uploadingImage, setUploadingImage] = useState(false);
   const [engagementOpen, setEngagementOpen] = useState(false);
@@ -544,11 +548,34 @@ export function PostCard({
               {pageIdFromPost ? '📥 Lấy CMT Page' : '🔎 Lọc CMT'}
             </button>
           ) : null}
+          {onMarkProcessed ? (
+            <button
+              type="button"
+              className="btn-mark-processed"
+              disabled={markBusy}
+              onClick={async () => {
+                setMarkBusy(true);
+                setMarkMsg('');
+                try {
+                  await onMarkProcessed(post);
+                  setMarkMsg('✅ Đã xử lý');
+                } catch {
+                  setMarkMsg('❌ Không lưu được');
+                } finally {
+                  setMarkBusy(false);
+                  window.setTimeout(() => setMarkMsg(''), 4000);
+                }
+              }}
+            >
+              {markBusy ? '⏳...' : '✅ Đã xử lý'}
+            </button>
+          ) : null}
           <button type="button" className="btn-write-comment" onClick={() => setCmtOpen((o) => !o)}>
             {cmtOpen ? '✖ Đóng' : '✏️ Bình luận'}
           </button>
         </div>
         {summaryMsg ? <div className="comment-msg-result">{summaryMsg}</div> : null}
+        {markMsg ? <div className="comment-msg-result">{markMsg}</div> : null}
       </div>
       <div className={`comment-box${cmtOpen ? ' open' : ''}`}>
         <textarea className="comment-textarea" rows={2} placeholder="Nhập bình luận..." data-cmt={post.id} />
