@@ -3,6 +3,7 @@ export type ViewKey =
   | 'staff'
   | 'channels'
   | 'comments'
+  | 'report'
   | 'manage'
   | 'history'
   | 'leads'
@@ -14,6 +15,7 @@ export const VIEW_ROUTES: Record<ViewKey, string> = {
   staff: '/nhan-su',
   channels: '/kenh',
   comments: '/binh-luan',
+  report: '/bao-cao',
   manage: '/quan-ly',
   history: '/lich-su',
   leads: '/lead',
@@ -26,6 +28,7 @@ export const VIEW_LABELS: Record<ViewKey, string> = {
   staff: 'Nhân sự',
   channels: 'Quản lý nhóm',
   comments: 'Bình luận',
+  report: 'Báo cáo',
   manage: 'Quản lý',
   history: 'Lịch thử thao tác',
   leads: 'Lead',

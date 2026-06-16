@@ -135,6 +135,7 @@ body { font-family: var(--font-roboto), Roboto, Arial, sans-serif; background: #
 .rail-tone-violet { --rail: #7c3aed; --rail-bg: #f5f3ff; --rail-border: #ede9fe; --rail-icon-bg: #ede9fe; }
 .rail-tone-indigo { --rail: #4f46e5; --rail-bg: #eef2ff; --rail-border: #e0e7ff; --rail-icon-bg: #e0e7ff; }
 .rail-tone-cyan { --rail: #0891b2; --rail-bg: #ecfeff; --rail-border: #cffafe; --rail-icon-bg: #cffafe; }
+.rail-tone-teal { --rail: #0f766e; --rail-bg: #f0fdfa; --rail-border: #ccfbf1; --rail-icon-bg: #ccfbf1; }
 .rail-tone-sky { --rail: #0284c7; --rail-bg: #f0f9ff; --rail-border: #e0f2fe; --rail-icon-bg: #e0f2fe; }
 .rail-tone-amber { --rail: #d97706; --rail-bg: #fffbeb; --rail-border: #fde68a; --rail-icon-bg: #fde68a; }
 .rail-tone-slate { --rail: #64748b; --rail-bg: #f8fafc; --rail-border: #e2e8f0; --rail-icon-bg: #e2e8f0; }

@@ -2260,6 +2260,21 @@ export function MonitorPage() {
             />
           ) : null}
           {activeView === 'comments' ? <CommentLeadInboxPanel /> : null}
+          {activeView === 'report' ? (
+            <section style={{ padding: 16, height: 'calc(100vh - 120px)' }}>
+              <iframe
+                src="https://baocaoxuonggita.vercel.app/"
+                title="Báo cáo"
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 12,
+                  background: '#fff',
+                }}
+              />
+            </section>
+          ) : null}
           {activeView === 'history' ? <HistoryPanel rows={commentLogs} status={historyStatus} onReload={loadCommentLogs} /> : null}
           {activeView === 'leads' ? <LeadManagerPanel leads={leads} onExtract={extractLeadsAll} onSyncPhones={syncPhoneLeadsFromComments} /> : null}
           {activeView === 'scripts' ? <ScriptWriterPanel /> : null}

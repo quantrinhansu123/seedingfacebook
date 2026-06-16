@@ -1,4 +1,5 @@
 import {
+  ChartColumn,
   Columns3,
   History,
   Home,
@@ -17,6 +18,7 @@ export const CONSOLE_MODULE_ICONS: Record<ViewKey, LucideIcon> = {
   staff: Users,
   channels: Waypoints,
   comments: MessageSquareText,
+  report: ChartColumn,
   manage: Columns3,
   history: History,
   leads: Target,
