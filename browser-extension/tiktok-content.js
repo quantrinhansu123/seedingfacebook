@@ -16,7 +16,7 @@
     const nodes = Array.from(document.querySelectorAll(selector));
     const target = nodes.find(isVisible);
     if (target) {
-      hardClick(target);
+      target.click();
       return true;
     }
     return false;
@@ -59,61 +59,6 @@
     }
   }
 
-  function hardClickAt(el, xRatio = 0.5, yRatio = 0.5) {
-    if (!el) return false;
-    const rect = el.getBoundingClientRect();
-    const init = {
-      bubbles: true,
-      cancelable: true,
-      clientX: rect.left + rect.width * xRatio,
-      clientY: rect.top + rect.height * yRatio,
-    };
-    try {
-      el.dispatchEvent(new PointerEvent('pointerdown', init));
-      el.dispatchEvent(new MouseEvent('mousedown', init));
-      el.dispatchEvent(new PointerEvent('pointerup', init));
-      el.dispatchEvent(new MouseEvent('mouseup', init));
-      el.dispatchEvent(new MouseEvent('click', init));
-      return true;
-    } catch (error) {
-      return hardClick(el);
-    }
-  }
-
-  function hasCommentTabText(text) {
-    const normalized = normalizeText(text);
-    if (!normalized) return false;
-    return (
-      normalized === 'bình luận' ||
-      normalized === 'comment' ||
-      normalized === 'comments' ||
-      /^bình luận\s*\d*$/.test(normalized) ||
-      /^comments?\s*\d*$/.test(normalized)
-    );
-  }
-
-  function hasRecommendTabText(text) {
-    const normalized = normalizeText(text);
-    return normalized.includes('bạn có thể thích') || normalized.includes('you may like');
-  }
-
-  function commentTabMatch(node) {
-    const raw = String(node.innerText || node.textContent || '');
-    const lines = raw
-      .split(/\n+/)
-      .map((line) => normalizeText(line))
-      .filter(Boolean);
-    const text = normalizeText(raw);
-    const hasComment = lines.some(hasCommentTabText) || hasCommentTabText(text);
-    const hasRecommend = lines.some(hasRecommendTabText) || hasRecommendTabText(text);
-    if (!hasComment) return null;
-    const rect = node.getBoundingClientRect();
-    const area = rect.width * rect.height;
-    if (hasRecommend && (rect.width > 760 || rect.height > 180 || area > 90000)) return null;
-    if (!hasRecommend && (rect.width > 360 || rect.height > 110 || area > 32000)) return null;
-    return { hasRecommend, lines, text };
-  }
-
   function bestClickableTabNode(node) {
     let current = node;
     for (let i = 0; i < 4 && current && current !== document.body; i += 1) {
@@ -134,42 +79,39 @@
   }
 
   function clickCommentsTab() {
-    const candidates = Array.from(document.querySelectorAll('button, [role="tab"], [role="button"], a, div, span')).map((node) => {
+    const candidates = Array.from(document.querySelectorAll('button, [role="tab"], [role="button"], div, span')).filter((node) => {
       if (!rightSideVisible(node)) return false;
       if (node.closest('[data-streal-comment-context-card="true"], [data-streal-comment-badge="true"]')) return false;
-      const match = commentTabMatch(node);
-      return match ? { node, match } : null;
-    }).filter(Boolean);
+      const rawLines = String(node.innerText || node.textContent || '')
+        .toLowerCase()
+        .split(/\n+/)
+        .map((line) => normalizeText(line))
+        .filter(Boolean);
+      const text = elementText(node);
+      if (!text) return false;
+      if (text.includes('bạn có thể thích') || text.includes('you may like')) return false;
+      return text === 'bình luận' || text === 'comments' || text === 'comment' || rawLines.includes('bình luận') || rawLines.includes('comments');
+    });
     const target = candidates.sort((a, b) => {
-      const ar = a.node.getBoundingClientRect();
-      const br = b.node.getBoundingClientRect();
-      const exactScoreA = hasCommentTabText(elementText(a.node)) ? -1000 : 0;
-      const exactScoreB = hasCommentTabText(elementText(b.node)) ? -1000 : 0;
-      const comboScoreA = a.match.hasRecommend ? 240 : 0;
-      const comboScoreB = b.match.hasRecommend ? 240 : 0;
-      return exactScoreA - exactScoreB || comboScoreA - comboScoreB || ar.top - br.top || ar.width - br.width;
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      const at = elementText(a);
+      const bt = elementText(b);
+      const exactScoreA = at === 'bình luận' || at === 'comments' || at === 'comment' ? -1000 : 0;
+      const exactScoreB = bt === 'bình luận' || bt === 'comments' || bt === 'comment' ? -1000 : 0;
+      return exactScoreA - exactScoreB || ar.top - br.top || ar.width - br.width;
     })[0];
     if (!target) return false;
-    const clickNode = bestClickableTabNode(target.node);
-    if (target.match.hasRecommend) {
-      return hardClickAt(clickNode, 0.25, 0.5) || hardClickAt(target.node, 0.25, 0.5);
-    }
-    return hardClick(clickNode) || hardClick(target.node);
+    return hardClick(bestClickableTabNode(target));
   }
 
   async function ensureCommentsTab(status) {
-    for (let i = 0; i < 6; i += 1) {
-      if (status) status(`Đang chuyển về tab Bình luận... lần ${i + 1}/6`);
-      if (i === 0 || i === 3) {
-        clickIfVisible('[data-e2e="comment-icon"]');
-        await sleep(220);
-      }
+    for (let i = 0; i < 4; i += 1) {
       clickCommentsTab();
-      await sleep(i === 0 ? 650 : 900);
-      clickCommentsTab();
-      await sleep(260);
+      await sleep(i === 0 ? 500 : 800);
       const scroller = findCommentScroller();
       if (scroller) return scroller;
+      if (status) status(`Đang chuyển về tab Bình luận... lần ${i + 1}/4`);
     }
     return null;
   }
@@ -431,8 +373,6 @@
       });
       if (result.target) {
         setStatus(`Đã tìm thấy và tô xanh comment sau ${result.scrolled} lượt cuộn.`);
-      } else if (result.error === 'comment-scroller-not-found') {
-        setStatus('Chưa ép được TikTok sang tab Bình luận. Hãy chờ trang tải xong rồi bấm lại; extension sẽ không cuộn sang Bạn có thể thích.');
       } else {
         setStatus(`Chưa thấy comment sau ${result.scanned} lượt quét. Có thể TikTok chưa tải comment này, comment đã bị xoá/ẩn hoặc đang nằm trong reply chưa mở.`);
       }
