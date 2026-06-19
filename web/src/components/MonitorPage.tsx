@@ -654,6 +654,9 @@ export function MonitorPage() {
   }, []);
 
   const loadGroupName = useCallback(async (gid: string) => {
+    if (/^\d{6,}$/.test(gid)) {
+      setGroupNames((prev) => (prev[gid] && prev[gid] !== gid ? prev : { ...prev, [gid]: prev[gid] || gid }));
+    }
     try {
       const r = await api('/api/groups/resolve?slug=' + encodeURIComponent(gid));
       if (r.status === 401) return;
