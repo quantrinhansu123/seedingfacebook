@@ -493,7 +493,7 @@ export function StaffCookiePanel({
       window.clearTimeout(timer);
       window.removeEventListener('message', onMessage);
       if (data.ok && data.cookie) {
-        updateCookie(cookieId, { cookie: data.cookie });
+        updateCookie(cookieId, { cookie: data.cookie, facebook_user_id: data.c_user || '', facebook_name: '' });
         setCookieBridgeStatus(`Đã lấy cookie Facebook từ Chrome${data.c_user ? ` · c_user=${data.c_user}` : ''}.`);
       } else {
         setCookieBridgeStatus(data.error || 'Không lấy được cookie Facebook từ Chrome.');
@@ -926,7 +926,7 @@ export function StaffCookiePanel({
                         <textarea
                           className={formCookieRevealed ? '' : 'staff-cookie-hidden'}
                           value={entry.cookie || ''}
-                          onChange={(e) => updateCookie(entry.id || '', { cookie: e.target.value })}
+                          onChange={(e) => updateCookie(entry.id || '', { cookie: e.target.value, facebook_user_id: '', facebook_name: '' })}
                           placeholder={editingId && !entry.cookie ? 'Để trống nếu giữ cookie cũ' : 'Dán cookie Facebook có c_user=...'}
                         />
                         <button

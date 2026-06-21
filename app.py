@@ -1880,13 +1880,22 @@ def _merge_staff_facebook_cookies(incoming_raw, existing_row: dict) -> list[dict
     for item in incoming:
         cookie = str(item.get('cookie') or '').strip()
         cookie_id = str(item.get('id') or '').strip()
+        existing_item = existing_by_id.get(cookie_id, {}) if cookie_id else {}
         if not cookie and cookie_id and cookie_id in existing_by_id:
-            cookie = str(existing_by_id[cookie_id].get('cookie') or '').strip()
+            cookie = str(existing_item.get('cookie') or '').strip()
         if cookie:
+            cookie_changed = bool(existing_item) and cookie != str(existing_item.get('cookie') or '').strip()
+            actual_user_id = _extract_cookie_user(cookie)
+            previous_user_id = str(existing_item.get('facebook_user_id') or _extract_cookie_user(existing_item.get('cookie', '')) or '').strip()
+            incoming_user_id = str(item.get('facebook_user_id') or '').strip()
+            facebook_name = str(item.get('facebook_name') or '').strip()
+            if cookie_changed or (actual_user_id and incoming_user_id and actual_user_id != incoming_user_id) or (actual_user_id and previous_user_id and actual_user_id != previous_user_id):
+                facebook_name = ''
             merged.append({
                 **item,
                 'cookie': cookie,
-                'facebook_user_id': _extract_cookie_user(cookie),
+                'facebook_user_id': actual_user_id,
+                'facebook_name': facebook_name,
             })
     return merged if merged else existing
 
@@ -7558,7 +7567,7 @@ def staff_cookies_update(staff_id):
         incoming_cookies = [{'id': 'primary', 'label': 'Cookie chính', 'cookie': body.get('cookie', '')}]
     facebook_cookies = _merge_staff_facebook_cookies(incoming_cookies, target)
     facebook_cookies, cookie_warning = _sanitize_staff_cookie_rows(facebook_cookies)
-    facebook_cookies = _prepare_staff_facebook_cookies_for_save(facebook_cookies, fetch_names=False)
+    facebook_cookies = _prepare_staff_facebook_cookies_for_save(facebook_cookies, fetch_names=True)
     cookie = _primary_staff_cookie({'facebook_cookies': facebook_cookies, 'cookie': target.get('cookie', '')})
 
     if not self_service:
