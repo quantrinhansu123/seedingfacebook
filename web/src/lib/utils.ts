@@ -167,9 +167,10 @@ export function filterChannelsForStaff(channels: ManagedChannel[], staff?: Staff
   );
 }
 
-/** /quan-ly — mọi tài khoản (kể cả admin) chỉ thấy kênh trong managed_groups. */
+/** /quan-ly: admin sees every channel; staff only sees assigned channels. */
 export function filterChannelsForManageScope(channels: ManagedChannel[], staff?: StaffAccount | null): ManagedChannel[] {
   if (!staff) return [];
+  if (isStaffAdmin(staff)) return channels;
   const allowed = staff.managed_groups || [];
   if (!allowed.length) return [];
   return channels.filter((channel) =>
