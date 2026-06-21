@@ -140,6 +140,10 @@ export function PostCard({
   const [engagementComments, setEngagementComments] = useState<FbComment[]>([]);
   const [engagementReactions, setEngagementReactions] = useState<FbReaction[]>([]);
   const [engagementShareCount, setEngagementShareCount] = useState<number | null>(null);
+  const [replyOpenById, setReplyOpenById] = useState<Record<string, boolean>>({});
+  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+  const [replySendingById, setReplySendingById] = useState<Record<string, boolean>>({});
+  const [replyStatusById, setReplyStatusById] = useState<Record<string, string>>({});
   const postLeads = leads || [];
   const visibleCommentSummary =
     commentSummary &&
@@ -298,6 +302,141 @@ export function PostCard({
     }
   }
 
+  function appendReply(comments: FbComment[], parentId: string, reply: FbComment): FbComment[] {
+    return comments.map((item) => {
+      if (item.id === parentId) {
+        const existingReplies = item.comments?.data || [];
+        return {
+          ...item,
+          comments: {
+            ...(item.comments || {}),
+            data: [...existingReplies, reply],
+            summary: {
+              ...(item.comments?.summary || {}),
+              total_count: (item.comments?.summary?.total_count || existingReplies.length) + 1,
+            },
+          },
+        };
+      }
+      const children = item.comments?.data || [];
+      if (!children.length) return item;
+      return {
+        ...item,
+        comments: {
+          ...(item.comments || {}),
+          data: appendReply(children, parentId, reply),
+        },
+      };
+    });
+  }
+
+  async function sendCommentReply(comment: FbComment, key: string, depth = 0) {
+    const commentId = comment.id || '';
+    const message = (replyDrafts[key] || '').trim();
+    if (!commentId) {
+      setReplyStatusById((prev) => ({ ...prev, [key]: 'Không có ID comment để trả lời.' }));
+      return;
+    }
+    if (!message) {
+      setReplyStatusById((prev) => ({ ...prev, [key]: 'Nhập nội dung trả lời.' }));
+      return;
+    }
+    setReplySendingById((prev) => ({ ...prev, [key]: true }));
+    setReplyStatusById((prev) => ({ ...prev, [key]: 'Đang gửi trả lời...' }));
+    try {
+      const r = await api('/api/post-comments/reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          comment_id: commentId,
+          post_id: post.id,
+          group_id: gid || pageIdFromPost,
+          post_url: post.permalink_url || '',
+          message,
+          page_id: pageIdFromPost || pageId,
+          source: pageIdFromPost ? 'facebook_page' : 'facebook',
+          depth,
+        }),
+        timeoutMs: 60000,
+      });
+      const d = await r.json();
+      if (!r.ok || !d.ok) {
+        setReplyStatusById((prev) => ({ ...prev, [key]: d.error || 'Không gửi được trả lời.' }));
+        return;
+      }
+      const reply: FbComment = {
+        id: d.comment_id || `local-reply-${Date.now()}`,
+        from: { name: 'Bạn' },
+        message,
+        created_time: new Date().toISOString(),
+      };
+      setEngagementComments((prev) => appendReply(prev, commentId, reply));
+      setReplyDrafts((prev) => ({ ...prev, [key]: '' }));
+      setReplyOpenById((prev) => ({ ...prev, [key]: false }));
+      setReplyStatusById((prev) => ({ ...prev, [key]: d.warning ? `Đã gửi. ${d.warning}` : 'Đã gửi trả lời.' }));
+      await onCommentSent?.(post.id);
+    } catch {
+      setReplyStatusById((prev) => ({ ...prev, [key]: 'Lỗi kết nối khi gửi trả lời.' }));
+    } finally {
+      setReplySendingById((prev) => ({ ...prev, [key]: false }));
+      window.setTimeout(() => {
+        setReplyStatusById((prev) => ({ ...prev, [key]: '' }));
+      }, 5000);
+    }
+  }
+
+  function renderFacebookComment(comment: FbComment, index: number, depth = 0) {
+    const name = comment.from?.name || 'Ẩn danh';
+    const key = comment.id || `cmt-${depth}-${index}`;
+    const replies = comment.comments?.data || [];
+    const isReplyOpen = Boolean(replyOpenById[key]);
+    const isSendingReply = Boolean(replySendingById[key]);
+    return (
+      <div key={key} className={`comment${depth ? ' comment-reply' : ''}`}>
+        <div className="comment-av">{initials(name)}</div>
+        <div className="comment-content">
+          <div className="comment-bubble">
+            <div className="comment-name">{name}</div>
+            <div className="comment-msg">{comment.message || '[Không có nội dung chữ]'}</div>
+            {comment.created_time ? (
+              <small style={{ color: '#64748b', fontSize: 11 }}>{timeAgo(comment.created_time)}</small>
+            ) : null}
+          </div>
+          <div className="comment-actions">
+            <button
+              type="button"
+              className="comment-reply-toggle"
+              disabled={!comment.id}
+              onClick={() => setReplyOpenById((prev) => ({ ...prev, [key]: !prev[key] }))}
+            >
+              Trả lời
+            </button>
+            {replyStatusById[key] ? <span className="comment-reply-status">{replyStatusById[key]}</span> : null}
+          </div>
+          {isReplyOpen ? (
+            <div className="comment-inline-reply">
+              <textarea
+                value={replyDrafts[key] || ''}
+                onChange={(e) => setReplyDrafts((prev) => ({ ...prev, [key]: e.target.value }))}
+                placeholder={`Trả lời ${name}...`}
+                rows={2}
+              />
+              <div className="comment-inline-reply-actions">
+                <button type="button" onClick={() => void sendCommentReply(comment, key, depth)} disabled={isSendingReply}>
+                  {isSendingReply ? 'Đang gửi...' : 'Gửi trả lời'}
+                </button>
+                <button type="button" onClick={() => setReplyOpenById((prev) => ({ ...prev, [key]: false }))}>
+                  Hủy
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {replies.length ? <div className="comment-replies">{replies.map((reply, i) => renderFacebookComment(reply, i, depth + 1))}</div> : null}
+        </div>
+      </div>
+    );
+  }
+
   function renderEngagementPanel() {
     if (!engagementOpen) return null;
     const title =
@@ -321,21 +460,7 @@ export function PostCard({
         {!engagementLoading && engagementTab === 'comments' ? (
           engagementComments.length ? (
             <div className="comments-list">
-              {engagementComments.map((comment, index) => {
-                const name = comment.from?.name || 'Ẩn danh';
-                return (
-                  <div key={comment.id || `cmt-${index}`} className="comment">
-                    <div className="comment-av">{initials(name)}</div>
-                    <div className="comment-bubble">
-                      <div className="comment-name">{name}</div>
-                      <div className="comment-msg">{comment.message || '[Không có nội dung chữ]'}</div>
-                      {comment.created_time ? (
-                        <small style={{ color: '#64748b', fontSize: 11 }}>{timeAgo(comment.created_time)}</small>
-                      ) : null}
-                    </div>
-                  </div>
-                );
-              })}
+              {engagementComments.map((comment, index) => renderFacebookComment(comment, index))}
             </div>
           ) : (
             <div className="post-engagement-empty">Chưa có bình luận.</div>
