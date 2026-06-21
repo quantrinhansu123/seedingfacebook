@@ -113,6 +113,29 @@ SUPABASE_POST_MEDIA_BUCKET = os.environ.get('SUPABASE_POST_MEDIA_BUCKET', SUPABA
 APP_TIMEZONE = os.environ.get('APP_TIMEZONE', 'Asia/Ho_Chi_Minh')
 
 
+def _supabase_project_ref() -> str:
+    host = urlsplit((SUPABASE_URL or '').rstrip('/')).netloc
+    return host.split('.')[0] if host else ''
+
+
+def _supabase_key_source() -> str:
+    if os.environ.get('SUPABASE_SERVICE_ROLE_KEY'):
+        return 'service_role'
+    if os.environ.get('SUPABASE_ANON_KEY'):
+        return 'anon'
+    if os.environ.get('SUPABASE_PUBLISHABLE_KEY'):
+        return 'publishable'
+    if os.environ.get('VITE_SUPABASE_PUBLISHABLE_KEY'):
+        return 'vite_publishable'
+    return 'missing'
+
+
+def _supabase_debug_context(table: str = '') -> str:
+    project = _supabase_project_ref() or 'missing-url'
+    target = f', table={table}' if table else ''
+    return f'backend Supabase project={project}, key={_supabase_key_source()}{target}'
+
+
 def _app_timezone():
     try:
         return ZoneInfo(APP_TIMEZONE)
@@ -5196,7 +5219,7 @@ def _save_customer_ai_config(body: dict) -> tuple[str, str]:
             }, SUPABASE_CUSTOMER_AI_TABLE)
             return 'supabase', ''
         except Exception as e:
-            warning = str(e)[:300]
+            warning = f'{str(e)[:300]} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
         _ai_config['provider'] = provider
         _ai_config['model'] = model
         _ai_config.setdefault('keys', {}).update(keys)
@@ -8983,7 +9006,7 @@ def ai_key_delete(provider):
             }, SUPABASE_CUSTOMER_AI_TABLE)
             storage = 'supabase'
         except Exception as e:
-            warning = str(e)[:300]
+            warning = f'{str(e)[:300]} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
     _ai_config.setdefault('keys', {}).update(keys)
     _save_ai_config()
     payload = {'ok': True, 'storage': storage}
@@ -9581,7 +9604,13 @@ def content_pipeline_run_scheduled():
 # ── Supabase ───────────────────────────────────────────
 @app.route('/api/supabase/health')
 def supabase_health():
-    return jsonify({'enabled': USE_SUPABASE, **sb.ping()})
+    return jsonify({
+        'enabled': USE_SUPABASE,
+        'project_ref': _supabase_project_ref(),
+        'key_source': _supabase_key_source(),
+        'customer_ai_table': SUPABASE_CUSTOMER_AI_TABLE,
+        **sb.ping(),
+    })
 
 
 @app.route('/api/saved-posts')
