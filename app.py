@@ -8342,7 +8342,7 @@ def _list_groq_models_from_api() -> tuple[list[dict], str]:
     if not api_key:
         return _fallback_groq_models(), 'Chưa có Groq API key nên đang dùng danh sách model gợi ý.'
     try:
-        resp = requests.get(
+        resp = _req.get(
             'https://api.groq.com/openai/v1/models',
             headers={
                 'Authorization': f'Bearer {api_key}',
