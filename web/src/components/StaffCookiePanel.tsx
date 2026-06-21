@@ -2,6 +2,7 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import type { ManagedChannel, StaffAccount, StaffFacebookCookie, StaffManagedGroup } from '@/lib/types';
+import { channelTypeBucket } from '@/lib/utils';
 
 export type StaffPayload = {
   name: string;
@@ -21,7 +22,7 @@ type Props = {
   status: string;
   title?: string;
   kicker?: string;
-  onSave: (payload: StaffPayload, staffId?: string) => Promise<boolean>;
+  onSave: (payload: StaffPayload, staffId?: string) => Promise<{ ok: boolean; error?: string }>;
   onDelete: (staffId: string, options?: { skipConfirm?: boolean }) => Promise<void>;
   onModalOpen?: () => void;
 };
@@ -74,7 +75,9 @@ function channelToManagedGroup(item: ManagedChannel): StaffManagedGroup {
 }
 
 function managedGroupKey(item: StaffManagedGroup) {
-  return `${item.platform || ''}:${item.channel_type || ''}:${item.id || ''}:${item.name || ''}`;
+  const platform = (item.platform || '').trim().toLowerCase();
+  const ctype = channelTypeBucket(item.channel_type);
+  return `${platform}:${ctype}:${item.id || ''}:${item.name || ''}`;
 }
 
 function formatManagedGroupLabel(item: StaffManagedGroup) {
@@ -167,7 +170,10 @@ export function StaffCookiePanel({
   const [bridgeReady, setBridgeReady] = useState(false);
   const [cookieBridgeStatus, setCookieBridgeStatus] = useState('');
   const [viewStaff, setViewStaff] = useState<StaffAccount | null>(null);
+  const [cookieOnlyMode, setCookieOnlyMode] = useState(false);
   const [revealedFormCookieIds, setRevealedFormCookieIds] = useState<Set<string>>(new Set());
+  const [formError, setFormError] = useState('');
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -275,7 +281,8 @@ export function StaffCookiePanel({
   }
 
   function setField(key: 'name' | 'username' | 'password', value: string) {
-    setForm((prev) => ({ ...prev, [key]: value }));
+    const next = key === 'username' ? value.trim().toLowerCase() : value;
+    setForm((prev) => ({ ...prev, [key]: next }));
   }
 
   function resetPicker() {
@@ -286,9 +293,11 @@ export function StaffCookiePanel({
   function resetModal() {
     setEditingId('');
     setForm(EMPTY);
+    setCookieOnlyMode(false);
     resetPicker();
     setCookieBridgeStatus('');
     setRevealedFormCookieIds(new Set());
+    setFormError('');
     setModalOpen(false);
   }
 
@@ -299,10 +308,11 @@ export function StaffCookiePanel({
     resetPicker();
     setCookieBridgeStatus('');
     setRevealedFormCookieIds(new Set());
+    setFormError('');
     setModalOpen(true);
   }
 
-  function openEdit(item: StaffAccount) {
+  function openEdit(item: StaffAccount, cookieOnly = false) {
     onModalOpen?.();
     const cookies = (item.facebook_cookies || []).map((entry, index) => ({
       id: entry.id || `fb_${index}`,
@@ -312,6 +322,7 @@ export function StaffCookiePanel({
       facebook_name: entry.facebook_name || '',
     }));
     setEditingId(item.id || '');
+    setCookieOnlyMode(cookieOnly);
     setForm({
       name: item.name || '',
       username: item.username || '',
@@ -322,6 +333,7 @@ export function StaffCookiePanel({
     resetPicker();
     setCookieBridgeStatus('');
     setRevealedFormCookieIds(new Set());
+    setFormError('');
     setModalOpen(true);
   }
 
@@ -419,18 +431,50 @@ export function StaffCookiePanel({
 
   async function submit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (saving) return;
+    if (!cookieOnlyMode) {
+      if (!form.name.trim() || !form.username.trim()) {
+        setFormError('Nhập đủ tên và tài khoản đăng nhập');
+        return;
+      }
+      if (!editingId && !form.password) {
+        setFormError('Nhập mật khẩu khi thêm nhân sự (tối thiểu 6 ký tự)');
+        return;
+      }
+      if (!editingId && form.password.length < 6) {
+        setFormError('Mật khẩu tối thiểu 6 ký tự');
+        return;
+      }
+    }
+    const cookieRows = (editingId ? form.facebook_cookies : form.facebook_cookies.filter((item) => String(item.cookie || '').trim()))
+      .map((item) => ({
+        ...item,
+        cookie: String(item.cookie || '').trim(),
+        label: String(item.label || '').trim() || 'Cookie',
+      }));
     const payload: StaffPayload = {
-      ...form,
-      facebook_cookies: form.facebook_cookies
-        .filter((item) => String(item.cookie || '').trim())
-        .map((item) => ({
-          ...item,
-          cookie: String(item.cookie || '').trim(),
-          label: String(item.label || '').trim() || 'Cookie',
-        })),
+      name: form.name.trim(),
+      username: form.username.trim().toLowerCase(),
+      password: form.password,
+      facebook_cookies: cookieRows,
+      managed_groups: form.managed_groups,
     };
-    const ok = await onSave(payload, editingId || undefined);
-    if (ok) resetModal();
+    setFormError('');
+    setSaving(true);
+    try {
+      const result = await onSave(payload, editingId || undefined);
+      if (result.ok) {
+        if (!editingId) {
+          setQuery('');
+          setRoleFilter('');
+        }
+        resetModal();
+        return;
+      }
+      setFormError(result.error || 'Không lưu được nhân sự');
+    } finally {
+      setSaving(false);
+    }
   }
 
   function getFacebookCookieFromChrome(cookieId: string) {
@@ -478,6 +522,10 @@ export function StaffCookiePanel({
           <button type="button" className="btn-submit" onClick={openAdd}>
             + Thêm
           </button>
+        ) : currentStaff ? (
+          <button type="button" className="btn-submit" onClick={() => openEdit(currentStaff, true)}>
+            Cập nhật cookie
+          </button>
         ) : null}
       </div>
 
@@ -487,10 +535,18 @@ export function StaffCookiePanel({
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Tìm kiếm..." />
         </div>
         <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
-          <option value="">Vai trò</option>
+          <option value="">Vai trò: tất cả</option>
           <option value="admin">Admin</option>
           <option value="staff">Nhân sự</option>
         </select>
+        {(query.trim() || roleFilter) && staff.length ? (
+          <span className="staff-filter-hint">
+            Hiển thị {rows.length}/{staff.length}
+            <button type="button" className="btn-cancel" onClick={() => { setQuery(''); setRoleFilter(''); }}>
+              Bỏ lọc
+            </button>
+          </span>
+        ) : null}
         {canManage && selectedIds.length ? (
           <button type="button" className="btn-cancel danger" onClick={() => void deleteSelectedStaff()}>
             Xoá đã chọn ({selectedIds.length})
@@ -575,6 +631,10 @@ export function StaffCookiePanel({
                           <button type="button" title="Sửa" onClick={() => openEdit(item)}>
                             ✎
                           </button>
+                        ) : active ? (
+                          <button type="button" title="Sửa cookie" onClick={() => openEdit(item, true)}>
+                            ✎
+                          </button>
                         ) : null}
                         {canManage && !active && item.id ? (
                           <button type="button" title="Xoá" className="danger" onClick={() => void onDelete(item.id!)}>
@@ -600,7 +660,7 @@ export function StaffCookiePanel({
       {status ? <div className="module-status">{status}</div> : null}
       {!canManage ? (
         <div className="module-status">
-          Bạn đang đăng nhập tài khoản nhân sự. Chỉ admin được thêm, sửa, xoá nhân sự và gắn cookie.
+          Bạn có thể tự cập nhật cookie Facebook của mình. Thêm/sửa/xoá nhân sự khác chỉ dành cho admin.
         </div>
       ) : null}
 
@@ -686,6 +746,18 @@ export function StaffCookiePanel({
                 >
                   Sửa nhân sự
                 </button>
+              ) : viewStaff.id && viewStaff.id === currentStaff?.id ? (
+                <button
+                  type="button"
+                  className="btn-submit"
+                  onClick={() => {
+                    const target = viewStaff;
+                    setViewStaff(null);
+                    openEdit(target, true);
+                  }}
+                >
+                  Sửa cookie
+                </button>
               ) : null}
             </div>
           </div>
@@ -695,12 +767,19 @@ export function StaffCookiePanel({
       <div className={`modal-overlay${modalOpen ? ' open' : ''}`} onClick={(e) => e.target === e.currentTarget && resetModal()} role="presentation">
         <form className="modal staff-modal" onSubmit={submit}>
           <div className="modal-hd">
-            {editingId ? 'Sửa nhân sự' : 'Thêm nhân sự'}
+            {cookieOnlyMode ? 'Cập nhật cookie Facebook' : editingId ? 'Sửa nhân sự' : 'Thêm nhân sự'}
             <span className="modal-close" onClick={resetModal} role="presentation">
               ✕
             </span>
           </div>
           <div className="staff-modal-grid">
+            {cookieOnlyMode ? (
+              <div className="field">
+                <label>Tài khoản</label>
+                <input className="modal-input" value={form.username} readOnly />
+              </div>
+            ) : (
+              <>
             <div className="field">
               <label>Tên nhân sự</label>
               <input className="modal-input" value={form.name} onChange={(e) => setField('name', e.target.value)} placeholder="Nguyễn Văn A" />
@@ -808,6 +887,8 @@ export function StaffCookiePanel({
                 )}
               </div>
             </div>
+              </>
+            )}
             <div className="field staff-cookie-field">
               <label>Cookie Facebook (tùy chọn — thêm sau cũng được)</label>
               <div className="staff-cookie-tools">
@@ -871,13 +952,25 @@ export function StaffCookiePanel({
             </div>
           </div>
           <div className="modal-actions modal-actions-between">
-            <div className="modal-result">{editingId ? 'Mật khẩu và cookie có thể để trống nếu không đổi.' : 'Cookie có thể thêm sau khi tạo tài khoản.'}</div>
+            <div className="modal-result">
+              {formError ? (
+                <span className="staff-modal-error">{formError}</span>
+              ) : modalOpen && status && !status.startsWith('✅') ? (
+                status
+              ) : cookieOnlyMode ? (
+                'Dán cookie mới hoặc bấm Lấy từ Chrome. Để trống ô cookie nếu giữ cookie cũ.'
+              ) : editingId ? (
+                'Mật khẩu và cookie có thể để trống nếu không đổi.'
+              ) : (
+                'Cookie có thể thêm sau khi tạo tài khoản.'
+              )}
+            </div>
             <div className="staff-modal-actions">
               <button type="button" className="btn-cancel" onClick={resetModal}>
                 Huỷ
               </button>
-              <button type="submit" className="btn-submit">
-                {editingId ? 'Cập nhật' : 'Thêm'}
+              <button type="submit" className="btn-submit" disabled={saving}>
+                {saving ? 'Đang lưu...' : cookieOnlyMode ? 'Lưu cookie' : editingId ? 'Cập nhật' : 'Thêm'}
               </button>
             </div>
           </div>

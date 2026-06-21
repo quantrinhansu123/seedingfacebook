@@ -5,6 +5,7 @@
   "scripts": {
     "build": "npm --prefix web run build",
     "dev": "node scripts/dev.mjs",
+    "dev:clean": "node scripts/dev.mjs --clean",
     "dev:win": "start \"Flask :5000\" cmd /k \"npm run dev:backend\" && npm --prefix web run dev",
     "dev:web": "npm --prefix web run dev",
     "dev:backend": "python app.py",

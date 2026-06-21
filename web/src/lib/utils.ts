@@ -1,3 +1,5 @@
+import type { ManagedChannel, StaffAccount, StaffManagedGroup } from '@/lib/types';
+
 export function timeAgo(iso: string | undefined): string {
   if (!iso) return '';
   const d = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -87,6 +89,104 @@ export function classifyFacebookFeedError(message: string): 'network' | 'auth' |
     return 'auth';
   }
   return 'other';
+}
+
+export function isFacebookGroupChannel(item: ManagedChannel): boolean {
+  const platform = (item.platform || '').trim().toLowerCase();
+  const type = (item.channel_type || '').trim().toLowerCase();
+  return platform === 'facebook' && ['nhóm', 'nhom', 'group'].includes(type);
+}
+
+function isFacebookGroupManaged(item: StaffManagedGroup): boolean {
+  const platform = (item.platform || '').trim().toLowerCase();
+  const type = (item.channel_type || '').trim().toLowerCase();
+  if (platform && platform !== 'facebook') return false;
+  if (type && !['nhóm', 'nhom', 'group', ''].includes(type)) return false;
+  return Boolean((item.id || '').trim() || (item.name || '').trim());
+}
+
+function channelMatchesManagedGroup(channel: ManagedChannel, managed: StaffManagedGroup): boolean {
+  const gid = facebookGroupIdFromChannel(channel);
+  const mid = (managed.id || '').trim();
+  if (gid && mid && gid === mid) return true;
+  const managedName = (managed.name || '').trim().toLowerCase();
+  const channelName = (channel.channel_name || '').trim().toLowerCase();
+  const managedPlatform = (managed.platform || '').trim().toLowerCase();
+  const channelPlatform = (channel.platform || '').trim().toLowerCase();
+  const managedType = channelTypeBucket(managed.channel_type);
+  const channelType = channelTypeBucket(channel.channel_type);
+  if (managedName && channelName && managedName === channelName) {
+    if (managedPlatform && channelPlatform && managedPlatform !== channelPlatform) return false;
+    if (managedType && channelType && managedType !== channelType) return false;
+    return true;
+  }
+  return false;
+}
+
+export function channelTypeBucket(value?: string): string {
+  const text = (value || '').trim().toLowerCase();
+  if (['page', 'fanpage', 'trang'].includes(text)) return 'page';
+  if (['nhóm', 'nhom', 'group'].includes(text)) return 'group';
+  if (text === 'video') return 'video';
+  return text;
+}
+
+export function channelToManagedGroup(item: ManagedChannel): StaffManagedGroup {
+  return {
+    id: item.target_id || item.id || '',
+    name: item.channel_name || item.target_id || '',
+    platform: item.platform || '',
+    channel_type: item.channel_type || '',
+  };
+}
+
+export function staffAssignedToChannel(channel: ManagedChannel, staff: StaffAccount[]): StaffAccount[] {
+  return staff.filter((person) => {
+    if (person.enabled === false || !person.id) return false;
+    return (person.managed_groups || []).some((group) => channelMatchesManagedGroup(channel, group));
+  });
+}
+
+export function staffIdsForChannel(channel: ManagedChannel, staff: StaffAccount[]): string[] {
+  return staffAssignedToChannel(channel, staff)
+    .map((person) => person.id!)
+    .filter(Boolean);
+}
+
+export function isStaffAdmin(staff?: StaffAccount | null): boolean {
+  return String(staff?.role || '').trim().toLowerCase() === 'admin';
+}
+
+export function filterChannelsForStaff(channels: ManagedChannel[], staff?: StaffAccount | null): ManagedChannel[] {
+  if (!staff) return [];
+  if (isStaffAdmin(staff)) return channels;
+  const allowed = staff.managed_groups || [];
+  if (!allowed.length) return [];
+  return channels.filter((channel) =>
+    allowed.some((group) => channelMatchesManagedGroup(channel, group)),
+  );
+}
+
+/** /quan-ly — mọi tài khoản (kể cả admin) chỉ thấy kênh trong managed_groups. */
+export function filterChannelsForManageScope(channels: ManagedChannel[], staff?: StaffAccount | null): ManagedChannel[] {
+  if (!staff) return [];
+  const allowed = staff.managed_groups || [];
+  if (!allowed.length) return [];
+  return channels.filter((channel) =>
+    allowed.some((group) => channelMatchesManagedGroup(channel, group)),
+  );
+}
+
+/** Admin: all FB groups from /kenh. Staff: only groups assigned in managed_groups. */
+export function filterFacebookGroupChannelsForStaff(
+  channels: ManagedChannel[],
+  staff?: StaffAccount | null,
+): ManagedChannel[] {
+  const groups = channels.filter(isFacebookGroupChannel);
+  if (!staff || isStaffAdmin(staff)) return groups;
+  const assigned = (staff.managed_groups || []).filter(isFacebookGroupManaged);
+  if (!assigned.length) return [];
+  return groups.filter((channel) => assigned.some((managed) => channelMatchesManagedGroup(channel, managed)));
 }
 
 export function buildTikTokCommentUrl(row: {

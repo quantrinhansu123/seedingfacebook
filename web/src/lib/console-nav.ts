@@ -23,7 +23,6 @@ export const CONSOLE_NAV_ITEMS: ConsoleNavItem[] = [
   { key: 'home', label: 'Trang chủ', shortLabel: 'Trang chủ', tone: 'blue' },
   { key: 'staff', label: 'Nhân sự', shortLabel: 'Nhân sự', tone: 'violet' },
   { key: 'channels', label: 'Quản lý nhóm', shortLabel: 'Kênh', tone: 'indigo' },
-  { key: 'comments', label: 'Bình luận', shortLabel: 'Bình luận', tone: 'cyan' },
   { key: 'report', label: 'Báo cáo', shortLabel: 'Báo cáo', tone: 'teal' },
   { key: 'manage', label: 'Quản lý', shortLabel: 'Quản lý', tone: 'sky' },
   { key: 'history', label: 'Lịch thử thao tác', shortLabel: 'Lịch sử', tone: 'slate' },

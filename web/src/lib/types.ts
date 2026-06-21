@@ -99,6 +99,8 @@ export type ManagedChannel = {
   link?: string;
   target_id?: string;
   note?: string;
+  assigned_staff_ids?: string[];
+  assigned_staff?: { id?: string; name?: string; username?: string; role?: string }[];
   created_at?: string;
   updated_at?: string;
 };
@@ -126,6 +128,8 @@ export type Lead = {
   post_url?: string;
   comment_id?: string;
   comment_url?: string;
+  comment_author?: string;
+  comment_text?: string;
   product_or_service?: string;
   location?: string;
   budget?: string;

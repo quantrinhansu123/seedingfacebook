@@ -1,10 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { AuthPanel } from '@/components/AuthPanel';
 import { ChannelManagerPanel } from '@/components/ChannelManagerPanel';
-import { CommentLeadInboxPanel } from '@/components/CommentLeadInboxPanel';
 import { ConsoleHome } from '@/components/ConsoleHome';
 import { HistoryPanel } from '@/components/HistoryPanel';
 import { LeadManagerPanel } from '@/components/LeadManagerPanel';
@@ -32,7 +31,14 @@ import type {
   TikTokCommentStat,
 } from '@/lib/types';
 import { CommentAuthorLink } from '@/components/CommentAuthorLink';
-import { classifyFacebookFeedError, facebookGroupIdFromChannel } from '@/lib/utils';
+import {
+  classifyFacebookFeedError,
+  facebookGroupIdFromChannel,
+  filterChannelsForStaff,
+  filterChannelsForManageScope,
+  isFacebookGroupChannel,
+  isStaffAdmin,
+} from '@/lib/utils';
 
 type AiProviders = Record<string, { default_model?: string }>;
 type AiConfig = {
@@ -83,8 +89,25 @@ type PostFetchReport = {
   error?: string;
 };
 
+const SCAN_SELECTED_STORAGE_KEY = 'scanSelectedGroups';
+
+function postGroupId(post: FbPost): string {
+  return String(post._group_id || post.group_id || '').trim();
+}
+
+function readStoredScanSelectedGroups(): Record<string, boolean> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(SCAN_SELECTED_STORAGE_KEY);
+    return raw ? JSON.parse(raw) as Record<string, boolean> : {};
+  } catch {
+    return {};
+  }
+}
+
 export function MonitorPage() {
   const [groups, setGroups] = useState<string[]>([]);
+  const [scanSelectedGroups, setScanSelectedGroups] = useState<Record<string, boolean>>(readStoredScanSelectedGroups);
   const [groupNames, setGroupNames] = useState<Record<string, string>>({});
   const [keywords, setKeywords] = useState<string[]>([]);
   const [kwInp, setKwInp] = useState('');
@@ -211,7 +234,9 @@ export function MonitorPage() {
 
   const autoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const groupsRef = useRef<string[]>([]);
+  const scanSelectedGroupsRef = useRef<Record<string, boolean>>({});
   const channelsRef = useRef<ManagedChannel[]>([]);
+  const currentStaffRef = useRef<StaffAccount | null>(null);
   const limitRef = useRef(10);
   const autoOnRef = useRef(false);
 
@@ -219,8 +244,79 @@ export function MonitorPage() {
     groupsRef.current = groups;
   }, [groups]);
   useEffect(() => {
+    scanSelectedGroupsRef.current = scanSelectedGroups;
+  }, [scanSelectedGroups]);
+  const updateScanSelectedGroups = useCallback(
+    (updater: SetStateAction<Record<string, boolean>>) => {
+      setScanSelectedGroups((prev) => {
+        const next = typeof updater === 'function' ? updater(prev) : updater;
+        scanSelectedGroupsRef.current = next;
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.setItem(SCAN_SELECTED_STORAGE_KEY, JSON.stringify(next));
+          } catch {
+            /* ignore */
+          }
+        }
+        return next;
+      });
+    },
+    [],
+  );
+  useEffect(() => {
+    setScanSelectedGroups((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      groups.forEach((gid) => {
+        if (!(gid in next)) {
+          next[gid] = false;
+          changed = true;
+        }
+      });
+      Object.keys(next).forEach((gid) => {
+        if (!groups.includes(gid)) {
+          delete next[gid];
+          changed = true;
+        }
+      });
+      if (!changed) return prev;
+      scanSelectedGroupsRef.current = next;
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(SCAN_SELECTED_STORAGE_KEY, JSON.stringify(next));
+        } catch {
+          /* ignore */
+        }
+      }
+      return next;
+    });
+  }, [groups]);
+  useEffect(() => {
+    const selected = new Set(groups.filter((gid) => scanSelectedGroups[gid]));
+    setAllPosts((posts) => {
+      const next = posts.filter((post) => {
+        const gid = postGroupId(post);
+        if (!gid || !groups.includes(gid)) return true;
+        return selected.has(gid);
+      });
+      return next.length === posts.length ? posts : next;
+    });
+    setPostFetchReport((report) => {
+      const next = report.filter((item) => {
+        if (item.target_type === 'page') return true;
+        const gid = String(item.group_id || item.target_id || '').trim();
+        if (!gid) return true;
+        return selected.has(gid);
+      });
+      return next.length === report.length ? report : next;
+    });
+  }, [scanSelectedGroups, groups]);
+  useEffect(() => {
     channelsRef.current = channels;
   }, [channels]);
+  useEffect(() => {
+    currentStaffRef.current = currentStaff;
+  }, [currentStaff]);
   useEffect(() => {
     limitRef.current = limit;
   }, [limit]);
@@ -265,7 +361,7 @@ export function MonitorPage() {
 
   const checkAuth = useCallback(async () => {
     try {
-      const r = await api('/api/auth/status');
+      const r = await api('/api/auth/status', { timeoutMs: 30000 });
       if (!r.ok) {
         setSetupRequired(false);
         setAuthenticated(false);
@@ -281,6 +377,7 @@ export function MonitorPage() {
       setSetupRequired(!!d.setup_required && !d.simple_login);
       setAuthenticated(!!d.authenticated);
       setCurrentStaff(d.staff || null);
+      if (isStaffAdmin(d.staff)) setCanManageStaff(true);
       setAuthStatus('');
     } catch (err: unknown) {
       setSetupRequired(false);
@@ -297,21 +394,31 @@ export function MonitorPage() {
     }
   }, []);
 
-  const loadStaffCookies = useCallback(async () => {
+  const loadStaffCookies = useCallback(async (options?: { refresh?: boolean }) => {
     setStaffLoading(true);
     try {
-      const r = await api('/api/staff-cookies');
-      const d = await r.json();
-      setStaffRows(d.staff || []);
-      setCanManageStaff(!!d.can_manage);
+      const refreshQuery = options?.refresh ? '?refresh=1' : '';
+      const r = await api(`/api/staff-cookies${refreshQuery}`, { timeoutMs: 30000 });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setStaffStatus(String(d.error || `Không tải được nhân sự (${r.status})`));
+        return;
+      }
+      setStaffRows(Array.isArray(d.staff) ? d.staff : []);
+      setCanManageStaff(!!d.can_manage || isStaffAdmin(currentStaff));
+      const selfId = currentStaffRef.current?.id;
+      if (selfId) {
+        const freshSelf = (d.staff || []).find((item: StaffAccount) => item.id === selfId);
+        if (freshSelf) setCurrentStaff(freshSelf);
+      }
       if (d.warning) setStaffStatus(`⚠️ ${d.warning}`);
       else setStaffStatus('');
-    } catch {
-      setStaffStatus('Không tải được cookie nhân sự');
+    } catch (err: unknown) {
+      setStaffStatus(formatFetchError(err, 'Không tải được cookie nhân sự'));
     } finally {
       setStaffLoading(false);
     }
-  }, []);
+  }, [currentStaff?.role]);
 
   const loadFacebookCookieContext = useCallback(async () => {
     setFacebookCookieLoading(true);
@@ -380,6 +487,7 @@ export function MonitorPage() {
       }
       setFacebookCookieContext(d);
       if (d.message) setToolStatus(d.message);
+      else if (d.error) setToolStatus(`❌ ${d.error}`);
       setCurrentStaff((prev) => (prev ? {
         ...prev,
         active_facebook_name: d.active_facebook_name || prev.active_facebook_name,
@@ -398,43 +506,78 @@ export function MonitorPage() {
     }
   }, []);
 
-  const syncFacebookGroupsFromChannels = useCallback((rows: ManagedChannel[]) => {
+  const applyScopedFacebookGroups = useCallback((scoped: ManagedChannel[]) => {
     const gIds: string[] = [];
     const gn: Record<string, string> = {};
-    for (const item of rows) {
-      const platform = (item.platform || '').trim().toLowerCase();
-      const type = (item.channel_type || '').trim().toLowerCase();
-      if (platform !== 'facebook' || !['nhóm', 'nhom', 'group'].includes(type)) continue;
+    for (const item of scoped) {
       const gid = facebookGroupIdFromChannel(item);
       if (!gid || gIds.includes(gid)) continue;
       gIds.push(gid);
       gn[gid] = item.channel_name || gid;
     }
+    const prev = groupsRef.current;
+    const same = prev.length === gIds.length && gIds.every((id, index) => id === prev[index]);
     groupsRef.current = gIds;
-    setGroups(gIds);
-    setGroupNames((prev) => ({ ...prev, ...gn }));
+    if (!same) setGroups(gIds);
+    setGroupNames((prevNames) => ({ ...prevNames, ...gn }));
     return gIds;
   }, []);
 
+  const adminStaff = isStaffAdmin(currentStaff);
+  const manageChannels = useMemo(
+    () => filterChannelsForManageScope(channels, currentStaff),
+    [channels, currentStaff],
+  );
+  const facebookGroupChannels = useMemo(
+    () => manageChannels.filter(isFacebookGroupChannel),
+    [manageChannels],
+  );
+  const facebookPageChannels = useMemo(
+    () => manageChannels.filter((item) => {
+      const platform = (item.platform || '').trim().toLowerCase();
+      const type = (item.channel_type || '').trim().toLowerCase();
+      return platform === 'facebook' && ['page', 'fanpage', 'trang'].includes(type);
+    }),
+    [manageChannels],
+  );
+  const tiktokManagedChannels = useMemo(
+    () => manageChannels.filter((item) => (item.platform || '').trim().toLowerCase() === 'tiktok'),
+    [manageChannels],
+  );
+  const kenhChannels = useMemo(
+    () => (adminStaff ? channels : filterChannelsForStaff(channels, currentStaff)),
+    [adminStaff, channels, currentStaff],
+  );
+
+  useEffect(() => {
+    applyScopedFacebookGroups(facebookGroupChannels);
+  }, [facebookGroupChannels, applyScopedFacebookGroups]);
+
   const loadChannels = useCallback(async () => {
     try {
-      const r = await api('/api/channels');
-      const d = await r.json();
+      const r = await api('/api/channels', { timeoutMs: 45000 });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setChannelStatus('❌ ' + (String(d.error || '') || `Không tải được kênh (${r.status})`));
+        return [] as ManagedChannel[];
+      }
       if (d.ok) {
         const rows = d.channels || [];
         channelsRef.current = rows;
         setChannels(rows);
-        syncFacebookGroupsFromChannels(rows);
+        applyScopedFacebookGroups(
+          filterChannelsForManageScope(rows, currentStaffRef.current).filter(isFacebookGroupChannel),
+        );
         setChannelStatus('');
         return rows as ManagedChannel[];
       } else {
         setChannelStatus('❌ ' + (d.error || 'Không tải được danh sách kênh'));
       }
-    } catch {
-      setChannelStatus('❌ Lỗi kết nối khi tải kênh');
+    } catch (err: unknown) {
+      setChannelStatus('❌ ' + formatFetchError(err, 'Lỗi kết nối khi tải kênh'));
     }
     return [] as ManagedChannel[];
-  }, [syncFacebookGroupsFromChannels]);
+  }, [applyScopedFacebookGroups]);
 
   const loadContentPipeline = useCallback(async () => {
     setPipelineBusy(true);
@@ -493,10 +636,12 @@ export function MonitorPage() {
     link: string;
     target_id: string;
     note: string;
-  }, id?: string) => {
+    assigned_staff_ids?: string[];
+  }, id?: string): Promise<boolean | string> => {
     if (!payload.platform.trim() || !payload.channel_name.trim()) {
-      setChannelStatus('Nhập đủ nền tảng và tên kênh');
-      return false;
+      const msg = 'Nhập đủ nền tảng và tên kênh';
+      setChannelStatus(msg);
+      return msg;
     }
     setChannelBusy(true);
     setChannelStatus(id ? 'Đang cập nhật kênh...' : 'Đang thêm kênh...');
@@ -505,28 +650,68 @@ export function MonitorPage() {
         method: id ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        timeoutMs: 45000,
       });
-      const d = await r.json();
-      if (d.ok) {
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.ok) {
         const rows = d.channels || [];
         channelsRef.current = rows;
         setChannels(rows);
-        setChannelStatus(id ? '✅ Đã cập nhật kênh' : '✅ Đã thêm kênh');
-        const saved = d.channel || payload;
-        if ((saved.platform || '').toLowerCase() === 'facebook' && ['Nhóm', 'Nhom', 'Group', 'nhóm', 'nhom', 'group'].includes(saved.channel_type || '') && saved.target_id) {
-          syncFacebookGroupsFromChannels(rows);
+        if (payload.assigned_staff_ids !== undefined) {
+          await loadStaffCookies({ refresh: true });
         }
+        setChannelStatus(
+          (id ? '✅ Đã cập nhật kênh' : '✅ Đã thêm kênh') + (d.warning ? ` · ${d.warning}` : ''),
+        );
         return true;
       }
-      setChannelStatus('❌ ' + (d.error || 'Không lưu được kênh'));
-      return false;
-    } catch {
-      setChannelStatus('❌ Lỗi kết nối khi lưu kênh');
-      return false;
+      const err = d.error || (r.ok ? 'Không lưu được kênh' : `Lỗi server ${r.status}`);
+      setChannelStatus('❌ ' + err);
+      return err;
+    } catch (err: unknown) {
+      const msg = formatFetchError(err, 'Lỗi kết nối khi lưu kênh');
+      setChannelStatus('❌ ' + msg);
+      return msg;
     } finally {
       setChannelBusy(false);
     }
-  }, [syncFacebookGroupsFromChannels]);
+  }, [loadStaffCookies]);
+
+  const bulkAssignStaffToChannels = useCallback(async (channelIds: string[], staffIds: string[]) => {
+    if (!channelIds.length || !staffIds.length) {
+      const msg = 'Chọn kênh và nhân sự trước';
+      setChannelStatus(msg);
+      return msg;
+    }
+    setChannelBusy(true);
+    setChannelStatus(`Đang gán ${staffIds.length} nhân sự cho ${channelIds.length} kênh...`);
+    try {
+      const r = await api('/api/channels/bulk-assign-staff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel_ids: channelIds, staff_ids: staffIds }),
+        timeoutMs: 60000,
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.ok) {
+        const rows = d.channels || [];
+        channelsRef.current = rows;
+        setChannels(rows);
+        await loadStaffCookies({ refresh: true });
+        setChannelStatus(`✅ Đã gán nhân sự cho ${d.updated || channelIds.length} kênh${d.warning ? ` · ${d.warning}` : ''}`);
+        return true;
+      }
+      const err = d.error || (r.ok ? 'Không gán được nhân sự' : `Lỗi server ${r.status}`);
+      setChannelStatus('❌ ' + err);
+      return err;
+    } catch (err: unknown) {
+      const msg = formatFetchError(err, 'Lỗi kết nối khi gán nhân sự');
+      setChannelStatus('❌ ' + msg);
+      return msg;
+    } finally {
+      setChannelBusy(false);
+    }
+  }, [loadStaffCookies]);
 
   const deleteChannel = useCallback(async (id: string) => {
     if (!confirm('Xoá kênh này?')) return;
@@ -538,7 +723,6 @@ export function MonitorPage() {
         const rows = d.channels || [];
         channelsRef.current = rows;
         setChannels(rows);
-        syncFacebookGroupsFromChannels(rows);
         setChannelStatus('✅ Đã xoá kênh');
       } else {
         setChannelStatus('❌ ' + (d.error || 'Không xoá được kênh'));
@@ -546,7 +730,7 @@ export function MonitorPage() {
     } catch {
       setChannelStatus('❌ Lỗi kết nối khi xoá kênh');
     }
-  }, [syncFacebookGroupsFromChannels]);
+  }, []);
 
   const loadGroupMembership = useCallback(async (gIds: string[]) => {
     const ids = [...new Set(gIds.map((id) => String(id || '').trim()).filter(Boolean))];
@@ -577,7 +761,6 @@ export function MonitorPage() {
         const rows = Array.isArray(d.channels) ? d.channels : [];
         channelsRef.current = rows;
         setChannels(rows);
-        syncFacebookGroupsFromChannels(rows);
         setChannelStatus(`✅ Đã đồng bộ Page Facebook: thêm ${d.added || 0}, cập nhật ${d.updated || 0}`);
       } else {
         setChannelStatus('❌ ' + (d.error || 'Không đồng bộ được Page Facebook'));
@@ -587,7 +770,7 @@ export function MonitorPage() {
     } finally {
       setChannelBusy(false);
     }
-  }, [syncFacebookGroupsFromChannels]);
+  }, []);
 
   const loadCommentLogs = useCallback(async () => {
     setHistoryStatus('Đang tải lịch sử...');
@@ -684,14 +867,19 @@ export function MonitorPage() {
   }, []);
 
   const loadPosts = useCallback(async (): Promise<FbPost[] | null> => {
-    const gids = groupsRef.current;
-    const pageIds = channelsRef.current
+    const gids = groupsRef.current.filter((gid) => scanSelectedGroupsRef.current[gid]);
+    const visibleChannels = filterChannelsForManageScope(channelsRef.current, currentStaffRef.current);
+    const pageIds = visibleChannels
       .filter((item) => (item.platform || '').toLowerCase() === 'facebook')
       .filter((item) => ['page', 'fanpage', 'trang'].includes((item.channel_type || '').trim().toLowerCase()))
       .map((item) => item.target_id || '')
       .filter(Boolean);
     const lim = limitRef.current;
-    if (!gids.length && !pageIds.length) return null;
+    if (!gids.length && !pageIds.length) {
+      setFeedError('');
+      setToolStatus(groupsRef.current.length ? 'Chọn ít nhất một nhóm (tick) để quét bài' : 'Chưa có nhóm được phân công');
+      return null;
+    }
     setLoading(true);
     setFeedError('');
     setPostFetchReport([]);
@@ -806,11 +994,11 @@ export function MonitorPage() {
       const n = groupNames[groups[0]!] || groups[0];
       setHeaderSub(n || '...');
     } else {
-      const pageCount = channels.filter((item) => (item.platform || '').toLowerCase() === 'facebook' && ['page', 'fanpage', 'trang'].includes((item.channel_type || '').trim().toLowerCase())).length;
+      const pageCount = manageChannels.filter((item) => (item.platform || '').toLowerCase() === 'facebook' && ['page', 'fanpage', 'trang'].includes((item.channel_type || '').trim().toLowerCase())).length;
       const parts = [groups.length ? `${groups.length} nhóm` : '', pageCount ? `${pageCount} page` : ''].filter(Boolean);
       setHeaderSub(parts.length ? `${parts.join(' · ')} đang theo dõi` : '...');
     }
-  }, [channels, groups, groupNames]);
+  }, [channels, groups, groupNames, manageChannels]);
 
   const matchKw = useCallback(
     (post: FbPost) => {
@@ -822,6 +1010,8 @@ export function MonitorPage() {
   );
 
   const filteredPosts = allPosts.filter((p) => {
+    const gid = postGroupId(p);
+    if (gid && groups.includes(gid) && !scanSelectedGroups[gid]) return false;
     if (!matchKw(p)) return false;
     if (catFilter && classifications[p.id] !== catFilter) return false;
     return true;
@@ -859,7 +1049,7 @@ export function MonitorPage() {
     };
 
     const loadManageHeavy = async (autoClassify: boolean) => {
-      const gIds = groupsRef.current;
+      const gIds = groupsRef.current.filter((gid) => scanSelectedGroupsRef.current[gid]);
       await Promise.allSettled(gIds.map((g) => loadGroupName(g)));
       await Promise.allSettled([loadContentPipeline(), loadTodayCommentStats()]);
       const posts = await loadPosts();
@@ -1039,12 +1229,14 @@ export function MonitorPage() {
       if (Number(d.removed_channels || 0) > 0) {
         await loadChannels();
       } else {
-        syncFacebookGroupsFromChannels(channelsRef.current.filter((item) => {
+        const nextChannels = channelsRef.current.filter((item) => {
           const platform = (item.platform || '').trim().toLowerCase();
           const type = (item.channel_type || '').trim().toLowerCase();
           if (platform !== 'facebook' || !['nhóm', 'nhom', 'group'].includes(type)) return true;
           return facebookGroupIdFromChannel(item) !== gid;
-        }));
+        });
+        channelsRef.current = nextChannels;
+        setChannels(nextChannels);
       }
       setToolStatus(`✅ Đã xoá nhóm "${name}" khỏi danh sách quét`);
     } catch {
@@ -2027,6 +2219,83 @@ export function MonitorPage() {
     setTimeout(() => setAiStatus(''), 7000);
   }
 
+  function removeLeadsFromState(items: { postId: string; leadKey: string }[]) {
+    if (!items.length) return;
+    const keysByPost = new Map<string, Set<string>>();
+    for (const item of items) {
+      const set = keysByPost.get(item.postId) || new Set<string>();
+      set.add(item.leadKey);
+      keysByPost.set(item.postId, set);
+    }
+    setLeads((prev) => {
+      const next = { ...prev };
+      for (const [postId, keys] of keysByPost) {
+        const bucket = (next[postId] || []).filter((item) => !keys.has(item.lead_key || ''));
+        if (bucket.length) next[postId] = bucket;
+        else delete next[postId];
+      }
+      return next;
+    });
+  }
+
+  async function deleteLead(postId: string, leadKey: string, name?: string) {
+    const label = (name || '').trim() || 'lead này';
+    if (!confirm(`Xoá ${label}?`)) return;
+    setLeadsBusy(true);
+    setAiStatus('⏳ Đang xoá lead...');
+    try {
+      const r = await api(`/api/leads/${encodeURIComponent(leadKey)}?post_id=${encodeURIComponent(postId)}`, {
+        method: 'DELETE',
+      });
+      const d = await r.json();
+      if (d.ok) {
+        removeLeadsFromState([{ postId, leadKey }]);
+        setAiStatus('✅ Đã xoá lead');
+        if (d.warning) setTimeout(() => setAiStatus(`⚠️ ${d.warning}`), 1200);
+      } else {
+        setAiStatus(`❌ ${d.error || 'Không xoá được lead'}`);
+      }
+    } catch {
+      setAiStatus('❌ Lỗi kết nối khi xoá lead');
+    }
+    setLeadsBusy(false);
+    setTimeout(() => setAiStatus(''), 7000);
+  }
+
+  async function deleteSelectedLeads(items: { postId: string; leadKey: string }[]) {
+    if (!items.length) return;
+    const label = items.length === 1 ? 'lead này' : `${items.length} lead đã chọn`;
+    if (!confirm(`Xoá ${label}?`)) return;
+    setLeadsBusy(true);
+    setAiStatus(`⏳ Đang xoá ${items.length} lead...`);
+    try {
+      const r = await api('/api/leads/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: items.map((item) => ({ post_id: item.postId, lead_key: item.leadKey })),
+        }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        removeLeadsFromState(items);
+        const failed = Number(d.failed || 0);
+        setAiStatus(
+          failed > 0
+            ? `✅ Đã xoá ${d.deleted || items.length} lead · ${failed} lỗi`
+            : `✅ Đã xoá ${d.deleted || items.length} lead`,
+        );
+        if (d.warning) setTimeout(() => setAiStatus(`⚠️ ${d.warning}`), 1200);
+      } else {
+        setAiStatus(`❌ ${d.error || 'Không xoá được lead'}`);
+      }
+    } catch {
+      setAiStatus('❌ Lỗi kết nối khi xoá lead');
+    }
+    setLeadsBusy(false);
+    setTimeout(() => setAiStatus(''), 7000);
+  }
+
   async function classifyAll() {
     if (!allPosts.length) return;
     setClassifyBusy(true);
@@ -2059,6 +2328,7 @@ export function MonitorPage() {
         setAuthenticated(true);
         setSetupRequired(false);
         setCurrentStaff(d.staff || null);
+        if (isStaffAdmin(d.staff)) setCanManageStaff(true);
         setAuthStatus('');
         await loadStaffCookies();
         await loadTodayCommentStats();
@@ -2108,27 +2378,45 @@ export function MonitorPage() {
     setHeaderSub('Đã đăng xuất');
   }
 
-  async function saveStaffCookie(payload: StaffPayload, staffId?: string) {
-    setStaffStatus('');
-    if (!payload.name.trim() || !payload.username.trim()) {
-      setStaffStatus('Nhập đủ tên và tài khoản đăng nhập');
-      return false;
-    }
-    const cookies = (payload.facebook_cookies || []).filter((item) => String(item.cookie || '').trim());
-    const skippedCookies = (payload.facebook_cookies || []).filter(
-      (item) => String(item.cookie || '').trim() && !String(item.cookie || '').includes('c_user='),
-    );
+  async function saveStaffCookie(payload: StaffPayload, staffId?: string): Promise<{ ok: boolean; error?: string }> {
     payload = {
       ...payload,
-      facebook_cookies: cookies.filter((item) => String(item.cookie || '').includes('c_user=')),
+      name: String(payload.name || '').trim(),
+      username: String(payload.username || '').trim().toLowerCase(),
+    };
+    setStaffStatus('');
+    if (!payload.name.trim() || !payload.username.trim()) {
+      const error = 'Nhập đủ tên và tài khoản đăng nhập';
+      setStaffStatus(error);
+      return { ok: false, error };
+    }
+    const rawCookies = payload.facebook_cookies || [];
+    const skippedCookies = rawCookies.filter(
+      (item) => String(item.cookie || '').trim() && !String(item.cookie || '').includes('c_user='),
+    );
+    const cookies = staffId
+      ? rawCookies.filter((item) => {
+          const cookie = String(item.cookie || '').trim();
+          if (cookie) return cookie.includes('c_user=');
+          return Boolean(item.id);
+        })
+      : rawCookies.filter((item) => {
+          const cookie = String(item.cookie || '').trim();
+          return cookie && cookie.includes('c_user=');
+        });
+    payload = {
+      ...payload,
+      facebook_cookies: cookies,
     };
     if (!staffId && !payload.password) {
-      setStaffStatus('Nhập mật khẩu khi thêm nhân sự');
-      return false;
+      const error = 'Nhập mật khẩu khi thêm nhân sự';
+      setStaffStatus(error);
+      return { ok: false, error };
     }
     if (!staffId && payload.password.length < 6) {
-      setStaffStatus('Mật khẩu tối thiểu 6 ký tự');
-      return false;
+      const error = 'Mật khẩu tối thiểu 6 ký tự';
+      setStaffStatus(error);
+      return { ok: false, error };
     }
     setStaffStatus(staffId ? 'Đang cập nhật nhân sự...' : 'Đang lưu nhân sự...');
     try {
@@ -2143,21 +2431,42 @@ export function MonitorPage() {
         error: r.ok ? 'Phản hồi server không hợp lệ' : `Server lỗi ${r.status}`,
       }));
       if (d.ok) {
-        setStaffRows(d.staff || []);
-        setCanManageStaff(!!d.can_manage);
+        setStaffRows(Array.isArray(d.staff) ? d.staff : []);
+        setCanManageStaff(!!d.can_manage || isStaffAdmin(currentStaff));
+        const savedStaff =
+          (d.staff || []).find((item: StaffAccount) => item.id === staffId) ||
+          (d.staff || []).find((item: StaffAccount) => item.id === currentStaff?.id) ||
+          null;
+        if (savedStaff?.id && savedStaff.id === currentStaff?.id) {
+          setCurrentStaff(savedStaff);
+        }
         const storageText = d.storage === 'supabase' ? 'Supabase' : 'local';
-        const savedStaff = (d.staff || []).find((item: StaffAccount) => item.id === staffId);
+        const staffCount = Array.isArray(d.staff) ? d.staff.length : 0;
         const cookieCount = savedStaff?.facebook_cookies?.length || 0;
         const cookieNote = cookieCount > 1 ? ` · ${cookieCount} cookie FB` : '';
-        setStaffStatus(`${staffId ? '✅ Đã cập nhật nhân sự' : '✅ Đã thêm nhân sự'} (${storageText})${cookieNote}${d.warning ? ` · ${d.warning}` : ''}${skippedCookies.length ? ` · Bỏ qua ${skippedCookies.length} cookie thiếu c_user` : ''}`);
-        return true;
+        const selfCookieOnly = staffId && staffId === currentStaff?.id && !d.can_manage;
+        setStaffStatus(
+          selfCookieOnly
+            ? `✅ Đã cập nhật cookie Facebook${cookieNote}${d.warning ? ` · ${d.warning}` : ''}${skippedCookies.length ? ` · Bỏ qua ${skippedCookies.length} cookie thiếu c_user` : ''}`
+            : `${staffId ? '✅ Đã cập nhật nhân sự' : '✅ Đã thêm nhân sự'} (${storageText}) · ${staffCount} nhân sự${cookieNote}${d.warning ? ` · ${d.warning}` : ''}${skippedCookies.length ? ` · Bỏ qua ${skippedCookies.length} cookie thiếu c_user` : ''}`,
+        );
+        return { ok: true };
       } else {
-        setStaffStatus('❌ ' + (d.error || 'Lỗi lưu nhân sự'));
-        return false;
+        let err = String(d.error || 'Lỗi lưu nhân sự');
+        if (/cookie/i.test(err) && /thiếu|bắt buộc|required/i.test(err)) {
+          err += ' — Backend Render chưa cập nhật: vào Render → Manual Deploy branch main.';
+        } else if (/đã tồn tại/i.test(err)) {
+          err += ' — Dùng tên đăng nhập khác hoặc mở nhân sự cũ để sửa.';
+        } else if (/Chỉ admin/i.test(err)) {
+          err += ' — Đăng nhập bằng tài khoản admin.';
+        }
+        setStaffStatus('❌ ' + err);
+        return { ok: false, error: err };
       }
     } catch {
-      setStaffStatus('❌ Lỗi kết nối');
-      return false;
+      const error = 'Lỗi kết nối server';
+      setStaffStatus('❌ ' + error);
+      return { ok: false, error };
     }
   }
 
@@ -2189,22 +2498,17 @@ export function MonitorPage() {
   const selectedTiktokStat = tiktokStats.find((item) => item.post_id === tiktokSelectedPostId) || tiktokStats[0];
   const selectedTiktokComments = (selectedTiktokStat?.comments || []).filter((row) => !tiktokOnlyPhone || !!row.phones?.length);
   const formatDateTime = (value?: string) => (value ? new Date(value).toLocaleString('vi-VN') : '-');
-  const facebookPageChannels = channels.filter((item) => {
-    const platform = (item.platform || '').trim().toLowerCase();
-    const type = (item.channel_type || '').trim().toLowerCase();
-    return platform === 'facebook' && ['page', 'fanpage', 'trang'].includes(type);
-  });
-  const facebookGroupChannels = channels.filter((item) => {
-    const platform = (item.platform || '').trim().toLowerCase();
-    const type = (item.channel_type || '').trim().toLowerCase();
-    return platform === 'facebook' && ['nhóm', 'nhom', 'group'].includes(type);
-  });
-  const tiktokManagedChannels = channels.filter((item) => (item.platform || '').trim().toLowerCase() === 'tiktok');
+
+  useEffect(() => {
+    if (!authenticated) return;
+    if (adminStaff) void loadStaffCookies();
+  }, [authenticated, adminStaff, loadStaffCookies]);
 
   useEffect(() => {
     if (!authenticated) return;
     if (activeView === 'history') void loadCommentLogs();
     if (activeView === 'channels' || activeView === 'manage') void loadChannels();
+    if (activeView === 'channels' || activeView === 'staff') void loadStaffCookies();
     if (activeView === 'manage') void loadFacebookCookieContext();
     if (activeView === 'staff') {
       void loadStaffCookies();
@@ -2267,7 +2571,7 @@ export function MonitorPage() {
             <div className="header-spacer" />
             <div className="console-clock">{new Date().toLocaleDateString('vi-VN')}</div>
             <div className="header-user">
-              {currentStaff?.name || currentStaff?.username} · {currentStaff?.role === 'admin' ? 'admin' : 'nhân sự'}
+              {currentStaff?.name || currentStaff?.username} · {adminStaff ? 'admin' : 'nhân sự'}
             </div>
             <button type="button" className="header-logout" onClick={() => void logout()}>
               Đăng xuất
@@ -2278,16 +2582,19 @@ export function MonitorPage() {
           {activeView === 'home' ? <ConsoleHome staffName={currentStaff?.name || currentStaff?.username} onOpen={openView} /> : null}
           {activeView === 'channels' ? (
             <ChannelManagerPanel
-              channels={channels}
+              channels={kenhChannels}
+              staff={staffRows}
+              viewAll={adminStaff}
+              canAssignStaff={canManageStaff || adminStaff}
               status={channelStatus}
               busy={channelBusy}
               onSave={saveChannel}
               onDelete={deleteChannel}
               onReload={loadChannels}
               onSyncFacebookPages={syncFacebookPages}
+              onBulkAssignStaff={bulkAssignStaffToChannels}
             />
           ) : null}
-          {activeView === 'comments' ? <CommentLeadInboxPanel /> : null}
           {activeView === 'report' ? (
             <section style={{ padding: 16, height: 'calc(100vh - 120px)' }}>
               <iframe
@@ -2304,7 +2611,16 @@ export function MonitorPage() {
             </section>
           ) : null}
           {activeView === 'history' ? <HistoryPanel rows={commentLogs} status={historyStatus} onReload={loadCommentLogs} /> : null}
-          {activeView === 'leads' ? <LeadManagerPanel leads={leads} onExtract={extractLeadsAll} onSyncPhones={syncPhoneLeadsFromComments} /> : null}
+          {activeView === 'leads' ? (
+            <LeadManagerPanel
+              leads={leads}
+              busy={leadsBusy}
+              onExtract={extractLeadsAll}
+              onSyncPhones={syncPhoneLeadsFromComments}
+              onDelete={deleteLead}
+              onDeleteMany={deleteSelectedLeads}
+            />
+          ) : null}
           {activeView === 'scripts' ? <ScriptWriterPanel /> : null}
           {activeView === 'marketing' ? (
             <MarketingPipelinePanel
@@ -2326,7 +2642,7 @@ export function MonitorPage() {
                 staff={staffRows}
                 channels={channels}
                 currentStaff={currentStaff}
-                canManage={canManageStaff}
+                canManage={canManageStaff || adminStaff}
                 status={staffLoading ? 'Đang tải danh sách nhân sự...' : staffStatus}
                 title="Nhân sự"
                 kicker="Quản lý tài khoản"
@@ -2340,6 +2656,7 @@ export function MonitorPage() {
         <ManageDashboardPanel
           staffName={currentStaff?.name || currentStaff?.username}
           staffRole={currentStaff?.role}
+          staffGroupsScoped
           currentStaff={currentStaff}
           facebookCookieContext={facebookCookieContext}
           facebookCookieBusy={facebookCookieBusy}
@@ -2352,6 +2669,8 @@ export function MonitorPage() {
           onOpenChannels={() => openView('channels')}
           groups={groups}
           groupNames={groupNames}
+          scanSelectedGroups={scanSelectedGroups}
+          onScanSelectedGroupsChange={updateScanSelectedGroups}
           facebookPageChannels={facebookPageChannels}
           facebookGroupChannels={facebookGroupChannels}
           tiktokManagedChannels={tiktokManagedChannels}

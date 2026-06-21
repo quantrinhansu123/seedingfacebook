@@ -51,6 +51,7 @@ SETTINGS_FILE = os.path.join(DATA_DIR, 'settings.json')
 AI_CONFIG_FILE = os.path.join(DATA_DIR, 'ai_config.json')
 CLASSIFICATIONS_FILE = os.path.join(DATA_DIR, 'classifications.json')
 LEADS_FILE = os.path.join(DATA_DIR, 'leads.json')
+DELETED_LEADS_FILE = os.path.join(DATA_DIR, 'deleted_lead_keys.json')
 REPLY_SUGGESTIONS_FILE = os.path.join(DATA_DIR, 'reply_suggestions.json')
 BUSINESS_PROFILE_FILE = os.path.join(DATA_DIR, 'business_profile.json')
 STAFF_COOKIES_FILE = os.path.join(DATA_DIR, 'staff_cookies.json')
@@ -169,6 +170,7 @@ _settings: dict = {}    # {auto_refresh, interval}
 _ai_config: dict = {}   # {provider, model, keys, auto_classify, categories}
 _classifications: dict = {}  # {post_id: category}
 _leads: dict = {}       # {post_id: [lead]}
+_deleted_lead_keys: set[str] = set()
 _reply_suggestions: dict = {}  # {post_id: latest suggestion}
 _business_profile: dict = {}  # {business_name, phone, address, why_choose_us, extra_notes}
 _staff_cookies: dict = {}  # {active_staff_id, staff: [{id, name, cookie, enabled}]}
@@ -181,6 +183,8 @@ _comment_logs: list = []
 _comment_summaries: dict = {}
 _post_comments: list = []
 _managed_channels: list = []
+_managed_channels_remote_at: float = 0.0
+_MANAGED_CHANNELS_REFRESH_TTL = 30
 _tiktok_config: dict = {}
 _content_pipeline: dict = {}
 _comment_templates: list = []
@@ -311,7 +315,7 @@ def _verify_password(password: str, salt: str, digest: str) -> bool:
 
 
 def _load_state():
-    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _tiktok_config, _content_pipeline, _comment_templates, _comment_tags, _comment_tag_assignments, _comment_inbox_workflow, _comment_manual_phones
+    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _deleted_lead_keys, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _managed_channels_remote_at, _tiktok_config, _content_pipeline, _comment_templates, _comment_tags, _comment_tag_assignments, _comment_inbox_workflow, _comment_manual_phones
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
     except OSError as e:
@@ -332,7 +336,10 @@ def _load_state():
             _tiktok_config = {**_default_tiktok_config(), **(sb.kv_get('tiktok_config', None) or {})}
             _classifications = sb.list_classifications()
             try:
-                _managed_channels = sb.list_managed_channels(SUPABASE_CHANNEL_TABLE)
+                remote_channels = sb.list_managed_channels(SUPABASE_CHANNEL_TABLE)
+                local_channels = _read_json(MANAGED_CHANNELS_FILE, [])
+                _managed_channels = _merge_managed_channels_remote(remote_channels, local_channels)
+                _managed_channels_remote_at = time_module.monotonic()
             except Exception as e:
                 print(f'[supabase] load managed_channels failed, fallback file: {e}')
                 _managed_channels = _read_json(MANAGED_CHANNELS_FILE, [])
@@ -380,6 +387,7 @@ def _load_state():
         changed_staff = True
     if changed_staff:
         _save_staff_cookies()
+    _hydrate_staff_accounts_from_supabase()
 
     _comment_logs = _read_json(COMMENT_LOGS_FILE, [])
     if not isinstance(_comment_logs, list):
@@ -447,6 +455,45 @@ def _load_state():
     _comment_tag_assignments = loaded_tag_assignments if isinstance(loaded_tag_assignments, dict) else {}
     _comment_inbox_workflow = loaded_inbox_workflow if isinstance(loaded_inbox_workflow, dict) else {}
     _comment_manual_phones = loaded_manual_phones if isinstance(loaded_manual_phones, dict) else {}
+    raw_deleted = _read_json(DELETED_LEADS_FILE, [])
+    _deleted_lead_keys = {
+        str(item).strip()
+        for item in (raw_deleted if isinstance(raw_deleted, list) else [])
+        if str(item or '').strip()
+    }
+    _backfill_channel_assigned_staff_ids()
+
+
+def _merge_managed_channels_remote(remote_rows: list, local_rows: list | None = None) -> list[dict]:
+    local_rows = local_rows if isinstance(local_rows, list) else []
+    local_by_id = {
+        str(item.get('id') or '').strip(): item
+        for item in local_rows
+        if str(item.get('id') or '').strip()
+    }
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for row in remote_rows or []:
+        if not isinstance(row, dict):
+            continue
+        channel_id = str(row.get('id') or '').strip()
+        if not channel_id:
+            continue
+        local = local_by_id.get(channel_id) or {}
+        assigned = _normalize_assigned_staff_ids(local.get('assigned_staff_ids'))
+        if not assigned:
+            assigned = _normalize_assigned_staff_ids(row.get('assigned_staff_ids'))
+        merged.append({
+            **local,
+            **row,
+            'assigned_staff_ids': assigned,
+        })
+        seen.add(channel_id)
+    for channel_id, local in local_by_id.items():
+        if channel_id in seen:
+            continue
+        merged.append(local)
+    return merged
 
 
 def _save_seen(new_posts=None):
@@ -925,6 +972,28 @@ def _normalise_lead(lead: dict, post_id: str = '') -> dict:
     platform = str(lead.get('platform') or lead.get('source_platform') or '').strip().lower()
     if not platform:
         platform = 'tiktok' if str(pid).startswith('tiktok_') else 'facebook'
+    comment_author = str(lead.get('comment_author') or lead.get('author_name') or '').strip()
+    comment_text = str(
+        lead.get('comment_text')
+        or lead.get('comment_message')
+        or lead.get('message')
+        or ''
+    ).strip()
+    comment_id = str(lead.get('comment_id') or lead.get('source_id') or '').strip()
+    if comment_id and (not comment_author or not comment_text):
+        for row in _post_comments:
+            if str(row.get('comment_id') or '') != comment_id:
+                continue
+            if not comment_author:
+                comment_author = str(row.get('author_name') or '').strip()
+            if not comment_text:
+                comment_text = str(row.get('message') or '').strip()
+            break
+    if lead_source == 'comment':
+        if not comment_author:
+            comment_author = str(lead.get('name') or lead.get('customer_name') or 'Ẩn danh').strip()
+        if not comment_text:
+            comment_text = str(lead.get('evidence') or lead.get('need') or lead.get('customer_need') or '').strip()
     return {
         **lead,
         'lead_key': str(lead.get('lead_key') or _lead_key({**lead, 'post_id': pid, 'phone': phone})),
@@ -932,11 +1001,13 @@ def _normalise_lead(lead: dict, post_id: str = '') -> dict:
         'post_id': pid,
         'group_id': str(lead.get('group_id') or '').strip(),
         'post_url': str(lead.get('post_url') or '').strip(),
-        'comment_id': str(lead.get('comment_id') or lead.get('source_id') or '').strip(),
+        'comment_id': comment_id,
         'comment_url': str(lead.get('comment_url') or '').strip(),
         'source': lead_source,
         'source_id': str(lead.get('source_id') or lead.get('comment_id') or pid).strip(),
-        'name': str(lead.get('name') or lead.get('customer_name') or 'Ẩn danh').strip(),
+        'name': str(lead.get('name') or lead.get('customer_name') or comment_author or 'Ẩn danh').strip(),
+        'comment_author': comment_author,
+        'comment_text': comment_text,
         'phone': phone,
         'phones': phones,
         'need': str(lead.get('need') or lead.get('customer_need') or lead.get('evidence') or '').strip(),
@@ -962,6 +1033,8 @@ def _merge_leads_into_memory(leads: list[dict]) -> int:
         bucket = _leads.setdefault(pid, [])
         existing = {str(item.get('lead_key') or _lead_key(item)): idx for idx, item in enumerate(bucket)}
         key = str(row.get('lead_key'))
+        if key in _deleted_lead_keys:
+            continue
         public_row = {k: v for k, v in row.items() if k != 'raw_lead'}
         if key in existing:
             bucket[existing[key]] = {**bucket[existing[key]], **public_row}
@@ -971,6 +1044,155 @@ def _merge_leads_into_memory(leads: list[dict]) -> int:
     if changed:
         _save_leads()
     return changed
+
+
+def _delete_lead_from_memory(post_id: str, lead_key: str) -> bool:
+    global _leads
+    key = str(lead_key or '').strip()
+    if not key:
+        return False
+    pid = str(post_id or '').strip()
+
+    def _without_key(bucket: list) -> list:
+        return [item for item in bucket if str(item.get('lead_key') or _lead_key(item)) != key]
+
+    if pid:
+        bucket = _leads.get(pid)
+        if not bucket:
+            return False
+        next_bucket = _without_key(bucket)
+        if len(next_bucket) == len(bucket):
+            return False
+        if next_bucket:
+            _leads[pid] = next_bucket
+        else:
+            _leads.pop(pid, None)
+        _save_leads()
+        return True
+
+    removed = False
+    for pid_key, bucket in list(_leads.items()):
+        next_bucket = _without_key(bucket)
+        if len(next_bucket) == len(bucket):
+            continue
+        removed = True
+        if next_bucket:
+            _leads[pid_key] = next_bucket
+        else:
+            _leads.pop(pid_key, None)
+    if removed:
+        _save_leads()
+    return removed
+
+
+def _delete_lead_from_supabase(lead_key: str) -> tuple[bool, str, int]:
+    key = str(lead_key or '').strip()
+    if not key:
+        return False, 'Thiếu lead_key', 0
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return True, '', 0
+    try:
+        resp = _req.delete(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_LEAD_TABLE}?lead_key=eq.{quote(key)}",
+            headers={
+                'apikey': SUPABASE_KEY,
+                'Authorization': f'Bearer {SUPABASE_KEY}',
+                'Prefer': 'return=representation',
+            },
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            try:
+                rows = resp.json()
+                count = len(rows) if isinstance(rows, list) else 0
+                return True, '', count
+            except Exception:
+                return True, '', 0
+        if resp.status_code == 204:
+            return True, '', 1
+        if resp.headers.get('content-type', '').startswith('application/json'):
+            try:
+                return False, (resp.json().get('message') or resp.text)[:300], 0
+            except Exception:
+                pass
+        return False, resp.text[:300], 0
+    except Exception as e:
+        return False, str(e)[:300], 0
+
+
+def _save_deleted_lead_keys():
+    _write_json(DELETED_LEADS_FILE, sorted(_deleted_lead_keys))
+
+
+def _mark_lead_deleted(lead_key: str) -> None:
+    global _deleted_lead_keys
+    key = str(lead_key or '').strip()
+    if not key or key in _deleted_lead_keys:
+        return
+    _deleted_lead_keys.add(key)
+    _save_deleted_lead_keys()
+
+
+def _filter_deleted_leads(leads: dict) -> dict:
+    if not _deleted_lead_keys:
+        return leads
+    filtered: dict[str, list] = {}
+    for post_id, items in (leads or {}).items():
+        bucket = [
+            item for item in (items or [])
+            if str(item.get('lead_key') or _lead_key(item)) not in _deleted_lead_keys
+        ]
+        if bucket:
+            filtered[post_id] = bucket
+    return filtered
+
+
+def _lead_exists_in_supabase(lead_key: str) -> bool:
+    key = str(lead_key or '').strip()
+    if not key or not SUPABASE_URL or not SUPABASE_KEY:
+        return False
+    try:
+        resp = _req.get(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_LEAD_TABLE}",
+            headers={'apikey': SUPABASE_KEY, 'Authorization': f'Bearer {SUPABASE_KEY}'},
+            params={'select': 'lead_key', 'lead_key': f'eq.{key}', 'limit': '1'},
+            timeout=15,
+        )
+        if resp.status_code not in (200, 206):
+            return False
+        return bool(resp.json())
+    except Exception:
+        return False
+
+
+def _lead_exists_anywhere(post_id: str, lead_key: str) -> bool:
+    key = str(lead_key or '').strip()
+    if not key:
+        return False
+    pid = str(post_id or '').strip()
+    buckets = [_leads.get(pid)] if pid else list(_leads.values())
+    for bucket in buckets:
+        for item in bucket or []:
+            if str(item.get('lead_key') or _lead_key(item)) == key:
+                return True
+    return _lead_exists_in_supabase(key)
+
+
+def _delete_single_lead(post_id: str, lead_key: str) -> dict:
+    key = str(lead_key or '').strip()
+    removed_local = _delete_lead_from_memory(post_id, key)
+    supabase_ok, supabase_error, deleted_remote = _delete_lead_from_supabase(key)
+    _mark_lead_deleted(key)
+    payload: dict = {}
+    if removed_local and not supabase_ok and supabase_error:
+        payload['warning'] = f'Đã xoá local, Supabase chưa xoá được: {supabase_error}'
+    elif not removed_local and deleted_remote <= 0:
+        payload['storage'] = 'hidden'
+        if supabase_error:
+            payload['warning'] = f'Đã ẩn lead; Supabase chưa xoá được: {supabase_error}'
+    elif not removed_local and deleted_remote > 0:
+        payload['storage'] = 'supabase'
+    return payload
 
 
 def _lead_to_supabase_row(lead: dict) -> dict:
@@ -1073,8 +1295,22 @@ def _supabase_lead_row_to_public(row: dict) -> dict:
         'contact_status': row.get('contact_status') or raw.get('contact_status') or '',
         'confidence': row.get('confidence') or raw.get('confidence') or 0,
         'evidence': row.get('evidence') or raw.get('evidence') or '',
+        'comment_author': raw.get('comment_author') or row.get('comment_author') or '',
+        'comment_text': raw.get('comment_text') or row.get('comment_text') or '',
         'created_at': row.get('created_at') or raw.get('created_at') or '',
     }
+
+
+def _public_leads_dict(leads: dict) -> dict:
+    grouped: dict[str, list] = {}
+    for post_id, items in (leads or {}).items():
+        bucket = [
+            _normalise_lead({**item, 'post_id': str(item.get('post_id') or post_id or '').strip()})
+            for item in (items or [])
+        ]
+        if bucket:
+            grouped[str(post_id)] = bucket
+    return _filter_deleted_leads(grouped)
 
 
 def _load_leads_from_supabase(limit: int = 3000) -> tuple[dict, str]:
@@ -1124,6 +1360,8 @@ def _comment_rows_to_phone_leads(rows: list[dict]) -> list[dict]:
             'post_url': row.get('post_url') or '',
             'comment_url': public.get('comment_url') or row.get('post_url') or '',
             'name': row.get('author_name') or 'Ẩn danh',
+            'comment_author': row.get('author_name') or 'Ẩn danh',
+            'comment_text': message,
             'phone': phones[0],
             'phones': phones,
             'need': message[:220],
@@ -1274,6 +1512,271 @@ def _normalize_staff_managed_groups(raw) -> list[dict]:
                 row['channel_type'] = channel_type
             rows.append(row)
     return rows
+
+
+def _channel_type_bucket(value: str) -> str:
+    text = str(value or '').strip().lower()
+    if text in ('page', 'fanpage', 'trang'):
+        return 'page'
+    if text in ('nhóm', 'nhom', 'group'):
+        return 'group'
+    if text == 'video':
+        return 'video'
+    return text
+
+
+def _managed_group_item_key(item: dict) -> str:
+    platform = str(item.get('platform') or '').strip().lower()
+    ctype = _channel_type_bucket(item.get('channel_type') or item.get('type'))
+    gid = str(item.get('id') or item.get('group_id') or '').strip()
+    name = str(item.get('name') or item.get('group_name') or '').strip().lower()
+    return f'{platform}|{ctype}|{gid}|{name}'
+
+
+def _merge_managed_groups(*parts) -> list[dict]:
+    by_key: dict[str, dict] = {}
+    for raw in parts:
+        for item in _normalize_staff_managed_groups(raw):
+            key = _managed_group_item_key(item)
+            by_key[key] = {**by_key.get(key, {}), **item}
+    return list(by_key.values())
+
+
+def _staff_identity_key(item: dict) -> str:
+    username = str(item.get('username') or '').strip().lower()
+    if username:
+        return f'user:{username}'
+    staff_id = str(item.get('id') or '').strip()
+    return f'id:{staff_id}' if staff_id else ''
+
+
+def _find_local_staff_account(staff_id: str, hint: dict | None = None) -> dict | None:
+    token = str(staff_id or '').strip()
+    if not token:
+        return None
+    token_lower = token.lower()
+    accounts = _staff_accounts()
+    for item in accounts:
+        if str(item.get('id') or '').strip() == token:
+            return item
+        if token_lower and str(item.get('username') or '').strip().lower() == token_lower:
+            return item
+    hint = hint or {}
+    hint_user = str(hint.get('username') or '').strip().lower()
+    if hint_user:
+        for item in accounts:
+            if str(item.get('username') or '').strip().lower() == hint_user:
+                return item
+    return None
+
+
+def _staff_wanted_keys(wanted_ids) -> set[str]:
+    keys: set[str] = set()
+    for raw in wanted_ids or []:
+        token = str(raw or '').strip()
+        if not token:
+            continue
+        row = _find_local_staff_account(token)
+        if row:
+            identity = _staff_identity_key(row)
+            if identity:
+                keys.add(identity)
+            sid = str(row.get('id') or '').strip()
+            if sid:
+                keys.add(f'id:{sid}')
+            user = str(row.get('username') or '').strip().lower()
+            if user:
+                keys.add(f'user:{user}')
+        else:
+            keys.add(f'id:{token}')
+            keys.add(f'user:{token.lower()}')
+    return keys
+
+
+def _staff_row_in_wanted(staff_row: dict, wanted_keys: set[str]) -> bool:
+    identity = _staff_identity_key(staff_row)
+    if identity and identity in wanted_keys:
+        return True
+    sid = str(staff_row.get('id') or '').strip()
+    if sid and f'id:{sid}' in wanted_keys:
+        return True
+    user = str(staff_row.get('username') or '').strip().lower()
+    if user and f'user:{user}' in wanted_keys:
+        return True
+    return False
+
+
+def _staff_managed_groups_snapshot(staff_id: str, fallback: dict | None = None) -> list[dict]:
+    staff_id = str(staff_id or '').strip()
+    fallback = fallback or {}
+    local = _find_local_staff_account(staff_id, fallback) if staff_id else None
+    return _merge_managed_groups(
+        (local or {}).get('managed_groups'),
+        fallback.get('managed_groups'),
+    )
+
+
+def _channel_assigned_staff_ids(channel_row: dict) -> list[str]:
+    stored = _normalize_assigned_staff_ids(channel_row.get('assigned_staff_ids'))
+    if stored:
+        return stored
+    return [
+        str(item.get('id') or '').strip()
+        for item in _channel_assigned_staff_public(channel_row)
+        if str(item.get('id') or '').strip()
+    ]
+
+
+def _canonical_staff_id(staff_id: str, hint: dict | None = None) -> str:
+    token = str(staff_id or '').strip()
+    if not token:
+        return ''
+    local = _find_local_staff_account(token, hint)
+    return str((local or hint or {}).get('id') or token).strip()
+
+
+def _staff_display_entries(staff_ids: list[str], staff_rows: list | None = None) -> list[dict]:
+    wanted_keys = _staff_wanted_keys(staff_ids)
+    if not wanted_keys:
+        return []
+    rows = []
+    for staff_row in staff_rows or _all_staff_rows_for_assignment():
+        if not _staff_row_in_wanted(staff_row, wanted_keys):
+            continue
+        rows.append({
+            'id': staff_row.get('id', ''),
+            'name': staff_row.get('name', ''),
+            'username': staff_row.get('username', ''),
+            'role': staff_row.get('role', 'staff'),
+        })
+    return rows
+
+
+def _groups_from_other_assigned_channels(staff_id: str, *, exclude_channel_id: str = '') -> list[dict]:
+    staff_keys = _staff_wanted_keys([staff_id])
+    if not staff_keys:
+        return []
+    groups: list[dict] = []
+    for channel in _managed_channels:
+        channel_id = str(channel.get('id') or '').strip()
+        if exclude_channel_id and channel_id == exclude_channel_id:
+            continue
+        assigned_ids = _channel_assigned_staff_ids(channel)
+        if not assigned_ids:
+            continue
+        assigned_keys = _staff_wanted_keys(assigned_ids)
+        if not staff_keys.intersection(assigned_keys):
+            continue
+        entry = _managed_group_from_channel(channel)
+        if entry.get('id') or entry.get('name'):
+            groups.append(entry)
+    return groups
+
+
+def _managed_groups_signature(groups: list[dict]) -> list[str]:
+    return sorted(_managed_group_item_key(item) for item in _normalize_staff_managed_groups(groups))
+
+
+def _set_channel_assigned_staff_ids(channel_id: str, staff_ids: list[str]) -> None:
+    global _managed_channels
+    channel_id = str(channel_id or '').strip()
+    if not channel_id:
+        return
+    canonical: list[str] = []
+    seen: set[str] = set()
+    for raw_id in staff_ids or []:
+        cid = _canonical_staff_id(str(raw_id or '').strip())
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        canonical.append(cid)
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    updated = False
+    for index, item in enumerate(_managed_channels):
+        if str(item.get('id') or '').strip() != channel_id:
+            continue
+        _managed_channels[index] = {**item, 'assigned_staff_ids': canonical, 'updated_at': now}
+        updated = True
+        break
+    if updated:
+        _save_managed_channels()
+
+
+def _backfill_channel_assigned_staff_ids() -> None:
+    global _managed_channels
+    changed = False
+    for index, item in enumerate(_managed_channels):
+        if _normalize_assigned_staff_ids(item.get('assigned_staff_ids')):
+            continue
+        inferred = _channel_assigned_staff_ids(item)
+        if not inferred:
+            continue
+        _managed_channels[index] = {**item, 'assigned_staff_ids': inferred}
+        changed = True
+    if changed:
+        _save_managed_channels()
+
+
+def _assign_staff_to_channel(channel_row: dict, staff_ids: list[str], *, merge: bool = True) -> str:
+    wanted = {str(item or '').strip() for item in (staff_ids or []) if str(item or '').strip()}
+    if merge:
+        current = _channel_assigned_staff_public(channel_row)
+        wanted |= {str(item.get('id') or '').strip() for item in current if item.get('id')}
+    return _sync_channel_staff_assignments(channel_row, list(wanted))
+
+
+def _is_facebook_group_managed(item: dict) -> bool:
+    platform = str(item.get('platform') or '').strip().lower()
+    ctype = str(item.get('channel_type') or item.get('type') or '').strip().lower()
+    if platform and platform != 'facebook':
+        return False
+    if ctype and ctype not in ('nhóm', 'nhom', 'group', ''):
+        return False
+    return bool(str(item.get('id') or item.get('group_id') or '').strip())
+
+
+def _staff_allowed_group_ids():
+    """None = admin (all groups). Otherwise set of group IDs staff may access."""
+    if _is_admin():
+        return None
+    staff = _current_staff()
+    if not staff:
+        return set()
+    managed = _current_staff_managed_groups()
+    allowed = {
+        str(item.get('id') or '').strip()
+        for item in managed
+        if _is_facebook_group_managed(item)
+    }
+    allowed.discard('')
+    return allowed
+
+
+def _current_staff_managed_groups() -> list[dict]:
+    staff_id = str(_current_staff_id() or '').strip()
+    if not staff_id:
+        return []
+    for row in _all_staff_rows_for_assignment():
+        if str(row.get('id') or '').strip() == staff_id:
+            return _normalize_staff_managed_groups(row.get('managed_groups'))
+    return _normalize_staff_managed_groups(_current_staff().get('managed_groups'))
+
+
+def _filter_group_ids_for_staff(group_ids: list) -> list:
+    if _is_admin():
+        return group_ids
+    managed = _current_staff_managed_groups()
+    if not managed:
+        return []
+    kept = []
+    for gid in group_ids:
+        gid = str(gid or '').strip()
+        if not gid:
+            continue
+        entry = {'id': gid, 'platform': 'facebook', 'channel_type': 'nhóm'}
+        if any(_managed_group_matches(entry, item) for item in managed):
+            kept.append(gid)
+    return kept
 
 
 def _mask_proxy_url(url: str) -> str:
@@ -1440,6 +1943,21 @@ def _staff_with_active_cookie(staff: dict) -> dict:
     return merged
 
 
+def _is_invalid_facebook_display_name(raw: str) -> bool:
+    text = str(raw or '').strip().lower()
+    if not text:
+        return True
+    if text in ('facebook', 'log in', 'login', 'đăng nhập', 'đăng nhập facebook'):
+        return True
+    if 'đăng nhập' in text and 'facebook' in text:
+        return True
+    if 'log in' in text and 'facebook' in text:
+        return True
+    if text.startswith('facebook id '):
+        return True
+    return False
+
+
 def _decode_facebook_name(raw: str) -> str:
     text = unescape(str(raw or '').strip())
     if not text:
@@ -1450,7 +1968,7 @@ def _decode_facebook_name(raw: str) -> str:
     except Exception:
         pass
     text = re.sub(r'\s*[\|\-–]\s*Facebook.*$', '', text, flags=re.I).strip()
-    if text.lower() in ('facebook', 'log in', 'đăng nhập', 'login'):
+    if _is_invalid_facebook_display_name(text):
         return ''
     return text
 
@@ -1509,28 +2027,32 @@ def _remember_facebook_display_name(staff: dict, name: str) -> None:
 def _cached_facebook_display_name(staff: dict, user_id: str = '') -> str:
     staff_id = str(staff.get('id') or '')
     if staff_id and _staff_fb_display_names.get(staff_id):
-        return _staff_fb_display_names[staff_id]
+        cached_name = str(_staff_fb_display_names[staff_id] or '').strip()
+        if not _is_invalid_facebook_display_name(cached_name):
+            return cached_name
     try:
         cached = str(session.get('facebook_display_name') or '').strip()
-        if cached:
+        if cached and not _is_invalid_facebook_display_name(cached):
             return cached
     except Exception:
         pass
     if user_id:
         cached = _fb_profile_cache.get(user_id)
         if cached and cached.get('name'):
-            return str(cached.get('name') or '')
+            name = str(cached.get('name') or '').strip()
+            if not _is_invalid_facebook_display_name(name):
+                return name
     cookies = _normalize_staff_facebook_cookies(staff.get('facebook_cookies'), staff.get('cookie', ''))
     active_id = str(staff.get('active_cookie_id') or '').strip()
     for item in cookies:
         if active_id and str(item.get('id') or '') != active_id:
             continue
         name = str(item.get('facebook_name') or '').strip()
-        if name:
+        if name and not _is_invalid_facebook_display_name(name):
             return name
     for item in cookies:
         name = str(item.get('facebook_name') or '').strip()
-        if name:
+        if name and not _is_invalid_facebook_display_name(name):
             return name
     return ''
 
@@ -1582,7 +2104,10 @@ def _fetch_facebook_profile(cookie: str, *, allow_token: bool = True, fast: bool
             )
             if 'login.php' in (resp.url or '').lower():
                 continue
-            name = _parse_facebook_name_from_html(resp.text or '', user_id)
+            html = resp.text or ''
+            if re.search(r'login_form|name="pass"|id="loginform"|"login":\s*true', html, flags=re.I):
+                continue
+            name = _parse_facebook_name_from_html(html, user_id)
             if name:
                 result = {'ok': True, 'name': name, 'id': user_id, 'error': ''}
                 _fb_profile_cache[user_id] = {**result, 'ts': time_module.time()}
@@ -1643,6 +2168,8 @@ def _enrich_staff_facebook_cookies_with_names(cookies: list[dict], *, fast: bool
         cookie_val = str(row.get('cookie') or '').strip()
         fb_name = str(row.get('facebook_name') or '').strip()
         fb_id = str(row.get('facebook_user_id') or _extract_cookie_user(cookie_val) or '')
+        if _is_invalid_facebook_display_name(fb_name):
+            fb_name = ''
         if cookie_val and not fb_name:
             cache_key = fb_id or cookie_val[:24]
             if cache_key not in profile_cache:
@@ -1689,7 +2216,7 @@ def _persist_facebook_cookie_names(staff: dict, cookies: list[dict]) -> None:
         _session_staff_cache[token] = cached
 
 
-def _facebook_cookie_context_payload(staff: dict, *, resolve_name: bool = False) -> dict:
+def _facebook_cookie_context_payload(staff: dict, *, resolve_name: bool = False, force_refresh: bool = False) -> dict:
     staff = _staff_with_active_cookie(staff)
     cookies = _normalize_staff_facebook_cookies(staff.get('facebook_cookies'), staff.get('cookie', ''))
     active_id = str(staff.get('active_cookie_id') or '').strip()
@@ -1703,17 +2230,24 @@ def _facebook_cookie_context_payload(staff: dict, *, resolve_name: bool = False)
         cookie_val = str(item.get('cookie') or '').strip()
         fb_id = str(item.get('facebook_user_id') or _extract_cookie_user(cookie_val) or '')
         fb_name = str(item.get('facebook_name') or '').strip()
+        if _is_invalid_facebook_display_name(fb_name):
+            fb_name = ''
         if not fb_name:
             fb_name = _cached_facebook_display_name(staff, fb_id)
-        if resolve_name and cookie_val and not fb_name and cookie_id == active_id:
+        if _is_invalid_facebook_display_name(fb_name):
+            fb_name = ''
+        should_resolve = resolve_name and cookie_val and (
+            cookie_id == active_id or force_refresh
+        ) and (not fb_name or force_refresh)
+        if should_resolve:
             cache_key = fb_id or cookie_id
             if cache_key not in profile_cache:
-                profile = _fetch_facebook_profile(cookie_val, allow_token=False, fast=True)
+                profile = _fetch_facebook_profile(cookie_val, allow_token=False, fast=not force_refresh)
                 if not profile.get('ok'):
                     profile = _fetch_facebook_profile(cookie_val, allow_token=True, fast=False)
                 profile_cache[cache_key] = profile
             profile = profile_cache[cache_key]
-            if profile.get('ok'):
+            if profile.get('ok') and profile.get('name'):
                 fb_name = profile.get('name', '')
                 _remember_facebook_display_name(staff, fb_name)
         updated_cookies.append({**item, 'facebook_name': fb_name})
@@ -1729,13 +2263,18 @@ def _facebook_cookie_context_payload(staff: dict, *, resolve_name: bool = False)
         _persist_facebook_cookie_names(staff, updated_cookies)
     active_item = next((row for row in items if row.get('active')), items[0] if items else {})
     active_name = active_item.get('facebook_name', '') or _cached_facebook_display_name(staff, active_item.get('facebook_user_id', ''))
-    return {
+    if _is_invalid_facebook_display_name(active_name):
+        active_name = ''
+    payload = {
         'ok': True,
         'active_cookie_id': active_id,
         'active_facebook_name': active_name,
         'active_facebook_user_id': active_item.get('facebook_user_id', ''),
         'cookies': items,
     }
+    if resolve_name and not active_name:
+        payload['error'] = 'Không đọc được tên Facebook. Cookie có thể hết hạn — lấy cookie mới từ Chrome.'
+    return payload
 
 
 def _persist_active_cookie_choice(staff: dict, cookie_id: str, cookie: str) -> None:
@@ -1990,8 +2529,59 @@ def _list_supabase_staff() -> tuple[list, str]:
 
 
 def _invalidate_staff_list_cache() -> None:
-    global _staff_list_cache
+    global _staff_list_cache, _staff_assignment_cache
     _staff_list_cache = {'rows': None, 'warning': '', 'at': 0.0}
+    _staff_assignment_cache = {'rows': None, 'at': 0.0}
+
+
+def _hydrate_staff_accounts_from_supabase() -> None:
+    global _staff_cookies
+    if not USE_SUPABASE:
+        return
+    try:
+        remote_rows, warning = _list_supabase_staff()
+        if warning:
+            print(f'[supabase] hydrate staff warning: {warning}')
+        if not remote_rows:
+            return
+        local_map: dict[str, dict] = {}
+        for item in _staff_accounts():
+            for key in (str(item.get('id') or '').strip(), str(item.get('username') or '').strip().lower()):
+                if key:
+                    local_map[key] = item
+        merged_list: list[dict] = []
+        seen_keys: set[str] = set()
+        for remote in remote_rows:
+            key = str(remote.get('id') or remote.get('username') or '').strip()
+            username_key = str(remote.get('username') or '').strip().lower()
+            if not key:
+                continue
+            local = local_map.get(key) or local_map.get(username_key) or {}
+            row = {
+                **local,
+                **remote,
+                'managed_groups': _merge_managed_groups(local.get('managed_groups'), remote.get('managed_groups')),
+            }
+            if local.get('password_hash') and local.get('password_salt'):
+                row['password_salt'] = local['password_salt']
+                row['password_hash'] = local['password_hash']
+            merged_list.append(row)
+            seen_keys.add(key)
+            if username_key:
+                seen_keys.add(username_key)
+        for key, item in local_map.items():
+            if key in seen_keys:
+                continue
+            if _as_enabled(item.get('enabled', True)):
+                merged_list.append(item)
+        _staff_cookies['staff'] = merged_list
+    except Exception as e:
+        print(f'[supabase] hydrate staff accounts failed: {e}')
+
+
+def _staff_list_after_change() -> tuple[list, str]:
+    _invalidate_staff_list_cache()
+    return _merged_public_staff_rows(refresh_remote=True)
 
 
 def _merged_public_staff_rows(*, refresh_remote: bool = True) -> tuple[list, str]:
@@ -1999,7 +2589,7 @@ def _merged_public_staff_rows(*, refresh_remote: bool = True) -> tuple[list, str
     for item in _staff_accounts():
         if not _as_enabled(item.get('enabled', True)):
             continue
-        key = item.get('id') or item.get('username')
+        key = _staff_identity_key(item)
         if key:
             merged[key] = item
 
@@ -2014,7 +2604,7 @@ def _merged_public_staff_rows(*, refresh_remote: bool = True) -> tuple[list, str
     for item in remote_rows:
         if not _as_enabled(item.get('enabled', True)):
             continue
-        key = item.get('id') or item.get('username')
+        key = _staff_identity_key(item)
         if not key:
             continue
         local_item = merged.get(key) or {}
@@ -2030,6 +2620,10 @@ def _merged_public_staff_rows(*, refresh_remote: bool = True) -> tuple[list, str
             'facebook_cookies': cookies,
             'cookie': primary_cookie,
             'facebook_user_id': _extract_cookie_user(primary_cookie),
+            'managed_groups': _merge_managed_groups(
+                local_item.get('managed_groups'),
+                item.get('managed_groups'),
+            ),
         }
 
     current = _current_staff()
@@ -2108,7 +2702,7 @@ def _current_staff_id() -> str:
 
 
 def _is_admin() -> bool:
-    return _current_staff().get('role') == 'admin'
+    return str(_current_staff().get('role') or '').strip().lower() == 'admin'
 
 
 def _public_current_staff() -> dict:
@@ -2215,7 +2809,7 @@ def _clean_managed_channel(body: dict, current: dict | None = None) -> dict:
     note = str(body.get('note', current.get('note', '')) or '').strip()[:500]
     if not target_id:
         target_id = _extract_target_id_from_link(link)
-    return {
+    cleaned = {
         'platform': platform,
         'channel_name': channel_name,
         'channel_type': channel_type,
@@ -2223,6 +2817,12 @@ def _clean_managed_channel(body: dict, current: dict | None = None) -> dict:
         'target_id': target_id,
         'note': note,
     }
+    return cleaned
+
+
+def _managed_channel_db_row(row: dict) -> dict:
+    allowed = {'id', 'platform', 'channel_name', 'channel_type', 'link', 'target_id', 'note', 'created_at', 'updated_at'}
+    return {key: row[key] for key in allowed if key in row}
 
 
 def _facebook_channel_validation_error(row: dict) -> str:
@@ -2262,7 +2862,11 @@ def _resolve_facebook_group_channel(row: dict) -> dict:
         next_row['channel_name'] = str(resolved.get('name') or '').strip()[:160]
     if USE_SUPABASE and next_row.get('id'):
         try:
-            sb.update_managed_channel(next_row['id'], next_row, SUPABASE_CHANNEL_TABLE)
+            sb.update_managed_channel(
+                next_row['id'],
+                _managed_channel_db_row(next_row),
+                SUPABASE_CHANNEL_TABLE,
+            )
         except Exception as e:
             print(f'[supabase] update resolved managed channel failed: {e}')
     return next_row
@@ -2306,7 +2910,12 @@ def _find_duplicate_managed_channel(row: dict, exclude_id: str = '') -> dict:
     return {}
 
 
-def _public_managed_channel(row: dict) -> dict:
+def _public_managed_channel(row: dict, staff_rows: list | None = None) -> dict:
+    stored_ids = _channel_assigned_staff_ids(row)
+    if stored_ids:
+        assigned = _staff_display_entries(stored_ids, staff_rows)
+    else:
+        assigned = _channel_assigned_staff_public(row, staff_rows)
     return {
         'id': row.get('id', ''),
         'platform': row.get('platform', ''),
@@ -2315,16 +2924,304 @@ def _public_managed_channel(row: dict) -> dict:
         'link': row.get('link', ''),
         'target_id': row.get('target_id', ''),
         'note': row.get('note', ''),
+        'assigned_staff_ids': [item.get('id') for item in assigned if item.get('id')],
+        'assigned_staff': assigned,
         'created_at': row.get('created_at', ''),
         'updated_at': row.get('updated_at', ''),
     }
 
 
+def _managed_group_from_channel(row: dict) -> dict:
+    return {
+        'id': str(row.get('target_id') or '').strip(),
+        'name': str(row.get('channel_name') or '').strip(),
+        'platform': str(row.get('platform') or '').strip(),
+        'channel_type': str(row.get('channel_type') or '').strip(),
+    }
+
+
+def _managed_group_matches(left: dict, right: dict) -> bool:
+    left_id = str(left.get('id') or '').strip()
+    right_id = str(right.get('id') or '').strip()
+    if left_id and right_id and left_id == right_id:
+        left_platform = str(left.get('platform') or '').strip().lower()
+        right_platform = str(right.get('platform') or '').strip().lower()
+        if left_platform and right_platform and left_platform != right_platform:
+            return False
+        return True
+    left_name = str(left.get('name') or '').strip().lower()
+    right_name = str(right.get('name') or '').strip().lower()
+    if not left_name or left_name != right_name:
+        return False
+    left_platform = str(left.get('platform') or '').strip().lower()
+    right_platform = str(right.get('platform') or '').strip().lower()
+    left_type = _channel_type_bucket(left.get('channel_type') or left.get('type'))
+    right_type = _channel_type_bucket(right.get('channel_type') or right.get('type'))
+    if left_platform and right_platform and left_platform != right_platform:
+        return False
+    if left_type and right_type and left_type != right_type:
+        return False
+    return True
+
+
+_staff_assignment_cache: dict = {'rows': None, 'at': 0.0}
+
+
+def _all_staff_rows_for_assignment(*, refresh: bool = False) -> list[dict]:
+    global _staff_assignment_cache
+    now = time_module.monotonic()
+    cached_rows = _staff_assignment_cache.get('rows')
+    if (
+        not refresh
+        and cached_rows is not None
+        and now - float(_staff_assignment_cache.get('at') or 0) < _STAFF_LIST_CACHE_TTL
+    ):
+        return list(cached_rows)
+    merged: dict[str, dict] = {}
+    for item in _staff_accounts():
+        if not _as_enabled(item.get('enabled', True)):
+            continue
+        key = _staff_identity_key(item)
+        if key:
+            merged[key] = dict(item)
+    if USE_SUPABASE:
+        try:
+            for row in sb.list_staff_users(SUPABASE_STAFF_TABLE):
+                norm = _normalize_supabase_staff(row)
+                if not _as_enabled(norm.get('enabled', True)):
+                    continue
+                key = _staff_identity_key(norm)
+                if not key:
+                    continue
+                local_item = merged.get(key, {})
+                merged[key] = {
+                    **local_item,
+                    **norm,
+                    'managed_groups': _merge_managed_groups(
+                        local_item.get('managed_groups'),
+                        norm.get('managed_groups'),
+                    ),
+                }
+        except Exception:
+            pass
+    rows = list(merged.values())
+    _staff_assignment_cache = {'rows': rows, 'at': now}
+    return rows
+
+
+def _persist_staff_managed_groups(staff_id: str, groups: list[dict], hint: dict | None = None) -> str:
+    staff_id = str(staff_id or '').strip()
+    if not staff_id:
+        return ''
+    hint = hint or {}
+    local_target = _find_local_staff_account(staff_id, hint)
+    canonical_id = str((local_target or {}).get('id') or staff_id).strip()
+    normalized = _normalize_staff_managed_groups(groups)
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    if local_target:
+        local_target['managed_groups'] = normalized
+        local_target['updated_at'] = now
+    supabase_warning = ''
+    if USE_SUPABASE:
+        payload = {'managed_groups': normalized, 'updated_at': now}
+        try:
+            _, dropped = sb.update_staff_user_by_id(canonical_id, payload, SUPABASE_STAFF_TABLE)
+            if dropped and 'managed_groups' in dropped:
+                supabase_warning = _supabase_staff_write_warning(dropped)
+            username = str((local_target or hint).get('username') or '').strip().lower()
+            if username and (dropped or supabase_warning):
+                _, dropped_user = sb.update_staff_user(username, payload, SUPABASE_STAFF_TABLE)
+                if dropped_user and 'managed_groups' in dropped_user:
+                    supabase_warning = _supabase_staff_write_warning(dropped_user)
+                elif not dropped_user:
+                    supabase_warning = ''
+        except Exception as e:
+            err = str(e)
+            if sb.is_missing_column_error(err) and 'managed_groups' in err:
+                supabase_warning = 'Supabase thiếu cột managed_groups — chạy supabase_staff_managed_groups_patch.sql'
+            else:
+                supabase_warning = f'Không lưu phân công nhân sự lên Supabase: {err}'
+    current_staff_id = _current_staff_id()
+    if canonical_id == current_staff_id or staff_id == current_staff_id:
+        current = _current_staff()
+        if current:
+            current['managed_groups'] = normalized
+            if session.get('staff_cache_token'):
+                token = session.get('staff_cache_token')
+                if token in _session_staff_cache:
+                    cached = dict(_session_staff_cache[token])
+                    cached['managed_groups'] = normalized
+                    _session_staff_cache[token] = cached
+    cache_row = dict(local_target or hint)
+    cache_row['id'] = canonical_id
+    cache_row['managed_groups'] = normalized
+    cache_row['updated_at'] = now
+    _upsert_staff_list_cache_row(cache_row)
+    _save_staff_cookies()
+    global _staff_assignment_cache
+    _staff_assignment_cache = {'rows': None, 'at': 0.0}
+    _invalidate_staff_list_cache()
+    return supabase_warning
+
+
+def _sync_channel_staff_assignments(channel_row: dict, assigned_staff_ids) -> str:
+    if not _is_admin():
+        return ''
+    group_entry = _managed_group_from_channel(channel_row)
+    if not group_entry.get('id') and not group_entry.get('name'):
+        return ''
+    wanted = {str(item or '').strip() for item in (assigned_staff_ids or []) if str(item or '').strip()}
+    wanted_keys = _staff_wanted_keys(wanted)
+    channel_id = str(channel_row.get('id') or '').strip()
+    previous_ids = _channel_assigned_staff_ids(channel_row)
+    previous_keys = _staff_wanted_keys(previous_ids)
+    affected_keys = wanted_keys | previous_keys
+    canonical_wanted = []
+    seen_ids: set[str] = set()
+    for raw_id in wanted:
+        cid = _canonical_staff_id(raw_id)
+        if cid and cid not in seen_ids:
+            seen_ids.add(cid)
+            canonical_wanted.append(cid)
+    _set_channel_assigned_staff_ids(channel_id, canonical_wanted)
+    channel_row['assigned_staff_ids'] = canonical_wanted
+    changed = bool(previous_ids != canonical_wanted)
+    warnings: list[str] = []
+    for staff_row in _all_staff_rows_for_assignment(refresh=True):
+        if not _staff_row_in_wanted(staff_row, affected_keys):
+            continue
+        staff_id = str(staff_row.get('id') or '').strip()
+        if not staff_id:
+            continue
+        should_have = _staff_row_in_wanted(staff_row, wanted_keys)
+        baseline = _merge_managed_groups(
+            _staff_managed_groups_snapshot(staff_id, staff_row),
+            _groups_from_other_assigned_channels(staff_id, exclude_channel_id=channel_id),
+        )
+        if should_have:
+            next_groups = _merge_managed_groups(baseline, [group_entry])
+        else:
+            next_groups = [
+                item for item in baseline
+                if not _managed_group_matches(item, group_entry)
+            ]
+        if _managed_groups_signature(next_groups) == _managed_groups_signature(baseline):
+            continue
+        warn = _persist_staff_managed_groups(staff_id, next_groups, staff_row)
+        if warn:
+            warnings.append(warn)
+        changed = True
+    if warnings:
+        return warnings[0]
+    return 'Đã cập nhật phân công nhân sự' if changed else ''
+
+
+def _remove_channel_from_all_staff(channel_row: dict) -> None:
+    group_entry = _managed_group_from_channel(channel_row)
+    if not group_entry.get('id') and not group_entry.get('name'):
+        return
+    for staff_row in _all_staff_rows_for_assignment():
+        staff_id = str(staff_row.get('id') or '').strip()
+        if not staff_id:
+            continue
+        groups = _normalize_staff_managed_groups(staff_row.get('managed_groups'))
+        next_groups = [item for item in groups if not _managed_group_matches(item, group_entry)]
+        if len(next_groups) != len(groups):
+            _persist_staff_managed_groups(staff_id, next_groups, staff_row)
+
+
+def _channel_assigned_staff_public(channel_row: dict, staff_rows: list | None = None) -> list[dict]:
+    group_entry = _managed_group_from_channel(channel_row)
+    if not group_entry.get('id') and not group_entry.get('name'):
+        return []
+    source_rows = staff_rows if staff_rows is not None else _all_staff_rows_for_assignment()
+    rows = []
+    for staff_row in source_rows:
+        groups = _normalize_staff_managed_groups(staff_row.get('managed_groups'))
+        if any(_managed_group_matches(item, group_entry) for item in groups):
+            rows.append({
+                'id': staff_row.get('id', ''),
+                'name': staff_row.get('name', ''),
+                'username': staff_row.get('username', ''),
+                'role': staff_row.get('role', 'staff'),
+            })
+    return rows
+
+
+def _staff_can_see_channel(channel_row: dict, allowed_groups: list[dict]) -> bool:
+    if not allowed_groups:
+        return False
+    group_entry = _managed_group_from_channel(channel_row)
+    return any(_managed_group_matches(item, group_entry) for item in allowed_groups)
+
+
+def _filter_managed_channels_for_staff(rows: list[dict]) -> list[dict]:
+    if _is_admin():
+        return rows
+    staff = _current_staff()
+    if not staff:
+        return []
+    allowed = _current_staff_managed_groups()
+    return [row for row in rows if _staff_can_see_channel(row, allowed)]
+
+
+def _normalize_assigned_staff_ids(raw) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            raw = [part.strip() for part in text.split(',') if part.strip()]
+    if not isinstance(raw, list):
+        return []
+    return [str(item or '').strip() for item in raw if str(item or '').strip()]
+
+
 def _managed_channel_store_error(exc: Exception) -> str:
     detail = str(exc)
-    if 'managed_channels' in detail and ('PGRST205' in detail or 'schema cache' in detail or 'Could not find the table' in detail):
+    if 'assigned_staff_ids' in detail and ('PGRST204' in detail or 'column' in detail.lower()):
+        return 'Lỗi đồng bộ nhân sự kênh. Hãy redeploy backend mới nhất rồi thử lại.'
+    if 'PGRST204' in detail and 'column' in detail.lower():
+        return detail
+    if 'managed_channels' in detail and ('PGRST205' in detail or 'Could not find the table' in detail):
         return 'Supabase chưa có bảng managed_channels. Hãy chạy supabase_managed_channels_patch.sql trong SQL Editor rồi thử lại.'
+    if 'schema cache' in detail.lower() and 'Could not find the table' in detail:
+        return 'Supabase chưa cập nhật schema. Chạy NOTIFY pgrst, \'reload schema\'; trong SQL Editor rồi thử lại.'
     return detail
+
+
+def _append_warning(current: str, extra: str) -> str:
+    extra = str(extra or '').strip()
+    if not extra:
+        return str(current or '').strip()
+    current = str(current or '').strip()
+    return f'{current} · {extra}' if current else extra
+
+
+def _sync_managed_channel_supabase(row: dict, *, channel_id: str = '') -> tuple[dict, str]:
+    """Ghi managed_channels lên Supabase; luôn strip field không thuộc bảng."""
+    if not USE_SUPABASE:
+        return row, ''
+    cid = str(channel_id or row.get('id') or '').strip()
+    db_row = _managed_channel_db_row({**row, **({'id': cid} if cid else {})})
+    try:
+        if cid:
+            try:
+                remote = sb.update_managed_channel(cid, db_row, SUPABASE_CHANNEL_TABLE)
+            except Exception as update_err:
+                remote = sb.upsert_managed_channel({**db_row, 'id': cid}, SUPABASE_CHANNEL_TABLE)
+                if not remote:
+                    raise update_err
+        else:
+            remote = sb.upsert_managed_channel(db_row, SUPABASE_CHANNEL_TABLE)
+        return ({**row, **remote} if remote else row), ''
+    except Exception as e:
+        print(f'[supabase] sync managed channel failed: {e}')
+        return row, _managed_channel_store_error(e)
 
 
 def _save_business_profile():
@@ -3880,7 +4777,7 @@ def _require_auth_for_api():
         return None
     if request.method == 'GET' and request.path.rstrip('/') == '/api/groups/resolve':
         return None
-    public_endpoints = {'auth_status', 'auth_login', 'auth_setup', 'api_resolve_group'}
+    public_endpoints = {'auth_status', 'auth_login', 'auth_setup', 'api_resolve_group', 'api_health'}
     if request.path.startswith('/api/') and request.endpoint not in public_endpoints:
         if _setup_required():
             return jsonify({'ok': False, 'error': 'Cần setup tài khoản đầu tiên', 'setup_required': True}), 401
@@ -3951,6 +4848,19 @@ def index():
         return render_template('index.html')
     from flask import redirect
     return redirect(WEB_UI_URL)
+
+
+@app.route('/api/health')
+def api_health():
+    return jsonify({
+        'ok': True,
+        'features': {
+            'staff_cookie_optional': True,
+            'groups_resolve_public': True,
+            'staff_list_refresh_v2': True,
+            'channel_db_row_v3': True,
+        },
+    })
 
 
 @app.route('/api/auth/status')
@@ -4134,6 +5044,7 @@ def api_posts():
     global _seen_ids
     limit = request.args.get('limit', 10, type=int)
     group_ids = [g.strip() for g in request.args.get('groups', DEFAULT_GROUP).split(',') if g.strip()]
+    group_ids = _filter_group_ids_for_staff(group_ids)
     page_ids = [p.strip() for p in request.args.get('pages', '').split(',') if p.strip()]
     debug = request.args.get('debug', '').lower() in ('1', 'true', 'yes')
     is_first = len(_seen_ids) == 0
@@ -5699,6 +6610,7 @@ def _membership_for_gid(gid: str):
 def api_groups_membership():
     ids_raw = str(request.args.get('ids') or '').strip()
     ids = [item.strip() for item in ids_raw.split(',') if item.strip()]
+    ids = _filter_group_ids_for_staff(ids)
     if not ids:
         return jsonify({'ok': True, 'membership': {}})
     try:
@@ -5795,23 +6707,25 @@ def _sync_group_from_channel(row: dict) -> None:
             print(f'[supabase] upsert_group from managed channel failed: {e}')
 
 
-def _facebook_page_channels() -> list[dict]:
-    rows = []
-    for row in _managed_channels:
+def _facebook_page_channels(rows: list | None = None) -> list[dict]:
+    source = rows if rows is not None else _managed_channels
+    out = []
+    for row in source:
         platform = str(row.get('platform') or '').strip().lower()
         channel_type = str(row.get('channel_type') or '').strip().lower()
         target_id = str(row.get('target_id') or '').strip()
         if platform == 'facebook' and channel_type in ('page', 'fanpage', 'trang') and target_id:
-            rows.append({'id': target_id, 'name': str(row.get('channel_name') or '').strip()})
-    return rows
+            out.append({'id': target_id, 'name': str(row.get('channel_name') or '').strip()})
+    return out
 
 
-def _facebook_group_channels() -> list[dict]:
+def _facebook_group_channels(rows: list | None = None) -> list[dict]:
     global _managed_channels
-    rows = []
+    source = rows if rows is not None else _managed_channels
+    out = []
     changed = False
     next_channels = []
-    for row in _managed_channels:
+    for row in source:
         original_target = str(row.get('target_id') or '').strip()
         row = _resolve_facebook_group_channel(row)
         if str(row.get('target_id') or '').strip() != original_target:
@@ -5821,11 +6735,11 @@ def _facebook_group_channels() -> list[dict]:
         channel_type = str(row.get('channel_type') or '').strip().lower()
         target_id = str(row.get('target_id') or '').strip()
         if platform == 'facebook' and channel_type in ('nhóm', 'nhom', 'group') and target_id:
-            rows.append({'id': target_id, 'name': str(row.get('channel_name') or '').strip()})
-    if changed:
+            out.append({'id': target_id, 'name': str(row.get('channel_name') or '').strip()})
+    if rows is None and changed:
         _managed_channels = next_channels
         _save_managed_channels()
-    return rows
+    return out
 
 
 def _merged_facebook_groups() -> list[dict]:
@@ -5843,32 +6757,45 @@ def _merged_facebook_groups() -> list[dict]:
     return list(by_id.values())
 
 
-def _refresh_managed_channels_from_supabase() -> None:
-    global _managed_channels
+def _refresh_managed_channels_from_supabase(*, force: bool = False) -> None:
+    global _managed_channels, _managed_channels_remote_at
     if not USE_SUPABASE:
+        return
+    now = time_module.monotonic()
+    if not force and _managed_channels_remote_at and now - _managed_channels_remote_at < _MANAGED_CHANNELS_REFRESH_TTL:
         return
     try:
         rows = sb.list_managed_channels(SUPABASE_CHANNEL_TABLE)
         if isinstance(rows, list):
-            _managed_channels = rows
+            _managed_channels = _merge_managed_channels_remote(rows, _managed_channels)
+            _managed_channels_remote_at = now
+            _save_managed_channels()
     except Exception as e:
         print(f'[supabase] refresh managed_channels failed: {e}')
+
+
+def _visible_managed_channels() -> list[dict]:
+    _backfill_channel_assigned_staff_ids()
+    visible = _filter_managed_channels_for_staff(_managed_channels)
+    staff_rows = _all_staff_rows_for_assignment()
+    rows = [_public_managed_channel(item, staff_rows) for item in visible]
+    rows.sort(key=lambda item: item.get('created_at') or item.get('updated_at') or '', reverse=True)
+    return rows
 
 
 @app.route('/api/channels', methods=['GET'])
 def channels_get():
     _refresh_managed_channels_from_supabase()
-    rows = [_public_managed_channel(item) for item in _managed_channels]
-    rows.sort(key=lambda item: item.get('created_at') or item.get('updated_at') or '', reverse=True)
-    return jsonify({'ok': True, 'channels': rows})
+    return jsonify({'ok': True, 'channels': _visible_managed_channels(), 'can_assign_staff': _is_admin()})
 
 
 @app.route('/api/channels/publish-targets', methods=['GET'])
 def channels_publish_targets():
     """Nhóm/Page đăng bài — chỉ lấy từ bảng managed_channels (Supabase)."""
     _refresh_managed_channels_from_supabase()
-    groups = _facebook_group_channels()
-    pages = _facebook_page_channels()
+    visible = _filter_managed_channels_for_staff(_managed_channels)
+    groups = _facebook_group_channels(visible)
+    pages = _facebook_page_channels(visible)
     return jsonify({
         'ok': True,
         'groups': groups,
@@ -5976,15 +6903,56 @@ def channels_create():
         'updated_at': now,
     }
     if USE_SUPABASE:
-        try:
-            row = {**row, **sb.upsert_managed_channel(row, SUPABASE_CHANNEL_TABLE)}
-        except Exception as e:
-            return jsonify({'ok': False, 'error': f'Không lưu được kênh lên Supabase: {_managed_channel_store_error(e)}'}), 500
+        row, supabase_warning = _sync_managed_channel_supabase(row)
+    else:
+        supabase_warning = ''
     _managed_channels = [item for item in _managed_channels if item.get('id') != row['id']]
     _managed_channels.append(row)
     _save_managed_channels()
     _sync_group_from_channel(row)
-    return jsonify({'ok': True, 'channel': _public_managed_channel(row), 'channels': [_public_managed_channel(item) for item in _managed_channels]})
+    assign_warning = supabase_warning
+    if 'assigned_staff_ids' in body:
+        if not _is_admin():
+            return jsonify({'ok': False, 'error': 'Chỉ admin được phân công nhân sự cho kênh'}), 403
+        assign_warning = _append_warning(assign_warning, _assign_staff_to_channel(row, body.get('assigned_staff_ids'), merge=False))
+    return jsonify({
+        'ok': True,
+        'channel': _public_managed_channel(row),
+        'channels': _visible_managed_channels(),
+        'warning': assign_warning,
+    })
+
+
+@app.route('/api/channels/bulk-assign-staff', methods=['POST'])
+def channels_bulk_assign_staff():
+    if not _is_admin():
+        return jsonify({'ok': False, 'error': 'Chỉ admin được phân công nhân sự cho kênh'}), 403
+    body = request.get_json(silent=True) or {}
+    channel_ids = body.get('channel_ids') or []
+    staff_ids = body.get('staff_ids') or []
+    if not isinstance(channel_ids, list) or not channel_ids:
+        return jsonify({'ok': False, 'error': 'Chọn ít nhất một kênh'}), 400
+    if not isinstance(staff_ids, list) or not staff_ids:
+        return jsonify({'ok': False, 'error': 'Chọn ít nhất một nhân sự'}), 400
+    updated = 0
+    warnings: list[str] = []
+    for raw_id in channel_ids:
+        channel_id = str(raw_id or '').strip()
+        if not channel_id:
+            continue
+        row = next((item for item in _managed_channels if str(item.get('id') or '') == channel_id), None)
+        if not row:
+            continue
+        warn = _assign_staff_to_channel(row, staff_ids, merge=True)
+        if warn:
+            warnings.append(warn)
+        updated += 1
+    if updated <= 0:
+        return jsonify({'ok': False, 'error': 'Không gán được kênh nào'}), 404
+    payload = {'ok': True, 'updated': updated, 'channels': _visible_managed_channels()}
+    if warnings:
+        payload['warning'] = warnings[0]
+    return jsonify(payload)
 
 
 @app.route('/api/channels/<channel_id>', methods=['PUT'])
@@ -6017,29 +6985,41 @@ def channels_update(channel_id):
             'duplicate': _public_managed_channel(duplicated),
         }), 409
     if USE_SUPABASE:
-        try:
-            row = {**row, **sb.update_managed_channel(channel_id, row, SUPABASE_CHANNEL_TABLE)}
-        except Exception as e:
-            return jsonify({'ok': False, 'error': f'Không cập nhật được kênh trên Supabase: {_managed_channel_store_error(e)}'}), 500
+        row, supabase_warning = _sync_managed_channel_supabase(row, channel_id=channel_id)
+    else:
+        supabase_warning = ''
     _managed_channels = [row if item.get('id') == channel_id else item for item in _managed_channels]
     if not any(item.get('id') == channel_id for item in _managed_channels):
         _managed_channels.append(row)
     _save_managed_channels()
     _sync_group_from_channel(row)
-    return jsonify({'ok': True, 'channel': _public_managed_channel(row), 'channels': [_public_managed_channel(item) for item in _managed_channels]})
+    assign_warning = supabase_warning
+    if 'assigned_staff_ids' in body:
+        if not _is_admin():
+            return jsonify({'ok': False, 'error': 'Chỉ admin được phân công nhân sự cho kênh'}), 403
+        assign_warning = _append_warning(assign_warning, _assign_staff_to_channel(row, body.get('assigned_staff_ids'), merge=False))
+    return jsonify({
+        'ok': True,
+        'channel': _public_managed_channel(row),
+        'channels': _visible_managed_channels(),
+        'warning': assign_warning,
+    })
 
 
 @app.route('/api/channels/<channel_id>', methods=['DELETE'])
 def channels_delete(channel_id):
     global _managed_channels
+    target = next((item for item in _managed_channels if item.get('id') == channel_id), {})
     if USE_SUPABASE:
         try:
             sb.delete_managed_channel(channel_id, SUPABASE_CHANNEL_TABLE)
         except Exception as e:
             return jsonify({'ok': False, 'error': f'Không xoá được kênh trên Supabase: {_managed_channel_store_error(e)}'}), 500
+    if target:
+        _remove_channel_from_all_staff(target)
     _managed_channels = [item for item in _managed_channels if item.get('id') != channel_id]
     _save_managed_channels()
-    return jsonify({'ok': True, 'channels': [_public_managed_channel(item) for item in _managed_channels]})
+    return jsonify({'ok': True, 'channels': _visible_managed_channels()})
 
 
 @app.route('/api/telegram/chatids', methods=['GET'])
@@ -6078,9 +7058,10 @@ def tg_remove(chat_id):
 
 @app.route('/api/groups', methods=['GET'])
 def groups_get():
-    """Danh sách nhóm Facebook — chỉ từ bảng managed_channels (/kenh)."""
+    """Danh sách nhóm Facebook — chỉ từ bảng managed_channels (/kenh), lọc theo nhân sự."""
     _refresh_managed_channels_from_supabase()
-    return jsonify(_facebook_group_channels())
+    visible = _filter_managed_channels_for_staff(_managed_channels)
+    return jsonify(_facebook_group_channels(visible))
 
 
 @app.route('/api/groups', methods=['POST'])
@@ -6146,8 +7127,11 @@ def groups_remove(gid):
 @app.route('/api/staff-cookies', methods=['GET'])
 def staff_cookies_get():
     warning = ''
+    refresh = str(request.args.get('refresh') or '').strip().lower() in ('1', 'true', 'yes')
+    if refresh:
+        _invalidate_staff_list_cache()
     if _is_admin():
-        staff_rows, warning = _merged_public_staff_rows()
+        staff_rows, warning = _merged_public_staff_rows(refresh_remote=refresh)
     else:
         staff_rows = [_public_current_staff()] if _current_staff() else []
     payload = {
@@ -6177,7 +7161,7 @@ def facebook_cookie_refresh_names():
     staff = _current_staff()
     if not staff:
         return jsonify({'ok': False, 'error': 'Chưa đăng nhập'}), 401
-    context = _facebook_cookie_context_payload(staff, resolve_name=True)
+    context = _facebook_cookie_context_payload(staff, resolve_name=True, force_refresh=True)
     active_name = context.get('active_facebook_name') or ''
     if active_name:
         context['message'] = f'Đã cập nhật tên Facebook: {active_name}'
@@ -6239,7 +7223,10 @@ def staff_cookies_save():
             return jsonify({'ok': False, 'error': 'Mật khẩu tối thiểu 6 ký tự'}), 400
 
         staff = _staff_cookies.setdefault('staff', [])
-        if any(item.get('username') == username for item in staff):
+        if any(
+            item.get('username') == username and _as_enabled(item.get('enabled', True))
+            for item in staff
+        ):
             return jsonify({'ok': False, 'error': 'Tài khoản đăng nhập đã tồn tại'}), 400
         existing_row = {}
         if USE_SUPABASE:
@@ -6264,6 +7251,7 @@ def staff_cookies_save():
             'enabled': True,
         }
         write_warning = ''
+        supabase_saved = not USE_SUPABASE
         if USE_SUPABASE:
             try:
                 if existing_row and not _as_enabled(existing_row.get('enabled', True)):
@@ -6272,6 +7260,7 @@ def staff_cookies_save():
                     saved_id = remote_row['id']
                 else:
                     _, dropped = sb.insert_staff_user(remote_row, SUPABASE_STAFF_TABLE)
+                supabase_saved = True
                 write_warning = _supabase_staff_write_warning(dropped)
             except Exception as e:
                 err = str(e)
@@ -6285,7 +7274,16 @@ def staff_cookies_save():
                         missing.append('active_cookie_id')
                     write_warning = _supabase_staff_write_warning(missing or ['facebook_cookies'])
                 else:
-                    write_warning = f'Không lưu được nhân sự lên Supabase: {err}. Đã lưu cục bộ.'
+                    return jsonify({
+                        'ok': False,
+                        'error': f'Không lưu được nhân sự lên Supabase: {err}',
+                    }), 500
+
+        if USE_SUPABASE and not supabase_saved:
+            return jsonify({
+                'ok': False,
+                'error': 'Không lưu được nhân sự lên Supabase. Chạy patch SQL staff_users rồi thử lại.',
+            }), 500
 
         local_row = {
             'id': saved_id,
@@ -6306,9 +7304,8 @@ def staff_cookies_save():
             _staff_cookies['active_staff_id'] = saved_id
         _save_staff_cookies()
         _invalidate_facebook_cache()
-        _upsert_staff_list_cache_row(local_row)
         _schedule_staff_cookie_name_refresh(saved_id, facebook_cookies)
-        staff_rows, warning = _merged_public_staff_rows(refresh_remote=False)
+        staff_rows, warning = _staff_list_after_change()
         warnings = [part for part in [warning, write_warning, cookie_warning] if part]
         return jsonify({
             'ok': True,
@@ -6324,10 +7321,11 @@ def staff_cookies_save():
 
 @app.route('/api/staff-cookies/<staff_id>', methods=['PUT', 'PATCH'])
 def staff_cookies_update(staff_id):
-    if not _is_admin():
+    body = request.get_json() or {}
+    is_self = staff_id == _current_staff_id()
+    if not _is_admin() and not is_self:
         return jsonify({'ok': False, 'error': 'Chỉ admin được sửa nhân sự'}), 403
 
-    body = request.get_json() or {}
     staff = _staff_accounts()
     local_target = next((item for item in staff if item.get('id') == staff_id), {})
     remote_target = {}
@@ -6343,12 +7341,17 @@ def staff_cookies_update(staff_id):
     if not target:
         return jsonify({'ok': False, 'error': 'Không tìm thấy nhân sự'}), 404
 
-    name = str(body.get('name', target.get('name', '')) or '').strip()[:80]
-    username = str(body.get('username', target.get('username', '')) or '').strip().lower()[:60]
+    self_service = is_self and not _is_admin()
+    name = str(target.get('name', '') or '').strip()[:80]
+    username = str(target.get('username', '') or '').strip().lower()[:60]
     password = str(body.get('password') or '')
-    managed_groups = _normalize_staff_managed_groups(
-        body.get('managed_groups') if 'managed_groups' in body else target.get('managed_groups'),
-    )
+    managed_groups = _normalize_staff_managed_groups(target.get('managed_groups'))
+    if not self_service:
+        name = str(body.get('name', target.get('name', '')) or '').strip()[:80]
+        username = str(body.get('username', target.get('username', '')) or '').strip().lower()[:60]
+        managed_groups = _normalize_staff_managed_groups(
+            body.get('managed_groups') if 'managed_groups' in body else target.get('managed_groups'),
+        )
     incoming_cookies = body.get('facebook_cookies') if 'facebook_cookies' in body else None
     if incoming_cookies is None and body.get('cookie'):
         incoming_cookies = [{'id': 'primary', 'label': 'Cookie chính', 'cookie': body.get('cookie', '')}]
@@ -6357,22 +7360,24 @@ def staff_cookies_update(staff_id):
     facebook_cookies = _prepare_staff_facebook_cookies_for_save(facebook_cookies, fetch_names=False)
     cookie = _primary_staff_cookie({'facebook_cookies': facebook_cookies, 'cookie': target.get('cookie', '')})
 
-    if not name:
-        return jsonify({'ok': False, 'error': 'Thiếu tên nhân sự'}), 400
-    if not username:
-        return jsonify({'ok': False, 'error': 'Thiếu tài khoản đăng nhập'}), 400
+    if not self_service:
+        if not name:
+            return jsonify({'ok': False, 'error': 'Thiếu tên nhân sự'}), 400
+        if not username:
+            return jsonify({'ok': False, 'error': 'Thiếu tài khoản đăng nhập'}), 400
     if password and len(password) < 6:
         return jsonify({'ok': False, 'error': 'Mật khẩu tối thiểu 6 ký tự'}), 400
 
-    for item in staff:
-        if item.get('id') != staff_id and item.get('username') == username and _as_enabled(item.get('enabled', True)):
-            return jsonify({'ok': False, 'error': 'Tài khoản đăng nhập đã tồn tại'}), 400
-    if USE_SUPABASE:
-        existing_row, existing_error = _load_supabase_staff(username)
-        if existing_row and str(existing_row.get('id') or '') != staff_id and _as_enabled(existing_row.get('enabled', True)):
-            return jsonify({'ok': False, 'error': 'Tài khoản đăng nhập đã tồn tại trong Supabase'}), 400
-        if existing_error and 'Could not find the table' in existing_error:
-            return jsonify({'ok': False, 'error': f'Chưa có bảng {SUPABASE_STAFF_TABLE} trong Supabase'}), 500
+    if not self_service:
+        for item in staff:
+            if item.get('id') != staff_id and item.get('username') == username and _as_enabled(item.get('enabled', True)):
+                return jsonify({'ok': False, 'error': 'Tài khoản đăng nhập đã tồn tại'}), 400
+        if USE_SUPABASE:
+            existing_row, existing_error = _load_supabase_staff(username)
+            if existing_row and str(existing_row.get('id') or '') != staff_id and _as_enabled(existing_row.get('enabled', True)):
+                return jsonify({'ok': False, 'error': 'Tài khoản đăng nhập đã tồn tại trong Supabase'}), 400
+            if existing_error and 'Could not find the table' in existing_error:
+                return jsonify({'ok': False, 'error': f'Chưa có bảng {SUPABASE_STAFF_TABLE} trong Supabase'}), 500
 
     now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
     remote_row = {
@@ -6445,20 +7450,6 @@ def staff_cookies_update(staff_id):
 
     _save_staff_cookies()
     _invalidate_facebook_cache()
-    cache_row = local_target or {
-        'id': staff_id,
-        'name': name,
-        'username': username,
-        'role': target.get('role') or 'staff',
-        'managed_groups': managed_groups,
-        'facebook_cookies': facebook_cookies,
-        'cookie': cookie,
-        'facebook_user_id': _extract_cookie_user(cookie),
-        'enabled': True,
-        'created_at': target.get('created_at') or now,
-        'updated_at': now,
-    }
-    _upsert_staff_list_cache_row(cache_row)
     _schedule_staff_cookie_name_refresh(staff_id, facebook_cookies)
 
     if staff_id == _current_staff_id():
@@ -6474,13 +7465,13 @@ def staff_cookies_update(staff_id):
         refreshed_staff['facebook_user_id'] = _extract_cookie_user(cookie)
         _set_logged_in_staff(refreshed_staff)
 
-    staff_rows, warning = _merged_public_staff_rows(refresh_remote=False)
+    staff_rows, warning = _staff_list_after_change()
     warnings = [part for part in [warning, remote_warning, write_warning, cookie_warning] if part]
     return jsonify({
         'ok': True,
         'active_staff_id': _current_staff_id(),
         'staff': staff_rows,
-        'can_manage': True,
+        'can_manage': _is_admin(),
         'storage': 'supabase' if USE_SUPABASE else 'local',
         'warning': ' | '.join(warnings),
     })
@@ -6513,8 +7504,7 @@ def staff_cookies_delete(staff_id):
         pass
     _save_staff_cookies()
     _invalidate_facebook_cache()
-    _remove_staff_list_cache_row(staff_id, target.get('username', ''))
-    staff_rows, warning = _merged_public_staff_rows(refresh_remote=False)
+    staff_rows, warning = _staff_list_after_change()
     return jsonify({'ok': True, 'active_staff_id': _current_staff_id(), 'staff': staff_rows, 'can_manage': True, 'warning': warning})
 
 
@@ -6867,8 +7857,8 @@ def ai_leads_get():
             for item in items:
                 by_key[str(item.get('lead_key') or _lead_key(item))] = item
             merged[post_id] = list(by_key.values())
-        return jsonify(merged)
-    return jsonify(_leads)
+        return jsonify(_public_leads_dict(merged))
+    return jsonify(_public_leads_dict(_leads))
 
 
 @app.route('/api/ai/reply-suggestions', methods=['GET'])
@@ -7012,6 +8002,40 @@ def ai_extract_leads():
     return jsonify(payload)
 
 
+@app.route('/api/leads/bulk-delete', methods=['POST'])
+def leads_bulk_delete():
+    body = request.get_json(silent=True) or {}
+    items = body.get('items') or []
+    if not isinstance(items, list) or not items:
+        return jsonify({'ok': False, 'error': 'Không có lead nào'}), 400
+    deleted = 0
+    failed = 0
+    warnings: list[str] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            failed += 1
+            continue
+        post_id = str(raw.get('post_id') or '').strip()
+        lead_key = str(raw.get('lead_key') or '').strip()
+        if not lead_key:
+            failed += 1
+            continue
+        if not _lead_exists_anywhere(post_id, lead_key):
+            failed += 1
+            continue
+        result = _delete_single_lead(post_id, lead_key)
+        deleted += 1
+        warning = str(result.get('warning') or '').strip()
+        if warning and warning not in warnings:
+            warnings.append(warning)
+    if deleted <= 0:
+        return jsonify({'ok': False, 'error': 'Không xoá được lead nào', 'failed': failed}), 404
+    payload = {'ok': True, 'deleted': deleted, 'failed': failed}
+    if warnings:
+        payload['warning'] = '; '.join(warnings[:3])
+    return jsonify(payload)
+
+
 @app.route('/api/leads/from-comments', methods=['POST'])
 def leads_from_comments():
     source = str((request.get_json(silent=True) or {}).get('source') or request.args.get('source') or '').strip().lower()
@@ -7034,6 +8058,18 @@ def leads_from_comments():
     if final_warning:
         payload['warning'] = final_warning
     return jsonify(payload)
+
+
+@app.route('/api/leads/<lead_key>', methods=['DELETE'])
+def leads_delete(lead_key):
+    post_id = str(request.args.get('post_id') or '').strip()
+    key = str(lead_key or '').strip()
+    if not key:
+        return jsonify({'ok': False, 'error': 'Thiếu lead_key'}), 400
+    if not _lead_exists_anywhere(post_id, key):
+        return jsonify({'ok': False, 'error': 'Không tìm thấy lead'}), 404
+    result = _delete_single_lead(post_id, key)
+    return jsonify({'ok': True, **result})
 
 
 # ── Marketing Content Pipeline ─────────────────────────

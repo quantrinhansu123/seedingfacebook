@@ -1,12 +1,10 @@
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap');
-
 .manage-dashboard {
   --md-primary: #003c90;
   --md-surface: #f8fafc;
   --md-border: #e2e8f0;
   --md-gap: 8px;
   --md-pad: 10px;
-  font-family: 'Manrope', var(--font-roboto), sans-serif;
+  font-family: var(--font-manrope), var(--font-roboto), sans-serif;
   height: 100vh;
   display: flex;
   background: var(--md-surface);

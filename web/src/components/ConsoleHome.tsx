@@ -7,7 +7,6 @@ import type { ViewKey } from '@/lib/app-routes';
 const MODULE_DESCS: Partial<Record<ViewKey, string>> = {
   staff: 'Quản lý tài khoản sale và quyền thao tác.',
   channels: 'Lưu nền tảng, kênh, page, video và nhóm.',
-  comments: 'Inbox comment đa kênh, lọc tag và tách lead.',
   report: 'Xem dashboard báo cáo tổng hợp theo thời gian thực.',
   manage: 'Theo dõi bài viết, phân loại và vận hành.',
   history: 'Xem lịch sử comment và trạng thái thao tác.',

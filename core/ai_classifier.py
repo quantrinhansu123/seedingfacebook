@@ -422,6 +422,8 @@ class AIClassifier:
                     'post_id': pid,
                     'source': 'comment',
                     'name': cname,
+                    'comment_author': cname,
+                    'comment_text': ctext,
                     'phones': cphones,
                 }
                 lines.extend([
@@ -612,11 +614,15 @@ class AIClassifier:
                 continue
 
             phones = meta.get('phones') or []
+            from_comment = meta.get('source') == 'comment'
             lead = {
                 'post_id': meta['post_id'],
                 'source': meta['source'],
                 'source_id': source_id,
+                'comment_id': source_id if from_comment else '',
                 'name': meta.get('name') or str(item.get('name') or 'Ẩn danh'),
+                'comment_author': meta.get('comment_author') or (meta.get('name') if from_comment else ''),
+                'comment_text': meta.get('comment_text') or (meta.get('message') if from_comment else ''),
                 'phone': phones[0] if phones else '',
                 'phones': phones,
                 'need': need,

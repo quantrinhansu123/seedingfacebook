@@ -8,7 +8,7 @@ export function getApiBase(): string {
   return '';
 }
 
-const API_TIMEOUT_MS = 12000;
+const API_TIMEOUT_MS = 30000;
 export const AI_TIMEOUT_MS = 120000;
 export const UPLOAD_TIMEOUT_MS = 120000;
 export const PUBLISH_TIMEOUT_MS = 180000;

@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
-import { Roboto } from 'next/font/google';
+import { Hanken_Grotesk, Inter, JetBrains_Mono, Manrope, Roboto } from 'next/font/google';
+import '@fortawesome/fontawesome-free/css/all.min.css';
+import 'material-symbols/outlined.css';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -18,6 +20,34 @@ const roboto = Roboto({
   variable: '--font-roboto',
 });
 
+const inter = Inter({
+  subsets: ['latin', 'vietnamese'],
+  weight: ['400', '500', '600', '700'],
+  display: 'swap',
+  variable: '--font-inter',
+});
+
+const hankenGrotesk = Hanken_Grotesk({
+  subsets: ['latin', 'vietnamese'],
+  weight: ['600', '700'],
+  display: 'swap',
+  variable: '--font-hanken-grotesk',
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin', 'vietnamese'],
+  weight: ['400'],
+  display: 'swap',
+  variable: '--font-jetbrains-mono',
+});
+
+const manrope = Manrope({
+  subsets: ['latin', 'vietnamese'],
+  weight: ['400', '500', '600', '700'],
+  display: 'swap',
+  variable: '--font-manrope',
+});
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -25,7 +55,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="vi">
-      <body className={roboto.variable}>{children}</body>
+      <body className={`${roboto.variable} ${inter.variable} ${hankenGrotesk.variable} ${jetbrainsMono.variable} ${manrope.variable}`}>{children}</body>
     </html>
   );
 }

@@ -26,7 +26,7 @@ type Props = {
   showStaffManager?: boolean;
   staffTitle?: string;
   staffKicker?: string;
-  onSaveStaff: (payload: StaffPayload, staffId?: string) => Promise<boolean>;
+  onSaveStaff: (payload: StaffPayload, staffId?: string) => Promise<{ ok: boolean; error?: string }>;
   onDeleteStaff: (staffId: string) => Promise<void>;
   onStaffModalOpen?: () => void;
 };

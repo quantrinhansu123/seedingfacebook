@@ -22,6 +22,22 @@ import './manage-dashboard.css';
 
 type JoinPrompt = { id: string; name: string };
 
+function isInvalidFacebookDisplayName(name?: string): boolean {
+  const text = String(name || '').trim().toLowerCase();
+  if (!text) return true;
+  if (text.includes('đăng nhập') && text.includes('facebook')) return true;
+  if (text.includes('log in') && text.includes('facebook')) return true;
+  return text === 'facebook' || text === 'login' || text === 'log in';
+}
+
+function pickFacebookDisplayName(...candidates: Array<string | undefined>): string {
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (value && !isInvalidFacebookDisplayName(value)) return value;
+  }
+  return '';
+}
+
 function buildFacebookCookiesFromStaff(staff?: StaffAccount | null): StaffFacebookCookie[] {
   if (!staff) return [];
   const rows = staff.facebook_cookies || [];
@@ -73,12 +89,10 @@ function renderFacebookAccountBar(props: {
   const resolvedActiveId = activeId || cookies.find((item) => item.active)?.id || cookies[0]?.id || '';
   const activeCookie = cookies.find((item) => item.id === resolvedActiveId) || cookies[0];
   const displayName =
-    activeCookie?.facebook_name ||
-    activeName ||
-    activeCookie?.label ||
+    pickFacebookDisplayName(activeCookie?.facebook_name, activeName, activeCookie?.label) ||
     (activeUserId || activeCookie?.facebook_user_id ? `Facebook ID ${activeUserId || activeCookie?.facebook_user_id}` : 'Chưa có cookie Facebook');
   const displayUserId = activeCookie?.facebook_user_id || activeUserId || '';
-  const showError = error && !displayName;
+  const showError = error || (isInvalidFacebookDisplayName(activeCookie?.facebook_name) && isInvalidFacebookDisplayName(activeName));
   return (
     <div className={`md-fb-account-bar${compact ? ' compact' : ''}`}>
       <div className="md-fb-cookie-current">
@@ -86,8 +100,8 @@ function renderFacebookAccountBar(props: {
         <div className="md-fb-cookie-current-body">
           <p className="md-fb-cookie-label">Tài khoản Facebook đang dùng</p>
           <p className="md-fb-cookie-name">{loading && !displayName ? 'Đang đọc tên tài khoản...' : displayName}</p>
-          {displayUserId && displayName ? <small className="md-fb-cookie-id">ID: {displayUserId}</small> : null}
-          {showError ? <small className="md-fb-cookie-error">{error}</small> : null}
+          {displayUserId ? <small className="md-fb-cookie-id">ID: {displayUserId}</small> : null}
+          {showError ? <small className="md-fb-cookie-error">{error || 'Cookie hết hạn hoặc chưa đọc được tên — bấm «Làm mới tên» hoặc lấy cookie mới từ Chrome.'}</small> : null}
           {cookies.length ? (
             <div className="md-fb-cookie-list" role="tablist" aria-label="Chọn cookie Facebook">
               {cookies.map((item, index) => {
@@ -137,6 +151,7 @@ type PostFetchItem = {
 export type ManageDashboardProps = {
   staffName?: string;
   staffRole?: string;
+  staffGroupsScoped?: boolean;
   currentStaff?: StaffAccount | null;
   facebookCookieContext?: FacebookCookieContext | null;
   facebookCookieBusy?: boolean;
@@ -149,6 +164,8 @@ export type ManageDashboardProps = {
   onOpenChannels: () => void;
   groups: string[];
   groupNames: Record<string, string>;
+  scanSelectedGroups: Record<string, boolean>;
+  onScanSelectedGroupsChange: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   facebookPageChannels: ManagedChannel[];
   facebookGroupChannels: ManagedChannel[];
   tiktokManagedChannels: ManagedChannel[];
@@ -217,6 +234,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
   const {
     staffName,
     staffRole,
+    staffGroupsScoped = false,
     currentStaff,
     facebookCookieContext,
     facebookCookieBusy = false,
@@ -229,6 +247,8 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
     onOpenChannels,
     groups,
     groupNames,
+    scanSelectedGroups,
+    onScanSelectedGroupsChange,
     facebookPageChannels,
     facebookGroupChannels,
     tiktokManagedChannels,
@@ -298,25 +318,24 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
   const [errorDismissed, setErrorDismissed] = useState(false);
   const [tgOpen, setTgOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
-  const [selectedGroups, setSelectedGroups] = useState<Record<string, boolean>>({});
 
-  const selectedGroupIds = groups.filter((gid) => selectedGroups[gid]);
+  const selectedGroupIds = groups.filter((gid) => scanSelectedGroups[gid]);
   const checkingSet = new Set(membershipCheckingIds);
 
   function toggleGroupSelected(gid: string, checked: boolean) {
-    setSelectedGroups((prev) => ({ ...prev, [gid]: checked }));
+    onScanSelectedGroupsChange((prev) => ({ ...prev, [gid]: checked }));
   }
 
   function toggleSelectAllGroups(checked: boolean) {
     if (!checked) {
-      setSelectedGroups({});
+      onScanSelectedGroupsChange({});
       return;
     }
     const next: Record<string, boolean> = {};
     groups.forEach((gid) => {
       next[gid] = true;
     });
-    setSelectedGroups(next);
+    onScanSelectedGroupsChange(next);
   }
 
   function checkSelectedMembership() {
@@ -345,11 +364,11 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
   const fbCookies = facebookCookieContext?.cookies?.length
     ? facebookCookieContext.cookies
     : buildFacebookCookiesFromStaff(currentStaff);
-  const activeFbName =
-    facebookCookieContext?.active_facebook_name ||
-    fbCookies.find((item) => item.active)?.facebook_name ||
-    currentStaff?.active_facebook_name ||
-    '';
+  const activeFbName = pickFacebookDisplayName(
+    facebookCookieContext?.active_facebook_name,
+    fbCookies.find((item) => item.active)?.facebook_name,
+    currentStaff?.active_facebook_name,
+  );
   const activeFbId =
     facebookCookieContext?.active_facebook_user_id ||
     fbCookies.find((item) => item.active)?.facebook_user_id ||
@@ -434,8 +453,9 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                   ) : null}
 
                   <p className="md-join-hint">
-                    Danh sách lấy từ <b>/kenh</b> (kênh loại Nhóm Facebook). Nhóm kín thường không tự tham gia được qua hệ thống —
-                    bấm <b>Mở FB</b> để gửi yêu cầu trên Facebook, sau đó tick nhóm và bấm <b>Kiểm tra lại</b>.
+                    Chỉ hiển thị <b>nhóm/kênh được phân công</b> cho tài khoản đang đăng nhập
+                    {staffGroupsScoped ? '' : ' (admin gán tại /kenh → Sửa kênh → Nhân sự phụ trách)'}.
+                    Chỉ <b>quét bài</b> từ các nhóm đã tick. Nhóm kín thường phải bấm <b>Mở FB</b> rồi <b>Kiểm tra lại</b>.
                   </p>
 
                   {facebookGroupChannels.length ? (
@@ -507,7 +527,7 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                           <label className="md-group-check">
                             <input
                               type="checkbox"
-                              checked={!!selectedGroups[gid]}
+                              checked={!!scanSelectedGroups[gid]}
                               onChange={(e) => toggleGroupSelected(gid, e.target.checked)}
                             />
                           </label>
@@ -550,7 +570,9 @@ export function ManageDashboardPanel(props: ManageDashboardProps) {
                         </div>
                       );
                     }) : (
-                      <span className="md-empty">Chưa có nhóm Facebook — thêm tại /kenh</span>
+                      <span className="md-empty">
+                        Chưa có nhóm được phân công — admin gán tại /kenh → Sửa kênh → Nhân sự phụ trách.
+                      </span>
                     )}
                   </div>
                   <div className="md-source-block-actions">

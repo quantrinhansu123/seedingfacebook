@@ -1,5 +1,3 @@
-@import url('https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css');
-
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: var(--font-roboto), Roboto, Arial, sans-serif; background: #f0f2f5; color: #1c1e21; min-height: 100vh; }
 
@@ -512,6 +510,12 @@ body { font-family: var(--font-roboto), Roboto, Arial, sans-serif; background: #
   color: #fff;
 }
 .channel-modal { width: 720px; }
+.channel-staff-modal { width: min(440px, 94vw); }
+.channel-staff-modal-list {
+  max-height: min(52vh, 420px);
+  overflow: auto;
+  margin-bottom: 10px;
+}
 .channel-modal-note {
   margin: -8px 0 16px;
   color: #64748b;
@@ -583,6 +587,7 @@ body { font-family: var(--font-roboto), Roboto, Arial, sans-serif; background: #
 .data-table tr:hover td { background: #f8fbff; }
 .data-table small { display: block; margin-top: 4px; color: #64748b; line-height: 1.35; }
 .mono-cell { font-family: var(--font-roboto), Roboto, Arial, sans-serif; font-size: 12px; color: #475569; }
+.lead-comment-cell { max-width: 280px; white-space: normal; line-height: 1.45; color: #334155; }
 .comment-studio { min-height: calc(100vh - 112px); }
 .comment-studio-head {
   display: flex;
@@ -2157,6 +2162,16 @@ body { font-family: var(--font-roboto), Roboto, Arial, sans-serif; background: #
 .btn-submit:hover { background: #1464d8; }
 .btn-submit:disabled { opacity: .5; cursor: not-allowed; }
 .modal-result { font-size: 13px; margin-top: 8px; min-height: 18px; }
+.staff-modal-error { color: #dc2626; font-weight: 600; }
+.staff-filter-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #64748b;
+}
+.module-scope-hint { margin-top: 4px; font-size: 12px; color: #64748b; }
+.staff-filter-hint .btn-cancel { padding: 4px 10px; font-size: 12px; }
 .tiktok-meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .tiktok-stats-actions { margin-top: 0; margin-bottom: 14px; }
 .tiktok-stats-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

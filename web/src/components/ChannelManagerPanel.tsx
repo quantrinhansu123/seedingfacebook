@@ -1,9 +1,8 @@
 'use client';
 
-import { FormEvent, useCallback, useMemo, useState } from 'react';
-import { api } from '@/lib/api';
-import type { ManagedChannel } from '@/lib/types';
-import { extractSlug } from '@/lib/utils';
+import { FormEvent, useMemo, useState } from 'react';
+import type { ManagedChannel, StaffAccount } from '@/lib/types';
+import { extractSlug, staffAssignedToChannel, staffIdsForChannel } from '@/lib/utils';
 
 type Payload = {
   platform: string;
@@ -12,16 +11,21 @@ type Payload = {
   link: string;
   target_id: string;
   note: string;
+  assigned_staff_ids: string[];
 };
 
 type Props = {
   channels: ManagedChannel[];
+  staff?: StaffAccount[];
+  viewAll?: boolean;
+  canAssignStaff?: boolean;
   status: string;
   busy: boolean;
-  onSave: (payload: Payload, id?: string) => Promise<boolean>;
+  onSave: (payload: Omit<Payload, 'assigned_staff_ids'> & { assigned_staff_ids?: string[] }, id?: string) => Promise<boolean | string>;
   onDelete: (id: string) => Promise<void>;
   onReload: () => Promise<unknown>;
   onSyncFacebookPages?: () => Promise<unknown>;
+  onBulkAssignStaff?: (channelIds: string[], staffIds: string[]) => Promise<boolean | string>;
 };
 
 type ChannelTabKey = 'all' | 'groups' | 'pages' | 'tiktok';
@@ -33,6 +37,7 @@ const EMPTY: Payload = {
   link: '',
   target_id: '',
   note: '',
+  assigned_staff_ids: [],
 };
 
 const PLATFORM_OPTIONS = ['Facebook', 'TikTok', 'YouTube', 'Instagram', 'Zalo'];
@@ -88,7 +93,26 @@ function groupIdFromChannel(item: ManagedChannel): string {
   return extractSlug(link);
 }
 
-export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, onReload, onSyncFacebookPages }: Props) {
+export function ChannelManagerPanel({
+  channels,
+  staff = [],
+  viewAll = false,
+  canAssignStaff = false,
+  status,
+  busy,
+  onSave,
+  onDelete,
+  onReload,
+  onSyncFacebookPages,
+  onBulkAssignStaff,
+}: Props) {
+  const [staffMenuOpen, setStaffMenuOpen] = useState(false);
+  const [bulkStaffMenuOpen, setBulkStaffMenuOpen] = useState(false);
+  const [bulkStaffIds, setBulkStaffIds] = useState<string[]>([]);
+  const [staffModalOpen, setStaffModalOpen] = useState(false);
+  const [staffModalChannel, setStaffModalChannel] = useState<ManagedChannel | null>(null);
+  const [staffModalIds, setStaffModalIds] = useState<string[]>([]);
+  const [staffModalError, setStaffModalError] = useState('');
   const [form, setForm] = useState<Payload>(EMPTY);
   const [editingId, setEditingId] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
@@ -97,59 +121,97 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
   const [query, setQuery] = useState('');
   const [platformFilter, setPlatformFilter] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
-  const [groupMembership, setGroupMembership] = useState<Record<string, boolean | null>>({});
-  const [membershipCheckingIds, setMembershipCheckingIds] = useState<string[]>([]);
-  const [selectedGroupIds, setSelectedGroupIds] = useState<Record<string, boolean>>({});
-  const [joiningGroupId, setJoiningGroupId] = useState('');
-  const [joinMsg, setJoinMsg] = useState('');
+  const [selectedChannelIds, setSelectedChannelIds] = useState<Record<string, boolean>>({});
 
-  const loadGroupMembership = useCallback(async (ids: string[]) => {
-    const unique = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
-    if (!unique.length) return;
-    setMembershipCheckingIds((prev) => [...new Set([...prev, ...unique])]);
-    try {
-      const r = await api(`/api/group-membership?ids=${encodeURIComponent(unique.join(','))}`, {
-        timeoutMs: 120000,
-      });
-      const d = await r.json();
-      if (d.ok && d.membership && typeof d.membership === 'object') {
-        setGroupMembership((prev) => ({ ...prev, ...d.membership }));
-      }
-    } catch {
-      /* ignore */
-    } finally {
-      setMembershipCheckingIds((prev) => prev.filter((id) => !unique.includes(id)));
-    }
-  }, []);
+  const assignableStaff = useMemo(
+    () => staff.filter((item) => item.enabled !== false && item.id),
+    [staff],
+  );
 
-  async function joinGroupNow(gid: string, name: string) {
-    if (!gid) return;
-    setJoiningGroupId(gid);
-    setJoinMsg('');
-    try {
-      const r = await api(`/api/groups/${gid}/join`, { method: 'POST', timeoutMs: 60000 });
-      const d = await r.json();
-      if (d.ok) {
-        if (d.already_member) {
-          setGroupMembership((prev) => ({ ...prev, [gid]: true }));
-          setJoinMsg(`✅ Đã tham gia nhóm "${name || gid}"`);
-        } else {
-          setJoinMsg(`✅ ${d.msg || 'Đã gửi yêu cầu tham gia'} — bấm Kiểm tra nhóm để cập nhật trạng thái.`);
-        }
-        void loadGroupMembership([gid]);
-      } else {
-        setJoinMsg(`❌ ${d.error || 'Không tham gia được nhóm'}`);
-        if (d.manual_required && d.group_url && typeof window !== 'undefined') {
-          window.open(String(d.group_url), '_blank', 'noopener,noreferrer');
-          setJoinMsg((prev) => `${prev} Đã mở Facebook — tham gia thủ công rồi bấm Kiểm tra nhóm.`);
-        }
-      }
-    } catch {
-      setJoinMsg('❌ Lỗi kết nối khi tham gia nhóm');
-    } finally {
-      setJoiningGroupId('');
+  function formatAssignedStaff(channel: ManagedChannel) {
+    const fromApi = (channel.assigned_staff || [])
+      .map((item) => item.name || item.username || item.id)
+      .filter(Boolean);
+    const labels = (fromApi.length
+      ? fromApi
+      : staffAssignedToChannel(channel, staff).map((item) => item.name || item.username || item.id).filter(Boolean)
+    ).slice(0, 2);
+    if (!labels.length) return '-';
+    const total = fromApi.length || staffAssignedToChannel(channel, staff).length;
+    const extra = total - labels.length;
+    return extra > 0 ? `${labels.join(', ')} +${extra}` : labels.join(', ');
+  }
+
+  function toggleAssignedStaff(staffId: string, checked: boolean) {
+    setForm((prev) => {
+      const current = new Set(prev.assigned_staff_ids);
+      if (checked) current.add(staffId);
+      else current.delete(staffId);
+      return { ...prev, assigned_staff_ids: [...current] };
+    });
+  }
+
+  function toggleStaffModalId(staffId: string, checked: boolean) {
+    setStaffModalIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(staffId);
+      else next.delete(staffId);
+      return [...next];
+    });
+  }
+
+  function openStaffModal(item: ManagedChannel) {
+    setStaffModalChannel(item);
+    setStaffModalIds(
+      item.assigned_staff_ids?.length
+        ? [...item.assigned_staff_ids]
+        : staffIdsForChannel(item, staff),
+    );
+    setStaffModalError('');
+    setStaffModalOpen(true);
+  }
+
+  function closeStaffModal() {
+    setStaffModalOpen(false);
+    setStaffModalChannel(null);
+    setStaffModalIds([]);
+    setStaffModalError('');
+  }
+
+  async function saveStaffModal() {
+    if (!staffModalChannel?.id) return;
+    const item = staffModalChannel;
+    const result = await onSave(
+      {
+        platform: item.platform || '',
+        channel_name: item.channel_name || '',
+        channel_type: item.channel_type || '',
+        link: item.link || '',
+        target_id: item.target_id || '',
+        note: item.note || '',
+        assigned_staff_ids: staffModalIds,
+      },
+      item.id,
+    );
+    if (result === true) {
+      closeStaffModal();
+      return;
     }
-    setTimeout(() => setJoinMsg(''), 12000);
+    if (typeof result === 'string') {
+      setStaffModalError(result.startsWith('❌') ? result.slice(2).trim() : result);
+    }
+  }
+
+  function staffPickerLabel() {
+    const count = form.assigned_staff_ids.length;
+    if (!count) return 'Chọn nhân sự phụ trách...';
+    const names = form.assigned_staff_ids
+      .map((id) => assignableStaff.find((item) => item.id === id))
+      .filter(Boolean)
+      .map((item) => item!.name || item!.username || item!.id)
+      .slice(0, 2);
+    const extra = count - names.length;
+    return extra > 0 ? `${names.join(', ')} +${extra}` : names.join(', ');
   }
 
   const channelOptions = useMemo(() => {
@@ -188,32 +250,43 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
     });
   }, [activeTab, channels, platformFilter, query, typeFilter]);
 
-  const visibleFacebookGroupIds = useMemo(
-    () =>
-      [...new Set(
-        filtered
-          .filter(isFacebookGroup)
-          .map(groupIdFromChannel)
-          .filter(Boolean),
-      )],
+  const selectableChannelIds = useMemo(
+    () => filtered.map((item) => item.id || '').filter(Boolean),
     [filtered],
   );
+  const selectedChannelIdList = useMemo(
+    () => selectableChannelIds.filter((id) => selectedChannelIds[id]),
+    [selectableChannelIds, selectedChannelIds],
+  );
 
-  const checkedGroupIds = visibleFacebookGroupIds.filter((gid) => selectedGroupIds[gid]);
-  const checkingSet = useMemo(() => new Set(membershipCheckingIds), [membershipCheckingIds]);
-
-  function membershipLabel(gid: string): string {
-    if (checkingSet.has(gid)) return 'Đang kiểm tra...';
-    const member = groupMembership[gid];
-    if (member === true) return 'Đã tham gia';
-    if (member === false) return 'Chưa tham gia';
-    return 'Chưa kiểm tra';
+  function toggleBulkStaff(staffId: string, checked: boolean) {
+    setBulkStaffIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(staffId);
+      else next.delete(staffId);
+      return [...next];
+    });
   }
 
-  function checkSelectedMembership() {
-    const ids = checkedGroupIds.length ? checkedGroupIds : visibleFacebookGroupIds;
-    if (!ids.length) return;
-    void loadGroupMembership(ids);
+  function bulkStaffPickerLabel() {
+    if (!bulkStaffIds.length) return 'Chọn nhân sự...';
+    const names = bulkStaffIds
+      .map((id) => assignableStaff.find((item) => item.id === id))
+      .filter(Boolean)
+      .map((item) => item!.name || item!.username || item!.id)
+      .slice(0, 2);
+    const extra = bulkStaffIds.length - names.length;
+    return extra > 0 ? `${names.join(', ')} +${extra}` : names.join(', ');
+  }
+
+  async function applyBulkStaffAssign() {
+    if (!onBulkAssignStaff || !selectedChannelIdList.length || !bulkStaffIds.length) return;
+    const result = await onBulkAssignStaff(selectedChannelIdList, bulkStaffIds);
+    if (result === true) {
+      setSelectedChannelIds({});
+      setBulkStaffIds([]);
+      setBulkStaffMenuOpen(false);
+    }
   }
 
   function setField(key: keyof Payload, value: string) {
@@ -237,7 +310,11 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
       link: item.link || '',
       target_id: item.target_id || '',
       note: item.note || '',
+      assigned_staff_ids: item.assigned_staff_ids?.length
+        ? [...item.assigned_staff_ids]
+        : staffIdsForChannel(item, staff),
     });
+    setStaffMenuOpen(false);
     setFormError('');
     setModalOpen(true);
   }
@@ -245,6 +322,7 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
   function reset() {
     setEditingId('');
     setForm(EMPTY);
+    setStaffMenuOpen(false);
     setFormError('');
     setModalOpen(false);
   }
@@ -291,8 +369,16 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
       setFormError(`Kênh này đã có trong danh sách: ${duplicated.channel_name || duplicated.target_id || duplicated.id}`);
       return;
     }
-    const ok = await onSave(form, editingId || undefined);
-    if (ok) reset();
+    const payload: Omit<Payload, 'assigned_staff_ids'> & { assigned_staff_ids?: string[] } = { ...form };
+    if (!canAssignStaff) delete payload.assigned_staff_ids;
+    const result = await onSave(payload, editingId || undefined);
+    if (result === true) {
+      reset();
+      return;
+    }
+    if (typeof result === 'string') {
+      setFormError(result.startsWith('❌') ? result.slice(2).trim() : result);
+    }
   }
 
   return (
@@ -301,8 +387,53 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
         <div>
           <div className="module-kicker">Quản lý nhóm / kênh</div>
           <h2>Kênh theo dõi</h2>
+          <p className="module-scope-hint">
+            {viewAll
+              ? `Admin — hiển thị toàn bộ ${channels.length} kênh`
+              : `Chỉ hiển thị ${channels.length} kênh được phân công cho bạn`}
+          </p>
         </div>
         <div className="module-actions">
+          {canAssignStaff && selectedChannelIdList.length ? (
+            <div className="staff-managed-dropdown channel-bulk-staff-picker">
+              <button
+                type="button"
+                className={`staff-managed-dropdown-trigger${bulkStaffMenuOpen ? ' open' : ''}`}
+                disabled={!assignableStaff.length || busy}
+                onClick={() => setBulkStaffMenuOpen((open) => !open)}
+              >
+                <span>{assignableStaff.length ? bulkStaffPickerLabel() : 'Chưa có nhân sự'}</span>
+                <span className="staff-managed-dropdown-caret">▾</span>
+              </button>
+              {bulkStaffMenuOpen && assignableStaff.length ? (
+                <div className="staff-managed-dropdown-menu">
+                  <div className="staff-managed-checklist">
+                    {assignableStaff.map((person) => (
+                      <label
+                        key={person.id}
+                        className={`staff-managed-check${bulkStaffIds.includes(person.id!) ? ' checked' : ''}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={bulkStaffIds.includes(person.id!)}
+                          onChange={(e) => toggleBulkStaff(person.id!, e.target.checked)}
+                        />
+                        <span>{person.name || person.username || person.id}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              <button
+                type="button"
+                className="btn-submit"
+                disabled={busy || !bulkStaffIds.length}
+                onClick={() => void applyBulkStaffAssign()}
+              >
+                Gán {bulkStaffIds.length ? bulkStaffIds.length : ''} NS → {selectedChannelIdList.length} kênh
+              </button>
+            </div>
+          ) : null}
           <button type="button" className="table-icon-button" title="Tải lại" onClick={() => void onReload()}>
             ↻
           </button>
@@ -358,48 +489,29 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
             </option>
           ))}
         </select>
-        {visibleFacebookGroupIds.length ? (
-          <button
-            type="button"
-            className="btn-cancel channel-check-btn"
-            disabled={checkingSet.size > 0}
-            onClick={checkSelectedMembership}
-          >
-            {checkingSet.size > 0
-              ? 'Đang kiểm tra...'
-              : `Kiểm tra nhóm${checkedGroupIds.length ? ` (${checkedGroupIds.length})` : ''}`}
-          </button>
-        ) : null}
       </div>
       </div>
-
-      {activeTab === 'groups' || visibleFacebookGroupIds.length ? (
-        <p className="channel-join-hint">
-          Để <b>Tham gia ngay</b> hoạt động: cần cookie Facebook tại mục <b>Nhân sự</b> (Lấy từ Chrome).
-          Nhóm kín thường phải bấm <b>Mở FB</b> tham gia thủ công, sau đó <b>Kiểm tra nhóm</b>.
-        </p>
-      ) : null}
 
       <div className="data-table-wrap">
         <table className="data-table channel-data-table">
           <thead>
             <tr>
               <th className="select-col">
-                {visibleFacebookGroupIds.length ? (
+                {canAssignStaff && selectableChannelIds.length ? (
                   <input
                     type="checkbox"
-                    title="Chọn tất cả nhóm Facebook"
+                    title="Chọn kênh để gán nhân sự"
                     checked={
-                      visibleFacebookGroupIds.length > 0 &&
-                      visibleFacebookGroupIds.every((gid) => selectedGroupIds[gid])
+                      selectableChannelIds.length > 0 &&
+                      selectableChannelIds.every((id) => selectedChannelIds[id])
                     }
                     onChange={(e) => {
                       const checked = e.target.checked;
-                      setSelectedGroupIds((prev) => {
+                      setSelectedChannelIds((prev) => {
                         const next = { ...prev };
-                        visibleFacebookGroupIds.forEach((gid) => {
-                          if (checked) next[gid] = true;
-                          else delete next[gid];
+                        selectableChannelIds.forEach((id) => {
+                          if (checked) next[id] = true;
+                          else delete next[id];
                         });
                         return next;
                       });
@@ -407,11 +519,10 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
                   />
                 ) : null}
               </th>
-              <th>Mã</th>
               <th>Nền tảng</th>
               <th>Kênh</th>
               <th>Loại</th>
-              <th>Trạng thái</th>
+              <th>Nhân sự</th>
               <th>Link</th>
               <th className="channel-id-col">ID</th>
               <th className="channel-actions-col">Thao tác</th>
@@ -421,24 +532,22 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
             {filtered.length ? (
               filtered.map((item) => {
                 const gid = groupIdFromChannel(item);
-                const member = gid ? groupMembership[gid] : undefined;
                 return (
                   <tr key={item.id}>
                     <td className="select-col">
-                      {isFacebookGroup(item) && gid ? (
+                      {canAssignStaff && item.id ? (
                         <input
                           type="checkbox"
-                          checked={!!selectedGroupIds[gid]}
+                          checked={!!selectedChannelIds[item.id]}
                           onChange={(e) =>
-                            setSelectedGroupIds((prev) => ({
+                            setSelectedChannelIds((prev) => ({
                               ...prev,
-                              [gid]: e.target.checked,
+                              [item.id!]: e.target.checked,
                             }))
                           }
                         />
                       ) : null}
                     </td>
-                    <td className="mono-cell channel-code-col">{item.id}</td>
                     <td>
                       <span className="platform-pill">{item.platform || '-'}</span>
                     </td>
@@ -447,24 +556,8 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
                       {item.note ? <small>{item.note}</small> : null}
                     </td>
                     <td className="channel-type-col">{item.channel_type || '-'}</td>
-                    <td>
-                      {isFacebookGroup(item) && gid ? (
-                        <span
-                          className={`channel-status-pill${
-                            checkingSet.has(gid)
-                              ? ' pending'
-                              : member === true
-                                ? ' ok'
-                                : member === false
-                                  ? ' warn'
-                                  : ' idle'
-                          }`}
-                        >
-                          {membershipLabel(gid)}
-                        </span>
-                      ) : (
-                        <span className="channel-status-pill na">—</span>
-                      )}
+                    <td className="channel-staff-col" title={formatAssignedStaff(item)}>
+                      {formatAssignedStaff(item)}
                     </td>
                     <td className="link-cell">
                       {item.link ? (
@@ -480,17 +573,16 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
                       <div className="channel-row-actions">
                         <div className="channel-group-actions">
                           {isFacebookGroup(item) && gid ? (
-                            <>
-                              {member !== true ? (
-                                <button
-                                  type="button"
-                                  className="btn-join-now"
-                                  disabled={joiningGroupId === gid}
-                                  onClick={() => void joinGroupNow(gid, item.channel_name || gid)}
-                                >
-                                  {joiningGroupId === gid ? '...' : 'Tham gia'}
-                                </button>
-                              ) : null}
+                            canAssignStaff ? (
+                              <button
+                                type="button"
+                                className="btn-join-now ghost"
+                                title="Gán nhân sự phụ trách"
+                                onClick={() => openStaffModal(item)}
+                              >
+                                Thêm nhân sự
+                              </button>
+                            ) : (
                               <a
                                 className="btn-join-now ghost"
                                 href={`https://www.facebook.com/groups/${gid}`}
@@ -499,18 +591,20 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
                               >
                                 FB
                               </a>
-                              <button
-                                type="button"
-                                className="btn-join-now ghost"
-                                disabled={checkingSet.has(gid)}
-                                onClick={() => void loadGroupMembership([gid])}
-                              >
-                                {checkingSet.has(gid) ? '...' : 'Check'}
-                              </button>
-                            </>
+                            )
                           ) : null}
                         </div>
                         <div className="channel-core-actions">
+                          {canAssignStaff && !(isFacebookGroup(item) && groupIdFromChannel(item)) ? (
+                            <button
+                              type="button"
+                              className="btn-join-now ghost"
+                              title="Gán nhân sự phụ trách"
+                              onClick={() => openStaffModal(item)}
+                            >
+                              Thêm nhân sự
+                            </button>
+                          ) : null}
                           <button type="button" title="Sửa" onClick={() => edit(item)}>
                             ✎
                           </button>
@@ -525,7 +619,7 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
               })
             ) : (
               <tr>
-                <td colSpan={9} className="table-empty">
+                <td colSpan={8} className="table-empty">
                   Chưa có kênh nào
                 </td>
               </tr>
@@ -533,7 +627,7 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
           </tbody>
         </table>
       </div>
-      {(status || joinMsg) ? <div className="module-status">{joinMsg || status}</div> : null}
+      {status ? <div className="module-status">{status}</div> : null}
 
       <div className={`modal-overlay${modalOpen ? ' open' : ''}`} onClick={reset}>
         <form className="modal channel-modal" onSubmit={submit} onClick={(e) => e.stopPropagation()}>
@@ -602,6 +696,65 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
               <label>Ghi chú</label>
               <input value={form.note} onChange={(e) => setField('note', e.target.value)} placeholder="Ghi chú vận hành" />
             </div>
+            {canAssignStaff ? (
+              <div className="channel-field channel-modal-wide">
+                <label>Nhân sự phụ trách</label>
+                <div className="staff-managed-dropdown">
+                  <button
+                    type="button"
+                    className={`staff-managed-dropdown-trigger${staffMenuOpen ? ' open' : ''}`}
+                    disabled={!assignableStaff.length}
+                    onClick={() => setStaffMenuOpen((open) => !open)}
+                  >
+                    <span>{assignableStaff.length ? staffPickerLabel() : 'Chưa có nhân sự — thêm tại /nhan-su'}</span>
+                    <span className="staff-managed-dropdown-caret">▾</span>
+                  </button>
+                  {staffMenuOpen && assignableStaff.length ? (
+                    <div className="staff-managed-dropdown-menu">
+                      <div className="staff-managed-toolbar">
+                        <span>{form.assigned_staff_ids.length}/{assignableStaff.length} đã chọn</span>
+                        <button
+                          type="button"
+                          className="btn-cancel"
+                          onClick={() => setForm((prev) => ({
+                            ...prev,
+                            assigned_staff_ids: assignableStaff.map((item) => item.id!),
+                          }))}
+                        >
+                          Chọn tất cả
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-cancel"
+                          onClick={() => setForm((prev) => ({ ...prev, assigned_staff_ids: [] }))}
+                        >
+                          Bỏ chọn
+                        </button>
+                      </div>
+                      <div className="staff-managed-checklist">
+                        {assignableStaff.map((person) => (
+                          <label
+                            key={person.id}
+                            className={`staff-managed-check${form.assigned_staff_ids.includes(person.id!) ? ' checked' : ''}`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={form.assigned_staff_ids.includes(person.id!)}
+                              onChange={(e) => toggleAssignedStaff(person.id!, e.target.checked)}
+                            />
+                            <span>{person.name || person.username || person.id}</span>
+                            {person.username ? <small>{person.username}</small> : null}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+                <small className="channel-staff-hint">
+                  Một nhân sự có thể phụ trách nhiều nhóm và page. Chọn nhân sự cho từng kênh — danh sách kênh của họ sẽ cộng dồn, không ghi đè kênh cũ.
+                </small>
+              </div>
+            ) : null}
           </div>
           {formError ? <div className="modal-result channel-form-error">{formError}</div> : null}
           <div className="modal-actions">
@@ -613,6 +766,75 @@ export function ChannelManagerPanel({ channels, status, busy, onSave, onDelete, 
             </button>
           </div>
         </form>
+      </div>
+
+      <div className={`modal-overlay${staffModalOpen ? ' open' : ''}`} onClick={closeStaffModal}>
+        <div className="modal channel-staff-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-hd">
+            <span>Gán nhân sự</span>
+            <button type="button" className="modal-close-button" aria-label="Đóng" onClick={closeStaffModal}>
+              ×
+            </button>
+          </div>
+          {staffModalChannel ? (
+            <p className="channel-modal-note">
+              <b>{staffModalChannel.channel_name || staffModalChannel.target_id || 'Kênh'}</b>
+              {staffModalChannel.channel_type ? ` · ${staffModalChannel.channel_type}` : ''}
+            </p>
+          ) : null}
+          {assignableStaff.length ? (
+            <>
+              <div className="staff-managed-toolbar">
+                <span>{staffModalIds.length}/{assignableStaff.length} đã chọn</span>
+                <button
+                  type="button"
+                  className="btn-cancel"
+                  onClick={() => setStaffModalIds(assignableStaff.map((item) => item.id!))}
+                >
+                  Chọn tất cả
+                </button>
+                <button type="button" className="btn-cancel" onClick={() => setStaffModalIds([])}>
+                  Bỏ chọn
+                </button>
+              </div>
+              <div className="staff-managed-checklist channel-staff-modal-list">
+                {assignableStaff.map((person) => (
+                  <label
+                    key={person.id}
+                    className={`staff-managed-check${staffModalIds.includes(person.id!) ? ' checked' : ''}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={staffModalIds.includes(person.id!)}
+                      onChange={(e) => toggleStaffModalId(person.id!, e.target.checked)}
+                    />
+                    <span>{person.name || person.username || person.id}</span>
+                    {person.username ? <small>{person.username}</small> : null}
+                  </label>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="channel-modal-note">Chưa có nhân sự — thêm tại /nhan-su</p>
+          )}
+          <small className="channel-staff-hint">
+            Một nhân sự có thể phụ trách nhiều nhóm và page. Kênh cũ của họ vẫn được giữ.
+          </small>
+          {staffModalError ? <div className="modal-result channel-form-error">{staffModalError}</div> : null}
+          <div className="modal-actions">
+            <button type="button" className="btn-cancel" onClick={closeStaffModal}>
+              Huỷ
+            </button>
+            <button
+              type="button"
+              className="btn-submit"
+              disabled={busy || !assignableStaff.length}
+              onClick={() => void saveStaffModal()}
+            >
+              {busy ? 'Đang lưu...' : 'Lưu nhân sự'}
+            </button>
+          </div>
+        </div>
       </div>
     </section>
   );
