@@ -232,7 +232,7 @@ def _default_ai_config():
     return {
         'provider': 'gemini',
         'model': DEFAULT_MODEL,
-        'keys': {'gemini': DEFAULT_API_KEY, 'openai': '', 'claude': ''},
+        'keys': {'gemini': DEFAULT_API_KEY, 'openai': '', 'groq': '', 'claude': ''},
         'auto_classify': False,
         'categories': DEFAULT_CATEGORIES,
     }
@@ -5106,6 +5106,7 @@ def _get_ai_key(provider: str) -> str:
     env_keys = {
         'gemini': 'GEMINI_API_KEY',
         'openai': 'OPENAI_API_KEY',
+        'groq': 'GROQ_API_KEY',
         'claude': 'CLAUDE_API_KEY',
     }
     fallback_key = DEFAULT_API_KEY if provider == 'gemini' else ''
@@ -8280,6 +8281,16 @@ def _fallback_gemini_models() -> list[dict]:
     ]
 
 
+def _fallback_groq_models() -> list[dict]:
+    return [
+        {'id': 'llama-3.3-70b-versatile', 'name': 'llama-3.3-70b-versatile', 'display_name': 'Groq Llama 3.3 70B Versatile'},
+        {'id': 'llama-3.1-8b-instant', 'name': 'llama-3.1-8b-instant', 'display_name': 'Groq Llama 3.1 8B Instant'},
+        {'id': 'openai/gpt-oss-120b', 'name': 'openai/gpt-oss-120b', 'display_name': 'Groq GPT OSS 120B'},
+        {'id': 'openai/gpt-oss-20b', 'name': 'openai/gpt-oss-20b', 'display_name': 'Groq GPT OSS 20B'},
+        {'id': 'qwen/qwen3-32b', 'name': 'qwen/qwen3-32b', 'display_name': 'Groq Qwen3 32B'},
+    ]
+
+
 def _list_gemini_models_from_api() -> tuple[list[dict], str]:
     api_key = _get_ai_key('gemini')
     if not api_key:
@@ -8324,6 +8335,42 @@ def _list_gemini_models_from_api() -> tuple[list[dict], str]:
         item['id'],
     ))
     return models or _fallback_gemini_models(), ''
+
+
+def _list_groq_models_from_api() -> tuple[list[dict], str]:
+    api_key = _get_ai_key('groq')
+    if not api_key:
+        return _fallback_groq_models(), 'Chưa có Groq API key nên đang dùng danh sách model gợi ý.'
+    try:
+        resp = requests.get(
+            'https://api.groq.com/openai/v1/models',
+            headers={
+                'Authorization': f'Bearer {api_key}',
+                'Content-Type': 'application/json',
+            },
+            timeout=25,
+        )
+        data = resp.json()
+        if 'error' in data:
+            err = data.get('error') or {}
+            raise RuntimeError(err.get('message') or 'Groq models API error')
+        rows = data.get('data') if isinstance(data, dict) else []
+        models = []
+        for item in rows if isinstance(rows, list) else []:
+            model_id = str(item.get('id') or item.get('name') or '').strip()
+            if not model_id:
+                continue
+            owned_by = str(item.get('owned_by') or '').strip()
+            models.append({
+                'id': model_id,
+                'name': model_id,
+                'display_name': model_id,
+                'description': owned_by,
+            })
+        models.sort(key=lambda row: row.get('display_name', row.get('id', '')))
+        return models or _fallback_groq_models(), ''
+    except Exception as e:
+        return _fallback_groq_models(), f'Không tải được danh sách model từ Groq API, đang dùng fallback: {str(e)[:180]}'
 
 
 def _is_missing_supabase_table_error(message: str) -> bool:
@@ -8723,8 +8770,13 @@ def ai_providers():
 
 @app.route('/api/ai/models')
 def ai_models():
-    models, warning = _list_gemini_models_from_api()
-    payload = {'ok': True, 'provider': 'gemini', 'models': models}
+    provider = str(request.args.get('provider') or _ai_config.get('provider') or 'gemini').strip().lower()
+    if provider == 'groq':
+        models, warning = _list_groq_models_from_api()
+    else:
+        provider = 'gemini'
+        models, warning = _list_gemini_models_from_api()
+    payload = {'ok': True, 'provider': provider, 'models': models}
     if warning:
         payload['warning'] = warning
     return jsonify(payload)
@@ -8732,7 +8784,9 @@ def ai_models():
 
 @app.route('/api/ai/config', methods=['GET'])
 def ai_config_get():
-    safe = dict(_ai_config)
+    defaults = _default_ai_config()
+    safe = {**defaults, **_ai_config}
+    safe['keys'] = {**defaults.get('keys', {}), **(_ai_config.get('keys') or {})}
     safe_keys = {}
     for k, v in safe.get('keys', {}).items():
         safe_keys[k] = ('***' + v[-4:]) if v and len(v) > 4 else ('***' if v else '')
@@ -8746,7 +8800,9 @@ def ai_config_save():
     global _ai_config
     body = request.get_json() or {}
     if 'provider' in body:
-        _ai_config['provider'] = body['provider']
+        provider = str(body.get('provider') or '').strip().lower()
+        if provider in PROVIDERS:
+            _ai_config['provider'] = provider
     if 'model' in body:
         _ai_config['model'] = body['model']
     if 'auto_classify' in body:
@@ -8754,7 +8810,8 @@ def ai_config_save():
     if 'categories' in body and isinstance(body['categories'], list):
         _ai_config['categories'] = body['categories']
     if 'key' in body:
-        provider = body.get('provider', _ai_config.get('provider', 'gemini'))
+        provider = str(body.get('provider', _ai_config.get('provider', 'gemini')) or '').strip().lower()
+        provider = provider if provider in PROVIDERS else _ai_config.get('provider', 'gemini')
         if 'keys' not in _ai_config:
             _ai_config['keys'] = {}
         _ai_config['keys'][provider] = body['key']

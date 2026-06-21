@@ -98,6 +98,8 @@ type PostFetchReport = {
 const SCAN_SELECTED_STORAGE_KEY = 'scanSelectedGroups';
 const DEFAULT_GEMINI_PRO_MODEL = 'gemini-3.1-pro-preview';
 const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
+const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
+const SUPPORTED_AI_PROVIDERS = ['gemini', 'openai', 'groq'];
 const GEMINI_MODEL_FALLBACKS: AiModelOption[] = [
   {
     id: 'gemini-3.1-pro-preview',
@@ -147,13 +149,42 @@ const OPENAI_MODEL_FALLBACKS: AiModelOption[] = [
     description: 'Model GPT mạnh hơn cho nội dung',
   },
 ];
+const GROQ_MODEL_FALLBACKS: AiModelOption[] = [
+  {
+    id: 'llama-3.3-70b-versatile',
+    display_name: 'Groq Llama 3.3 70B Versatile',
+    description: 'Chất lượng cao',
+  },
+  {
+    id: 'llama-3.1-8b-instant',
+    display_name: 'Groq Llama 3.1 8B Instant',
+    description: 'Rất nhanh, dễ test',
+  },
+  {
+    id: 'openai/gpt-oss-120b',
+    display_name: 'Groq GPT OSS 120B',
+    description: 'OpenAI open-weight mạnh',
+  },
+  {
+    id: 'openai/gpt-oss-20b',
+    display_name: 'Groq GPT OSS 20B',
+    description: 'OpenAI open-weight nhanh',
+  },
+  {
+    id: 'qwen/qwen3-32b',
+    display_name: 'Groq Qwen3 32B',
+    description: 'Model Qwen đa dụng',
+  },
+];
 
 function defaultModelForProvider(provider?: string) {
+  if (provider === 'groq') return DEFAULT_GROQ_MODEL;
   if (provider === 'openai') return DEFAULT_OPENAI_MODEL;
   return DEFAULT_GEMINI_PRO_MODEL;
 }
 
 function fallbackModelsForProvider(provider?: string) {
+  if (provider === 'groq') return GROQ_MODEL_FALLBACKS;
   if (provider === 'openai') return OPENAI_MODEL_FALLBACKS;
   return GEMINI_MODEL_FALLBACKS;
 }
@@ -165,6 +196,7 @@ function shouldUpgradeGeminiModel(model?: string) {
 
 function shouldUpgradeAiModel(provider: string, model?: string) {
   const value = String(model || '').toLowerCase();
+  if (provider === 'groq') return !value || value.startsWith('gemini') || value.startsWith('gpt-4');
   if (provider === 'openai') return !value || value.startsWith('gemini');
   return shouldUpgradeGeminiModel(model);
 }
@@ -1184,18 +1216,20 @@ export function MonitorPage() {
       return;
     }
     try {
-      const r = await api('/api/ai/models', { timeoutMs: 45000 });
+      const query = provider === 'groq' ? '?provider=groq' : '';
+      const r = await api(`/api/ai/models${query}`, { timeoutMs: 45000 });
       const d = await r.json().catch(() => ({}));
       if (r.ok && d.ok) {
-        const rows = Array.isArray(d.models) && d.models.length ? d.models : GEMINI_MODEL_FALLBACKS;
+        const fallbackRows = fallbackModelsForProvider(provider);
+        const rows = Array.isArray(d.models) && d.models.length ? d.models : fallbackRows;
         setAiModels(rows);
         setAiModelStatus(d.warning || '');
       } else {
-        setAiModels(GEMINI_MODEL_FALLBACKS);
+        setAiModels(fallbackModelsForProvider(provider));
         setAiModelStatus('');
       }
     } catch {
-      setAiModels(GEMINI_MODEL_FALLBACKS);
+      setAiModels(fallbackModelsForProvider(provider));
       setAiModelStatus('');
     } finally {
       setAiModelsLoading(false);
@@ -1218,7 +1252,7 @@ export function MonitorPage() {
         if (cancelled) return false;
         const cfg = await cRes.json();
         setAiConfig(cfg);
-        const configuredProvider = cfg.provider === 'openai' ? 'openai' : 'gemini';
+        const configuredProvider = SUPPORTED_AI_PROVIDERS.includes(cfg.provider || '') ? (cfg.provider as string) : 'gemini';
         setAiProvider(configuredProvider);
         const resolvedModel = shouldUpgradeAiModel(configuredProvider, cfg.model)
           ? defaultModelForProvider(configuredProvider)
@@ -1227,6 +1261,9 @@ export function MonitorPage() {
         const modelsPayload = await modelsRes.json().catch(() => ({}));
         if (configuredProvider === 'openai') {
           setAiModels(OPENAI_MODEL_FALLBACKS);
+          setAiModelStatus('');
+        } else if (configuredProvider === 'groq') {
+          setAiModels(GROQ_MODEL_FALLBACKS);
           setAiModelStatus('');
         } else if (modelsPayload.ok) {
           setAiModels(Array.isArray(modelsPayload.models) && modelsPayload.models.length ? modelsPayload.models : GEMINI_MODEL_FALLBACKS);

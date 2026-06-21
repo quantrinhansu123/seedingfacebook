@@ -9,6 +9,7 @@ DEFAULT_API_KEY = ''
 PROVIDERS = {
     'gemini': { 'name': 'Google Gemini', 'default_model': DEFAULT_MODEL },
     'openai': { 'name': 'OpenAI',        'default_model': 'gpt-4o-mini' },
+    'groq':   { 'name': 'Groq',          'default_model': 'llama-3.3-70b-versatile' },
     'claude': { 'name': 'Claude',        'default_model': 'claude-3-haiku-20240307' },
 }
 
@@ -729,6 +730,8 @@ class AIClassifier:
             return self._call_gemini(prompt)
         elif self.provider == 'openai':
             return self._call_openai(prompt)
+        elif self.provider == 'groq':
+            return self._call_groq(prompt)
         elif self.provider == 'claude':
             return self._call_claude(prompt)
         raise ValueError(f'Unknown provider: {self.provider}')
@@ -761,6 +764,23 @@ class AIClassifier:
         data = resp.json()
         if 'error' in data:
             raise Exception(data['error'].get('message', 'OpenAI API error'))
+        return data['choices'][0]['message']['content']
+
+    def _call_groq(self, prompt: str) -> str:
+        resp = requests.post('https://api.groq.com/openai/v1/chat/completions',
+            headers={
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json',
+            },
+            json={
+                'model': self.model,
+                'messages': [{'role': 'user', 'content': prompt}],
+                'temperature': 0.3,
+            }, timeout=60)
+        data = resp.json()
+        if 'error' in data:
+            err = data.get('error') or {}
+            raise Exception(err.get('message', 'Groq API error'))
         return data['choices'][0]['message']['content']
 
     def _call_claude(self, prompt: str) -> str:

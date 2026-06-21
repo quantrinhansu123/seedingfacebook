@@ -211,6 +211,7 @@ export function SaleSetupPanel(props: Props) {
           <select value={aiProvider || 'gemini'} onChange={(e) => onProviderChange(e.target.value)}>
             <option value="gemini">Google Gemini</option>
             <option value="openai">OpenAI / ChatGPT</option>
+            <option value="groq">Groq</option>
           </select>
           <select className="ai-model-select" value={aiModel} onChange={(e) => onModelChange(e.target.value)}>
             {modelOptions.map((item) => (
