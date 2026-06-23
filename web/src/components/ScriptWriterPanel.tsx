@@ -106,24 +106,24 @@ type AiConfig = {
 
 const BLOCK_TYPES: Array<{ id: BlockType; label: string; icon: string; placeholder: string }> = [
   { id: 'text', label: 'TỰ VIẾT', icon: '📝', placeholder: 'Nhập nội dung của bạn tại đây...' },
-  { id: 'h1', label: 'MỞ ĐẦU', icon: '🔠', placeholder: 'Mở đầu / tiêu đề lớn...' },
-  { id: 'h2', label: 'MỞ ĐẦU', icon: '🔡', placeholder: 'Mở đầu / đề mục...' },
+  { id: 'h1', label: 'TIÊU ĐỀ LỚN', icon: '🔠', placeholder: 'Tiêu đề lớn...' },
+  { id: 'h2', label: 'TIÊU ĐỀ PHỤ', icon: '🔡', placeholder: 'Đề mục / tiêu đề phụ...' },
   { id: 'hook', label: 'HOOK', icon: '⚡', placeholder: 'Hook thu hút 3 giây đầu...' },
-  { id: 'body', label: 'MỞ ĐẦU', icon: '📄', placeholder: 'Nội dung chính...' },
+  { id: 'body', label: 'BODY', icon: '📄', placeholder: 'Nội dung chính...' },
   { id: 'cta', label: 'CTA', icon: '🔔', placeholder: 'Kêu gọi hành động...' },
-  { id: 'scene', label: 'MỞ ĐẦU', icon: '🎬', placeholder: '[Cảnh quay / góc máy]...' },
-  { id: 'quote', label: 'TỰ VIẾT', icon: '💬', placeholder: 'Trích dẫn...' },
+  { id: 'scene', label: 'SCREEN', icon: '🎬', placeholder: '[Cảnh quay / góc máy]...' },
+  { id: 'quote', label: 'TRÍCH DẪN', icon: '💬', placeholder: 'Trích dẫn...' },
 ];
 
 const BLOCK_V3_META: Record<BlockType, { label: string; tone: 'hook' | 'intro' | 'cta' | 'custom' }> = {
   hook: { label: 'HOOK', tone: 'hook' },
-  h1: { label: 'MỞ ĐẦU', tone: 'intro' },
-  h2: { label: 'MỞ ĐẦU', tone: 'intro' },
-  body: { label: 'MỞ ĐẦU', tone: 'intro' },
-  scene: { label: 'MỞ ĐẦU', tone: 'intro' },
+  h1: { label: 'TIÊU ĐỀ LỚN', tone: 'intro' },
+  h2: { label: 'TIÊU ĐỀ PHỤ', tone: 'intro' },
+  body: { label: 'BODY', tone: 'intro' },
+  scene: { label: 'SCREEN', tone: 'intro' },
   cta: { label: 'CTA', tone: 'cta' },
   text: { label: 'TỰ VIẾT', tone: 'custom' },
-  quote: { label: 'TỰ VIẾT', tone: 'custom' },
+  quote: { label: 'TRÍCH DẪN', tone: 'custom' },
 };
 
 type AiStudioTab = 'quick' | 'hook' | 'chat' | 'settings';
