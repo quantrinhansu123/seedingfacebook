@@ -8995,10 +8995,16 @@ def _task_db_payload(task: dict, existing: dict | None = None) -> dict:
         'created_by_staff_name': existing.get('created_by_staff_name') or staff.get('name') or staff.get('username') or None,
         'created_at': existing.get('created_at') or now,
         'updated_at': now,
+        'started_at': existing.get('started_at') or None,
+        'submitted_at': existing.get('submitted_at') or None,
+        'approved_at': existing.get('approved_at') or None,
+        'completed_at': existing.get('completed_at') or None,
+        'archived_at': existing.get('archived_at') or None,
+        'approved_by_staff_id': existing.get('approved_by_staff_id') or None,
+        'approved_by_staff_name': existing.get('approved_by_staff_name') or None,
     }
     for field in ('started_at', 'submitted_at', 'approved_at', 'completed_at', 'archived_at', 'approved_by_staff_id', 'approved_by_staff_name'):
-        if task.get(field) or existing.get(field):
-            payload[field] = task.get(field) or existing.get(field)
+        payload[field] = task.get(field) or existing.get(field) or payload[field]
     return payload
 
 
