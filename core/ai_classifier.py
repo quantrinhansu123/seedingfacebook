@@ -280,6 +280,18 @@ def _friendly_ai_error(message: str) -> str:
     return msg or 'AI API error'
 
 
+def _friendly_openai_error(message: str) -> str:
+    msg = str(message or '').strip()
+    lower = msg.lower()
+    if 'incorrect api key' in lower or 'invalid api key' in lower or '401' in lower:
+        return 'OpenAI API key không hợp lệ. Lưu ý: key phải lấy ở platform.openai.com, không phải tài khoản/mật khẩu ChatGPT.'
+    if 'quota' in lower or 'billing' in lower or 'insufficient_quota' in lower or '429' in lower:
+        return 'OpenAI API key đã hết quota/chưa bật billing hoặc project không còn credit. Kiểm tra Billing trên platform.openai.com rồi thử lại.'
+    if 'model' in lower and ('does not exist' in lower or 'not found' in lower or 'access' in lower):
+        return f'Model OpenAI đang chọn không dùng được với key này. Đổi về gpt-4o-mini để test. Chi tiết: {msg}'
+    return msg or 'OpenAI API error'
+
+
 class AIClassifier:
     def __init__(self, provider: str, model: str, api_key: str, categories: List[str] = None):
         self.provider = provider
@@ -755,15 +767,22 @@ class AIClassifier:
 
     def _call_openai(self, prompt: str) -> str:
         resp = requests.post('https://api.openai.com/v1/chat/completions',
-            headers={'Authorization': f'Bearer {self.api_key}'},
+            headers={
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json',
+            },
             json={
                 'model': self.model,
                 'messages': [{'role': 'user', 'content': prompt}],
                 'temperature': 0.3,
             }, timeout=60)
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as e:
+            raise Exception(f'OpenAI API trả phản hồi không hợp lệ HTTP {resp.status_code}: {resp.text[:200]}') from e
         if 'error' in data:
-            raise Exception(data['error'].get('message', 'OpenAI API error'))
+            err = data.get('error') or {}
+            raise Exception(_friendly_openai_error(err.get('message', 'OpenAI API error')))
         return data['choices'][0]['message']['content']
 
     def _call_groq(self, prompt: str) -> str:

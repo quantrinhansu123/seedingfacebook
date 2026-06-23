@@ -9726,10 +9726,25 @@ def ai_config_save():
 
 @app.route('/api/ai/test', methods=['POST'])
 def ai_test():
-    classifier = _get_classifier()
+    body = request.get_json(silent=True) or {}
+    cfg, _, _ = _effective_ai_config()
+    provider = str(body.get('provider') or cfg.get('provider') or 'gemini').strip().lower()
+    if provider not in PROVIDERS:
+        provider = 'gemini'
+    default_model = PROVIDERS.get(provider, {}).get('default_model', DEFAULT_MODEL)
+    model = str(body.get('model') or cfg.get('model') or default_model).strip() or default_model
+    keys = dict(cfg.get('keys') or {})
+    test_key = str(body.get('key') or '').strip()
+    if test_key:
+        keys[provider] = test_key
+    api_key = _get_ai_key_from_config(provider, {**cfg, 'keys': keys})
+    classifier = AIClassifier(provider, model, api_key, cfg.get('categories', DEFAULT_CATEGORIES))
     if not classifier.api_key:
-        return jsonify({'ok': False, 'error': 'Chưa nhập API key'})
+        provider_label = PROVIDERS.get(provider, {}).get('name') or provider.upper()
+        return jsonify({'ok': False, 'error': f'Chưa nhập API key cho {provider_label}', 'provider': provider, 'model': model})
     result = classifier.test_connection()
+    result['provider'] = provider
+    result['model'] = model
     return jsonify(result)
 
 

@@ -2409,9 +2409,19 @@ export function MonitorPage() {
   async function testAi() {
     setAiStatus('⏳ Đang test...');
     try {
-      const r = await api('/api/ai/test', { method: 'POST' });
+      const body: Record<string, string> = {
+        provider: aiProvider || 'gemini',
+        model: aiModel || defaultModelForProvider(aiProvider),
+      };
+      if (aiKeyInput.trim()) body.key = aiKeyInput.trim();
+      const r = await api('/api/ai/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
       const d = await r.json();
-      setAiStatus(d.ok ? '✅ Kết nối OK!' : '❌ ' + (d.error || 'Lỗi'));
+      const label = d.provider === 'openai' ? 'OpenAI/ChatGPT' : d.provider === 'groq' ? 'Groq' : 'Gemini';
+      setAiStatus(d.ok ? `✅ Kết nối ${label} OK!` : '❌ ' + (d.error || 'Lỗi'));
     } catch {
       setAiStatus('❌ Lỗi kết nối');
     }

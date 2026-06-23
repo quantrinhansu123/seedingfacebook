@@ -873,9 +873,20 @@ export function ScriptWriterPanel() {
     setAiConfigBusy(true);
     setAiConfigStatus('Đang test AI...');
     try {
-      const response = await api('/api/ai/test', { method: 'POST', timeoutMs: 45000 });
+      const body: Record<string, string> = {
+        provider: aiProvider,
+        model: aiModel || DEFAULT_MODELS[aiProvider] || DEFAULT_MODELS.gemini,
+      };
+      if (aiKeyInput.trim()) body.key = aiKeyInput.trim();
+      const response = await api('/api/ai/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        timeoutMs: 45000,
+      });
       const payload = await response.json().catch(() => ({}));
-      setAiConfigStatus(payload.ok ? 'Kết nối AI OK.' : (payload.error || 'AI chưa kết nối được.'));
+      const providerLabel = payload.provider === 'openai' ? 'OpenAI/ChatGPT' : payload.provider === 'groq' ? 'Groq' : 'Gemini';
+      setAiConfigStatus(payload.ok ? `Kết nối ${providerLabel} OK (${payload.model || body.model}).` : (payload.error || 'AI chưa kết nối được.'));
     } catch {
       setAiConfigStatus('Không gọi được backend để test AI.');
     } finally {
