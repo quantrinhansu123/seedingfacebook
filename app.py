@@ -8315,57 +8315,59 @@ def _app_kv_storage_warning(exc: Exception) -> str:
     return message
 
 
+def _content_ai_settings_key() -> str:
+    return _current_staff_ai_key() or 'default'
+
+
+def _load_content_ai_row() -> tuple[dict | None, str]:
+    if not USE_SUPABASE:
+        return None, ''
+    try:
+        return sb.get_customer_ai_settings(_content_ai_settings_key(), SUPABASE_CUSTOMER_AI_TABLE), ''
+    except Exception as e:
+        return None, str(e)[:300]
+
+
+def _save_content_ai_row(payload: dict) -> tuple[bool, str]:
+    if not USE_SUPABASE:
+        return False, 'Chưa cấu hình Supabase'
+    staff = _current_staff()
+    staff_key = _content_ai_settings_key()
+    try:
+        sb.upsert_customer_ai_settings({
+            'staff_key': staff_key,
+            'staff_id': str(staff.get('id') or '') if staff_key != 'default' else '',
+            'username': str(staff.get('username') or '') if staff_key != 'default' else '',
+            'customer_name': str(staff.get('name') or staff.get('username') or '') if staff_key != 'default' else 'Default',
+            **payload,
+        }, SUPABASE_CUSTOMER_AI_TABLE)
+        return True, ''
+    except Exception as e:
+        return False, str(e)[:300]
+
+
 def _load_content_studio_setup() -> tuple[dict, str, str]:
     local = _clean_content_studio_setup(_read_json(CONTENT_STUDIO_SETUP_FILE, _default_content_studio_setup()))
-    staff_key = _current_staff_ai_key()
-    if USE_SUPABASE and staff_key:
-        try:
-            row = sb.get_customer_ai_settings(staff_key, SUPABASE_CUSTOMER_AI_TABLE)
-            if row and isinstance(row.get('content_setup'), dict):
-                setup = _clean_content_studio_setup(row.get('content_setup'))
-                _write_json(CONTENT_STUDIO_SETUP_FILE, setup)
-                return setup, 'supabase', ''
-        except Exception as e:
-            return local, 'local', f'Supabase chưa đọc được cấu hình prompt theo user. {str(e)[:300]} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
-    if not USE_SUPABASE:
-        return local, 'local', ''
-    try:
-        remote = sb.kv_get(CONTENT_STUDIO_SETUP_KV, None)
-        if remote:
-            setup = _clean_content_studio_setup(remote)
-            _write_json(CONTENT_STUDIO_SETUP_FILE, setup)
-            return setup, 'supabase', ''
-    except Exception as e:
-        return local, 'local', _app_kv_storage_warning(e)
+    row, warning = _load_content_ai_row()
+    if row and isinstance(row.get('content_setup'), dict):
+        setup = _clean_content_studio_setup(row.get('content_setup'))
+        _write_json(CONTENT_STUDIO_SETUP_FILE, setup)
+        return setup, 'supabase', ''
+    if warning:
+        return local, 'local', f'Supabase chưa đọc được cấu hình prompt theo user. {warning} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
     return local, 'local', ''
 
 
 def _save_content_studio_setup(setup: dict) -> tuple[str, str]:
     cleaned = _clean_content_studio_setup(setup)
     _write_json(CONTENT_STUDIO_SETUP_FILE, cleaned)
-    staff_key = _current_staff_ai_key()
-    if USE_SUPABASE and staff_key:
-        staff = _current_staff()
-        try:
-            sb.upsert_customer_ai_settings({
-                'staff_key': staff_key,
-                'staff_id': str(staff.get('id') or ''),
-                'username': str(staff.get('username') or ''),
-                'customer_name': str(staff.get('name') or staff.get('username') or ''),
-                'content_setup': cleaned,
-            }, SUPABASE_CUSTOMER_AI_TABLE)
-            return 'supabase', ''
-        except Exception as e:
-            message = str(e)[:300]
-            if 'PGRST204' in message or 'content_setup' in message:
-                return 'local', f'{CUSTOMER_AI_CONTENT_SETUP_HINT} Chi tiết: {message} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
-            return 'local', f'Supabase chưa ghi được cấu hình prompt theo user: {message} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
-    if USE_SUPABASE:
-        try:
-            sb.kv_set(CONTENT_STUDIO_SETUP_KV, cleaned)
-            return 'supabase', ''
-        except Exception as e:
-            return 'local', _app_kv_storage_warning(e)
+    ok, warning = _save_content_ai_row({'content_setup': cleaned})
+    if ok:
+        return 'supabase', ''
+    if warning:
+        if 'PGRST204' in warning or 'content_setup' in warning:
+            return 'local', f'{CUSTOMER_AI_CONTENT_SETUP_HINT} Chi tiết: {warning} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
+        return 'local', f'Supabase chưa ghi được cấu hình prompt theo user: {warning} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
     return 'local', ''
 
 
@@ -8408,55 +8410,26 @@ def _clean_content_techniques(rows) -> list[dict]:
 def _load_content_techniques() -> tuple[list[dict], str, str]:
     local_raw = _read_json(CONTENT_TECHNIQUES_FILE, None)
     local = _clean_content_techniques(local_raw if isinstance(local_raw, list) else _default_content_techniques())
-    staff_key = _current_staff_ai_key()
-    if USE_SUPABASE and staff_key:
-        try:
-            row = sb.get_customer_ai_settings(staff_key, SUPABASE_CUSTOMER_AI_TABLE)
-            if row and isinstance(row.get('content_techniques'), list):
-                rows = _clean_content_techniques(row.get('content_techniques'))
-                _write_json(CONTENT_TECHNIQUES_FILE, rows)
-                return rows, 'supabase', ''
-        except Exception as e:
-            return local, 'local', f'Supabase chưa đọc được kỹ thuật content theo user. {str(e)[:300]} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
-    if not USE_SUPABASE:
-        return local, 'local', ''
-    try:
-        remote = sb.kv_get(CONTENT_TECHNIQUES_KV, None)
-        if isinstance(remote, list):
-            rows = _clean_content_techniques(remote)
-            _write_json(CONTENT_TECHNIQUES_FILE, rows)
-            return rows, 'supabase', ''
-    except Exception as e:
-        return local, 'local', _app_kv_storage_warning(e)
+    row, warning = _load_content_ai_row()
+    if row and isinstance(row.get('content_techniques'), list):
+        rows = _clean_content_techniques(row.get('content_techniques'))
+        _write_json(CONTENT_TECHNIQUES_FILE, rows)
+        return rows, 'supabase', ''
+    if warning:
+        return local, 'local', f'Supabase chưa đọc được kỹ thuật content theo user. {warning} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
     return local, 'local', ''
 
 
 def _save_content_techniques(rows: list[dict]) -> tuple[str, str]:
     cleaned = _clean_content_techniques(rows)
     _write_json(CONTENT_TECHNIQUES_FILE, cleaned)
-    staff_key = _current_staff_ai_key()
-    if USE_SUPABASE and staff_key:
-        staff = _current_staff()
-        try:
-            sb.upsert_customer_ai_settings({
-                'staff_key': staff_key,
-                'staff_id': str(staff.get('id') or ''),
-                'username': str(staff.get('username') or ''),
-                'customer_name': str(staff.get('name') or staff.get('username') or ''),
-                'content_techniques': cleaned,
-            }, SUPABASE_CUSTOMER_AI_TABLE)
-            return 'supabase', ''
-        except Exception as e:
-            message = str(e)[:300]
-            if 'PGRST204' in message or 'content_techniques' in message:
-                return 'local', f'{CUSTOMER_AI_CONTENT_TECHNIQUES_HINT} Chi tiết: {message} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
-            return 'local', f'Supabase chưa ghi được kỹ thuật content theo user: {message} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
-    if USE_SUPABASE:
-        try:
-            sb.kv_set(CONTENT_TECHNIQUES_KV, cleaned)
-            return 'supabase', ''
-        except Exception as e:
-            return 'local', _app_kv_storage_warning(e)
+    ok, warning = _save_content_ai_row({'content_techniques': cleaned})
+    if ok:
+        return 'supabase', ''
+    if warning:
+        if 'PGRST204' in warning or 'content_techniques' in warning:
+            return 'local', f'{CUSTOMER_AI_CONTENT_TECHNIQUES_HINT} Chi tiết: {warning} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
+        return 'local', f'Supabase chưa ghi được kỹ thuật content theo user: {warning} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
     return 'local', ''
 
 
