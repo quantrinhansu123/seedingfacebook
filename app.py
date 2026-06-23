@@ -8124,6 +8124,9 @@ APP_KV_RLS_FIX_HINT = (
     'Supabase app_kv đang chặn ghi do RLS. '
     'Sửa bằng cách thêm SUPABASE_SERVICE_ROLE_KEY cho backend hoặc chạy supabase_app_kv_rls_fix.sql trong Supabase SQL Editor.'
 )
+CUSTOMER_AI_CONTENT_SETUP_HINT = (
+    f'Chạy lại file supabase_customer_ai_settings.sql để thêm cột content_setup cho bảng {SUPABASE_CUSTOMER_AI_TABLE}.'
+)
 CONTENT_SECTION_BLOCK_TYPES = {
     'opening': {'hook', 'h1', 'h2'},
     'body': {'body', 'text', 'scene', 'quote'},
@@ -8175,6 +8178,16 @@ def _app_kv_storage_warning(exc: Exception) -> str:
 
 def _load_content_studio_setup() -> tuple[dict, str, str]:
     local = _clean_content_studio_setup(_read_json(CONTENT_STUDIO_SETUP_FILE, _default_content_studio_setup()))
+    staff_key = _current_staff_ai_key()
+    if USE_SUPABASE and staff_key:
+        try:
+            row = sb.get_customer_ai_settings(staff_key, SUPABASE_CUSTOMER_AI_TABLE)
+            if row and isinstance(row.get('content_setup'), dict):
+                setup = _clean_content_studio_setup(row.get('content_setup'))
+                _write_json(CONTENT_STUDIO_SETUP_FILE, setup)
+                return setup, 'supabase', ''
+        except Exception as e:
+            return local, 'local', f'Supabase chưa đọc được cấu hình prompt theo user. {str(e)[:300]} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
     if not USE_SUPABASE:
         return local, 'local', ''
     try:
@@ -8191,6 +8204,23 @@ def _load_content_studio_setup() -> tuple[dict, str, str]:
 def _save_content_studio_setup(setup: dict) -> tuple[str, str]:
     cleaned = _clean_content_studio_setup(setup)
     _write_json(CONTENT_STUDIO_SETUP_FILE, cleaned)
+    staff_key = _current_staff_ai_key()
+    if USE_SUPABASE and staff_key:
+        staff = _current_staff()
+        try:
+            sb.upsert_customer_ai_settings({
+                'staff_key': staff_key,
+                'staff_id': str(staff.get('id') or ''),
+                'username': str(staff.get('username') or ''),
+                'customer_name': str(staff.get('name') or staff.get('username') or ''),
+                'content_setup': cleaned,
+            }, SUPABASE_CUSTOMER_AI_TABLE)
+            return 'supabase', ''
+        except Exception as e:
+            message = str(e)[:300]
+            if 'PGRST204' in message or 'content_setup' in message:
+                return 'local', f'{CUSTOMER_AI_CONTENT_SETUP_HINT} Chi tiết: {message} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
+            return 'local', f'Supabase chưa ghi được cấu hình prompt theo user: {message} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
     if USE_SUPABASE:
         try:
             sb.kv_set(CONTENT_STUDIO_SETUP_KV, cleaned)
