@@ -54,13 +54,18 @@ export function ApprovedScriptsPanel() {
   async function load() {
     setStatus('Đang tải bài đã duyệt...');
     try {
-      const response = await api('/api/scripts', { timeoutMs: 30000 });
+      const response = await api('/api/scripts?status=approved', { timeoutMs: 30000 });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không tải được kịch bản');
-      const rows = (Array.isArray(payload.scripts) ? payload.scripts : []).filter((item: ScriptDocument) => item.status === 'approved');
+      const rows = Array.isArray(payload.scripts) ? payload.scripts as ScriptDocument[] : [];
       setScripts(rows);
-      setSelectedId((current) => (rows.some((item: ScriptDocument) => item.id === current) ? current : rows[0]?.id || ''));
-      setStatus(payload.warning || `${rows.length} bài đã duyệt`);
+      setSelectedId((current) => (rows.some((item) => item.id === current) ? current : rows[0]?.id || ''));
+      setStatus(
+        payload.warning
+          || (rows.length
+            ? `${rows.length} bài đã duyệt`
+            : 'Chưa có bài đã duyệt — vào Kịch bản và bấm Duyệt'),
+      );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Không tải được bài đã duyệt');
     }

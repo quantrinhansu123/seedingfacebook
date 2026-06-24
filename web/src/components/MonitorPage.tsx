@@ -2865,7 +2865,11 @@ export function MonitorPage() {
         <main
           className={`console-content${
             activeView === 'manage' ? ' manage-active' : ''
-          }${activeView === 'marketing' ? ' marketing-active' : ''}`}
+          }${activeView === 'marketing' ? ' marketing-active' : ''}${
+            activeView === 'scripts' ? ' scripts-active' : ''
+          }${activeView === 'approved' ? ' approved-active' : ''}${
+            activeView === 'plan' ? ' plan-active' : ''
+          }`}
         >
           {activeView !== 'manage' && activeView !== 'marketing' ? (
           <div className="console-topbar">

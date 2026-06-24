@@ -322,11 +322,59 @@ def _default_content_studio_setup() -> dict:
 def _default_content_techniques() -> list[dict]:
     return [
         {
+            'id': 'pas',
+            'name': 'PAS',
+            'content': (
+                'Problem: nêu rõ vấn đề hoặc nỗi đau khách đang gặp. '
+                'Agitate: khuếch đại hậu quả nếu không giải quyết, tạo cảm giác cấp bách. '
+                'Solution: giới thiệu sản phẩm/dịch vụ như giải pháp trực tiếp cho vấn đề đó.'
+            ),
+            'created_at': 'system',
+            'updated_at': 'system',
+            'system': True,
+        },
+        {
             'id': 'aida',
             'name': 'AIDA',
             'content': (
                 'Attention: mở đầu gây chú ý. Interest: nêu lợi ích/vấn đề liên quan. '
                 'Desire: làm rõ mong muốn và lý do nên chọn. Action: kêu gọi hành động cụ thể.'
+            ),
+            'created_at': 'system',
+            'updated_at': 'system',
+            'system': True,
+        },
+        {
+            'id': 'bab',
+            'name': 'BAB',
+            'content': (
+                'Before: mô tả tình trạng hiện tại khó khăn hoặc thiếu sót. '
+                'After: vẽ bức tranh tích cực sau khi giải quyết. '
+                'Bridge: sản phẩm/dịch vụ là cầu nối giúp chuyển từ Before sang After.'
+            ),
+            'created_at': 'system',
+            'updated_at': 'system',
+            'system': True,
+        },
+        {
+            'id': 'storytelling',
+            'name': 'Storytelling',
+            'content': (
+                'Mở bằng tình huống hoặc câu chuyện có nhân vật dễ đồng cảm. '
+                'Đưa vào xung đột/thử thách để tạo kịch tính. '
+                'Kết bằng bài học và liên hệ tự nhiên tới sản phẩm/dịch vụ.'
+            ),
+            'created_at': 'system',
+            'updated_at': 'system',
+            'system': True,
+        },
+        {
+            'id': 'social-proof',
+            'name': 'Social Proof',
+            'content': (
+                'Dùng review, testimonial, số liệu hoặc case study để tăng độ tin cậy. '
+                'Nêu số người/khách hàng đã tin dùng hoặc kết quả đạt được. '
+                'Giảm rủi ro bằng bằng chứng xã hội trước khi kêu gọi hành động.'
             ),
             'created_at': 'system',
             'updated_at': 'system',
@@ -8407,17 +8455,44 @@ def _clean_content_techniques(rows) -> list[dict]:
     return cleaned
 
 
+def _ensure_system_content_techniques(rows: list[dict]) -> tuple[list[dict], bool]:
+    defaults = _default_content_techniques()
+    existing_names = {str(item.get('name') or '').strip().lower() for item in rows if str(item.get('name') or '').strip()}
+    existing_ids = {str(item.get('id') or '').strip().lower() for item in rows if str(item.get('id') or '').strip()}
+    merged = list(rows)
+    changed = False
+    for default in defaults:
+        name_key = str(default.get('name') or '').strip().lower()
+        id_key = str(default.get('id') or '').strip().lower()
+        if name_key in existing_names or id_key in existing_ids:
+            continue
+        merged.append(dict(default))
+        changed = True
+    if not merged:
+        merged = [dict(item) for item in defaults]
+        changed = True
+    return _clean_content_techniques(merged), changed
+
+
 def _load_content_techniques() -> tuple[list[dict], str, str]:
     local_raw = _read_json(CONTENT_TECHNIQUES_FILE, None)
-    local = _clean_content_techniques(local_raw if isinstance(local_raw, list) else _default_content_techniques())
+    local = _clean_content_techniques(local_raw if isinstance(local_raw, list) else [])
     row, warning = _load_content_ai_row()
+    storage = 'local'
+    rows = local
     if row and isinstance(row.get('content_techniques'), list):
         rows = _clean_content_techniques(row.get('content_techniques'))
-        _write_json(CONTENT_TECHNIQUES_FILE, rows)
-        return rows, 'supabase', ''
+        storage = 'supabase'
+    rows, seeded = _ensure_system_content_techniques(rows)
+    if seeded:
+        storage, save_warning = _save_content_techniques(rows)
+        seed_note = 'Đã tự thêm kỹ thuật marketing mặc định (PAS, AIDA, BAB, Storytelling, Social Proof).'
+        if save_warning:
+            return rows, storage, f'{seed_note} {save_warning}'
+        return rows, storage, seed_note
     if warning:
-        return local, 'local', f'Supabase chưa đọc được kỹ thuật content theo user. {warning} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
-    return local, 'local', ''
+        return rows, storage, f'Supabase chưa đọc được kỹ thuật content theo user. {warning} ({_supabase_debug_context(SUPABASE_CUSTOMER_AI_TABLE)})'
+    return rows, storage, ''
 
 
 def _save_content_techniques(rows: list[dict]) -> tuple[str, str]:
@@ -8767,11 +8842,15 @@ def _clean_script_library(rows) -> list[dict]:
             block_type = str(raw_block.get('type') or 'text').strip().lower()
             if not block_id:
                 continue
-            blocks.append({
+            block_row = {
                 'id': block_id,
                 'type': block_type if block_type in allowed_block_types else 'text',
                 'text': str(raw_block.get('text') or '')[:50000],
-            })
+            }
+            align = str(raw_block.get('align') or '').strip().lower()
+            if align in {'left', 'center', 'right', 'justify'}:
+                block_row['align'] = align
+            blocks.append(block_row)
         status = str(raw.get('status') or 'draft').strip().lower()
         cleaned.append({
             'id': script_id,
@@ -8852,6 +8931,35 @@ def _workflow_status_from_task(raw: dict) -> str:
     except (TypeError, ValueError):
         col = 0
     return PLAN_COL_TO_WORKFLOW_STATUS.get(col, 'todo')
+
+
+def _script_status_from_task(task: dict) -> str:
+    workflow_status = str(task.get('status') or 'todo').strip().lower()
+    if task.get('approved_at') or workflow_status in {'approved', 'archived'}:
+        return 'approved'
+    return WORKFLOW_TO_SCRIPT_STATUS.get(workflow_status, 'draft')
+
+
+def _apply_legacy_script_statuses(scripts: list[dict]) -> list[dict]:
+    if not USE_SUPABASE or not scripts:
+        return scripts
+    try:
+        legacy_rows = sb.list_content_scripts(SUPABASE_SCRIPT_TABLE)
+    except Exception:
+        return scripts
+    legacy_by_id = {str(row.get('id') or ''): row for row in legacy_rows}
+    for script in scripts:
+        legacy = legacy_by_id.get(script['id'])
+        if legacy and str(legacy.get('status') or '').strip().lower() == 'approved':
+            script['status'] = 'approved'
+    return scripts
+
+
+def _filter_scripts_by_status(rows: list[dict], status: str) -> list[dict]:
+    wanted = str(status or '').strip().lower()
+    if not wanted:
+        return rows
+    return [row for row in rows if str(row.get('status') or '').strip().lower() == wanted]
 
 
 def _workflow_status_from_script(status: str, existing: dict | None = None) -> str:
@@ -9083,17 +9191,17 @@ def _scripts_from_workflow_rows(tasks: list[dict], blocks: list[dict]) -> list[d
         if not script_id:
             continue
         by_script.setdefault(script_id, []).append(block)
-    scripts = []
+    scripts_by_id: dict[str, dict] = {}
     for task in tasks or []:
         script_id = str(task.get('script_id') or '').strip()
         if not script_id:
             continue
         rows = sorted(by_script.get(script_id, []), key=lambda item: int(item.get('block_order') or 0))
-        scripts.append({
+        entry = {
             'id': script_id,
             'title': task.get('title') or '',
             'platform': task.get('platform') or 'TikTok',
-            'status': WORKFLOW_TO_SCRIPT_STATUS.get(str(task.get('status') or 'todo'), 'draft'),
+            'status': _script_status_from_task(task),
             'writer': task.get('assignee_name') or '',
             'date': task.get('due_date') or '',
             'blocks': [{
@@ -9102,8 +9210,24 @@ def _scripts_from_workflow_rows(tasks: list[dict], blocks: list[dict]) -> list[d
                 'text': row.get('content') or '',
                 **({'align': (row.get('metadata') or {}).get('align')} if isinstance(row.get('metadata'), dict) and (row.get('metadata') or {}).get('align') else {}),
             } for idx, row in enumerate(rows)],
-        })
-    return _clean_script_library(scripts)
+        }
+        existing = scripts_by_id.get(script_id)
+        if not existing:
+            scripts_by_id[script_id] = entry
+            continue
+        task_is_workflow = str(task.get('id') or '') == f'task-{script_id}'
+        existing_is_workflow = str(existing.get('_task_id') or '') == f'task-{script_id}'
+        if task_is_workflow and not existing_is_workflow:
+            entry['_task_id'] = str(task.get('id') or '')
+            scripts_by_id[script_id] = entry
+        elif len(entry['blocks']) > len(existing.get('blocks') or []):
+            entry['_task_id'] = str(task.get('id') or '')
+            scripts_by_id[script_id] = entry
+    cleaned = []
+    for script in scripts_by_id.values():
+        script.pop('_task_id', None)
+        cleaned.append(script)
+    return _clean_script_library(cleaned)
 
 
 def _content_workflow_supabase_warning(exc: Exception) -> str:
@@ -9116,58 +9240,166 @@ def _content_workflow_supabase_warning(exc: Exception) -> str:
 
 
 def _load_scripts_from_workflow_supabase() -> list[dict]:
-    tasks = _filter_content_tasks_for_current_staff(sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE))
+    # Thư viện kịch bản dùng chung — không lọc theo staff như board Kế hoạch.
+    tasks = sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE)
     blocks = sb.list_content_script_blocks(SUPABASE_CONTENT_SCRIPT_BLOCK_TABLE)
     return _scripts_from_workflow_rows(tasks, blocks)
+
+
+def _script_id_for_plan_task(task: dict) -> str:
+    task_id = str(task.get('id') or '').strip()
+    if task_id.startswith('task-'):
+        return f'script-{task_id[5:]}'[:160]
+    compact = re.sub(r'[^0-9a-zA-Z]+', '-', task_id).strip('-').lower()
+    return (f'script-{compact}' if compact else f'script-{uuid.uuid4().hex[:12]}')[:160]
+
+
+def _provision_scripts_for_active_plan_tasks(
+    rows: list[dict],
+    existing_scripts: list[dict] | None = None,
+) -> tuple[list[dict], list[dict]]:
+    scripts_by_id = {str(script.get('id') or ''): script for script in (existing_scripts or []) if str(script.get('id') or '').strip()}
+    updated_rows: list[dict] = []
+    new_scripts: list[dict] = []
+    for raw in rows:
+        row = dict(raw)
+        status = _workflow_status_from_task(row)
+        if status not in {'doing', 'pending'}:
+            updated_rows.append(row)
+            continue
+        script_id = str(row.get('script_id') or '').strip()
+        if not script_id:
+            script_id = _script_id_for_plan_task(row)
+            row['script_id'] = script_id
+        if script_id in scripts_by_id:
+            updated_rows.append(row)
+            continue
+        script_status = 'pending' if status == 'pending' else 'draft'
+        script = {
+            'id': script_id,
+            'title': row.get('title') or 'Kịch bản',
+            'platform': row.get('platform') or 'TikTok',
+            'status': script_status,
+            'writer': str(row.get('assignee_name') or row.get('assignee') or '').strip(),
+            'date': str(row.get('due_date') or row.get('dl') or '').strip(),
+            'blocks': [{'id': f'{script_id}-block-0', 'type': 'hook', 'text': ''}],
+        }
+        new_scripts.append(script)
+        scripts_by_id[script_id] = script
+        updated_rows.append(row)
+    return updated_rows, new_scripts
+
+
+def _apply_script_provision_from_plan_tasks(rows: list[dict]) -> list[dict]:
+    if not USE_SUPABASE or not rows:
+        return rows
+    try:
+        existing_scripts = _load_scripts_from_workflow_supabase()
+    except Exception:
+        existing_scripts = []
+    updated_rows, new_scripts = _provision_scripts_for_active_plan_tasks(rows, existing_scripts)
+    if not new_scripts:
+        return updated_rows
+    scripts_by_id = {str(script.get('id') or ''): script for script in existing_scripts if str(script.get('id') or '').strip()}
+    for script in new_scripts:
+        scripts_by_id.setdefault(script['id'], script)
+    _save_scripts_to_workflow_supabase(list(scripts_by_id.values()))
+    return updated_rows
 
 
 def _save_scripts_to_workflow_supabase(rows: list[dict]) -> None:
     existing_tasks = sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE)
     by_script = {str(row.get('script_id') or ''): row for row in existing_tasks if row.get('script_id')}
     by_id = {str(row.get('id') or ''): row for row in existing_tasks if row.get('id')}
+    kept_script_ids = {script['id'] for script in rows}
+    removed_script_ids = [
+        str(row.get('script_id') or '').strip()
+        for row in existing_tasks
+        if str(row.get('script_id') or '').strip() and str(row.get('script_id') or '').strip() not in kept_script_ids
+    ]
     task_rows = []
     block_rows = []
     script_ids = []
-    next_task_ids = set()
     for script in rows:
         existing = by_script.get(script['id']) or by_id.get(f'task-{script["id"]}') or {}
         task, blocks = _script_db_payload_from_script(script, existing)
         task_rows.append(task)
         block_rows.extend(blocks)
         script_ids.append(script['id'])
-        next_task_ids.add(task['id'])
-    preserved_tasks = [
+    # Giữ task kế hoạch (id khác task kịch bản workflow), kể cả khi đã gắn script_id.
+    script_task_ids = {str(task_row.get('id') or '').strip() for task_row in task_rows if str(task_row.get('id') or '').strip()}
+    plan_tasks = [
         row for row in existing_tasks
-        if str(row.get('script_id') or '') not in {script['id'] for script in rows}
-        and str(row.get('id') or '') not in next_task_ids
+        if str(row.get('id') or '').strip() and str(row.get('id') or '').strip() not in script_task_ids
     ]
-    sb.sync_content_tasks([*preserved_tasks, *task_rows], SUPABASE_CONTENT_TASK_TABLE)
+    sb.sync_content_tasks([*plan_tasks, *task_rows], SUPABASE_CONTENT_TASK_TABLE)
     sb.sync_content_script_blocks(block_rows, script_ids, SUPABASE_CONTENT_SCRIPT_BLOCK_TABLE)
+    if removed_script_ids:
+        sb.purge_content_script_blocks(removed_script_ids, SUPABASE_CONTENT_SCRIPT_BLOCK_TABLE)
+
+
+def _sync_legacy_content_scripts_table(rows: list[dict]) -> None:
+    existing = sb.list_content_scripts(SUPABASE_SCRIPT_TABLE)
+    existing_by_id = {str(row.get('id') or ''): row for row in existing}
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    staff = _current_staff()
+    db_rows = []
+    for row in rows:
+        current = existing_by_id.get(row['id']) or {}
+        db_rows.append({
+            'id': row['id'],
+            'title': row['title'],
+            'platform': row['platform'],
+            'status': row['status'],
+            'writer': row['writer'],
+            'script_date': row['date'],
+            'blocks': row['blocks'],
+            'created_by_staff_id': current.get('created_by_staff_id') or staff.get('id') or None,
+            'created_by_staff_name': current.get('created_by_staff_name') or staff.get('name') or staff.get('username') or None,
+            'created_at': current.get('created_at') or now,
+            'updated_at': now,
+        })
+    sb.sync_content_scripts(db_rows, SUPABASE_SCRIPT_TABLE)
 
 
 @app.route('/api/scripts', methods=['GET'])
 def scripts_get():
+    status_filter = str(request.args.get('status') or '').strip().lower()
     if not USE_SUPABASE:
-        rows = _clean_script_library(_load_scripts_local())
-        return jsonify({'ok': True, 'scripts': rows, 'storage': 'local'})
+        return jsonify({
+            'ok': False,
+            'error': 'Chưa bật Supabase cho thư viện kịch bản. Không dùng dữ liệu local/mock.',
+            'storage': 'disabled',
+        }), 503
     try:
-        rows = _load_scripts_from_workflow_supabase()
+        all_tasks, _, _ = _load_tasks_any(include_all=True)
+        cleaned_tasks = _clean_content_tasks(all_tasks)
+        provisioned = _apply_script_provision_from_plan_tasks(cleaned_tasks)
+        before_links = {str(row.get('id') or ''): str(row.get('script_id') or '') for row in cleaned_tasks}
+        after_links = {str(row.get('id') or ''): str(row.get('script_id') or '') for row in provisioned}
+        if before_links != after_links:
+            _save_tasks_any(provisioned)
+        workflow_tasks = sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE)
+        rows = _apply_legacy_script_statuses(_load_scripts_from_workflow_supabase())
         if rows:
+            rows = _filter_scripts_by_status(rows, status_filter)
             return jsonify({'ok': True, 'scripts': rows, 'storage': 'supabase_workflow'})
-        legacy_rows = _clean_script_library(sb.list_content_scripts(SUPABASE_SCRIPT_TABLE))
+        if workflow_tasks:
+            return jsonify({'ok': True, 'scripts': [], 'storage': 'supabase_workflow'})
+        legacy_rows = _filter_scripts_by_status(
+            _clean_script_library(sb.list_content_scripts(SUPABASE_SCRIPT_TABLE)),
+            status_filter,
+        )
         warning = 'Đang đọc dữ liệu bảng content_scripts cũ. Bấm Lưu bài một lần để migrate sang content_tasks/content_script_blocks.'
         return jsonify({'ok': True, 'scripts': legacy_rows, 'storage': 'supabase_legacy', 'warning': warning if legacy_rows else ''})
     except Exception as e:
         message = str(e)
-        if _content_scripts_should_fallback_local(e):
-            rows = _clean_script_library(_load_scripts_local())
-            return jsonify({
-                'ok': True,
-                'scripts': rows,
-                'storage': 'local',
-                'warning': _content_scripts_supabase_warning(e),
-            })
-        return jsonify({'ok': False, 'error': f'Không tải được kịch bản từ Supabase: {message}'}), 500
+        detail = _content_scripts_supabase_warning(e) if _content_scripts_should_fallback_local(e) else message
+        return jsonify({
+            'ok': False,
+            'error': f'Không tải được kịch bản từ Supabase: {detail}',
+            'storage': 'supabase_error',
+        }), 500
 
 
 @app.route('/api/scripts', methods=['PUT'])
@@ -9177,16 +9409,17 @@ def scripts_save():
         return jsonify({'ok': False, 'error': 'Dữ liệu scripts không hợp lệ'}), 400
     rows = _clean_script_library(body.get('scripts'))
     if not USE_SUPABASE:
-        _save_scripts_local(rows)
         return jsonify({
-            'ok': True,
-            'scripts': rows,
-            'count': len(rows),
-            'storage': 'local',
-            'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
-        })
+            'ok': False,
+            'error': 'Chưa bật Supabase cho thư viện kịch bản. Không lưu local/mock.',
+            'storage': 'disabled',
+        }), 503
     try:
         _save_scripts_to_workflow_supabase(rows)
+        try:
+            _sync_legacy_content_scripts_table(rows)
+        except Exception:
+            pass
         return jsonify({
             'ok': True,
             'scripts': rows,
@@ -9228,17 +9461,12 @@ def scripts_save():
         })
     except Exception as e:
         message = str(e)
-        if _content_scripts_should_fallback_local(e):
-            _save_scripts_local(rows)
-            return jsonify({
-                'ok': True,
-                'scripts': rows,
-                'count': len(rows),
-                'storage': 'local',
-                'warning': f'{_content_scripts_supabase_warning(e)} | Workflow mới: {workflow_warning}',
-                'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
-            })
-        return jsonify({'ok': False, 'error': f'Không lưu được kịch bản lên Supabase: {message}'}), 500
+        detail = _content_scripts_supabase_warning(e) if _content_scripts_should_fallback_local(e) else message
+        return jsonify({
+            'ok': False,
+            'error': f'Không lưu được kịch bản lên Supabase: {detail} | Workflow mới: {workflow_warning}',
+            'storage': 'supabase_error',
+        }), 500
 
 
 def _load_tasks_local() -> list:
@@ -9247,6 +9475,69 @@ def _load_tasks_local() -> list:
 
 def _save_tasks_local(rows: list) -> None:
     _write_json(CONTENT_TASKS_FILE, rows)
+
+
+def _upsert_task_local(task: dict) -> dict:
+    task_id = str(task.get('id') or '').strip()
+    rows = _load_tasks_local()
+    next_rows = []
+    merged = None
+    for row in rows:
+        if str(row.get('id') or '').strip() == task_id:
+            merged = {**row, **task}
+            next_rows.append(merged)
+        else:
+            next_rows.append(row)
+    if merged is None:
+        merged = dict(task)
+        next_rows.append(merged)
+    _save_tasks_local(next_rows)
+    return merged
+
+
+def _get_content_task_by_id(task_id: str) -> tuple[dict | None, str]:
+    task_id = str(task_id or '').strip()
+    if not task_id:
+        return None, 'local'
+    if USE_SUPABASE:
+        try:
+            row = sb.get_content_task(task_id, SUPABASE_CONTENT_TASK_TABLE)
+            if row:
+                cleaned = _clean_content_tasks([row])
+                return (cleaned[0] if cleaned else None), 'supabase'
+        except Exception:
+            pass
+    for row in _load_tasks_local():
+        if str(row.get('id') or '').strip() == task_id:
+            return row, 'local'
+    return None, 'local'
+
+
+def _patch_content_task_notes(task_id: str, notes: list) -> tuple[dict | None, str, str]:
+    task_id = str(task_id or '').strip()
+    now = _workflow_now()
+    patch = {'notes': notes[-200:], 'updated_at': now}
+    if USE_SUPABASE:
+        try:
+            saved = sb.patch_content_task(task_id, patch, SUPABASE_CONTENT_TASK_TABLE)
+            if saved:
+                merged = _upsert_task_local(saved)
+                cleaned = _clean_content_tasks([merged])
+                return (cleaned[0] if cleaned else None), 'supabase', ''
+        except Exception as exc:
+            warning = _content_workflow_supabase_warning(exc)
+            existing, _ = _get_content_task_by_id(task_id)
+            if not existing:
+                return None, 'local', warning
+            merged = _upsert_task_local({**existing, **patch})
+            cleaned = _clean_content_tasks([merged])
+            return (cleaned[0] if cleaned else None), 'local', warning
+    existing, _ = _get_content_task_by_id(task_id)
+    if not existing:
+        return None, 'local', ''
+    merged = _upsert_task_local({**existing, **patch})
+    cleaned = _clean_content_tasks([merged])
+    return (cleaned[0] if cleaned else None), 'local', ''
 
 
 def _tasks_payload(rows: list[dict], storage: str, warning: str = '') -> dict:
@@ -9269,8 +9560,10 @@ def _load_tasks_any(include_all: bool = False) -> tuple[list[dict], str, str]:
     return (rows if include_all else _filter_content_tasks_for_current_staff(rows)), 'local', ''
 
 
-def _save_tasks_any(rows: list[dict]) -> tuple[list[dict], str, str]:
+def _save_tasks_any(rows: list[dict], *, provision_scripts: bool = True) -> tuple[list[dict], str, str]:
     cleaned = _clean_content_tasks(rows)
+    if provision_scripts:
+        cleaned = _apply_script_provision_from_plan_tasks(cleaned)
     if USE_SUPABASE:
         try:
             current = sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE)
@@ -9288,8 +9581,17 @@ def _save_tasks_any(rows: list[dict]) -> tuple[list[dict], str, str]:
 
 @app.route('/api/content-tasks', methods=['GET'])
 def content_tasks_get():
-    rows, storage, warning = _load_tasks_any()
-    return jsonify(_tasks_payload(rows, storage, warning))
+    all_rows, storage, warning = _load_tasks_any(include_all=True)
+    cleaned = _clean_content_tasks(all_rows)
+    provisioned = _apply_script_provision_from_plan_tasks(cleaned)
+    before_links = {str(row.get('id') or ''): str(row.get('script_id') or '') for row in cleaned}
+    after_links = {str(row.get('id') or ''): str(row.get('script_id') or '') for row in provisioned}
+    if before_links != after_links:
+        provisioned, storage, save_warning = _save_tasks_any(provisioned)
+        if save_warning:
+            warning = f'{warning} {save_warning}'.strip() if warning else save_warning
+    visible = _filter_content_tasks_for_current_staff(provisioned)
+    return jsonify(_tasks_payload(visible, storage, warning))
 
 
 @app.route('/api/content-tasks', methods=['POST'])
@@ -9395,28 +9697,25 @@ def content_tasks_add_note(task_id):
     text = str(body.get('text') or '').strip()
     if not text:
         return jsonify({'ok': False, 'error': 'Nhập ghi chú'}), 400
-    rows, _, _ = _load_tasks_any(include_all=True)
     task_id = str(task_id or '').strip()
-    staff = _current_staff()
-    updated = None
-    for row in rows:
-        if str(row.get('id') or '') == task_id:
-            notes = _safe_json_list(row.get('notes'))
-            notes.append({
-                'id': uuid.uuid4().hex[:12],
-                'text': text[:3000],
-                'at': _workflow_now(),
-                'staff_id': staff.get('id') or '',
-                'staff_name': staff.get('name') or staff.get('username') or 'Nhân sự',
-            })
-            updated = {**row, 'notes': notes[-200:]}
-            break
-    if not updated:
+    existing, _ = _get_content_task_by_id(task_id)
+    if not existing:
         return jsonify({'ok': False, 'error': 'Không tìm thấy task'}), 404
-    next_rows = [updated if str(row.get('id') or '') == task_id else row for row in rows]
-    saved, storage, warning = _save_tasks_any(next_rows)
-    payload = _tasks_payload(_filter_content_tasks_for_current_staff(saved), storage, warning)
-    payload['task'] = _public_content_task(updated)
+    staff = _current_staff()
+    notes = _safe_json_list(existing.get('notes'))
+    notes.append({
+        'id': uuid.uuid4().hex[:12],
+        'text': text[:3000],
+        'at': _workflow_now(),
+        'staff_id': staff.get('id') or '',
+        'staff_name': staff.get('name') or staff.get('username') or 'Nhân sự',
+    })
+    saved, storage, warning = _patch_content_task_notes(task_id, notes)
+    if not saved:
+        return jsonify({'ok': False, 'error': 'Không lưu được ghi chú'}), 500
+    payload = {'ok': True, 'task': _public_content_task(saved), 'storage': storage}
+    if warning:
+        payload['warning'] = warning
     return jsonify(payload)
 
 
@@ -9459,9 +9758,12 @@ def content_studio_setup_save():
 @app.route('/api/content-techniques', methods=['GET'])
 def content_techniques_get():
     rows, storage, warning = _load_content_techniques()
-    payload = {'ok': True, 'techniques': rows, 'storage': storage}
+    payload = {'ok': True, 'techniques': rows, 'storage': storage, 'seeded': 'tự thêm' in str(warning or '').lower()}
     if warning:
-        payload['warning'] = f'Đã dùng local, Supabase chưa đọc được: {warning}'
+        if storage == 'local' and 'Supabase chưa đọc' in warning:
+            payload['warning'] = f'Đã dùng local, Supabase chưa đọc được: {warning}'
+        else:
+            payload['warning'] = warning
     return jsonify(payload)
 
 

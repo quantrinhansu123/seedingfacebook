@@ -505,6 +505,19 @@ def list_content_tasks(table: Optional[str] = None) -> list:
     return r.json()
 
 
+def get_content_task(task_id: str, table: Optional[str] = None) -> dict | None:
+    task_id = str(task_id or '').strip()
+    if not task_id:
+        return None
+    table_name = table or CONTENT_TASK_TABLE
+    r = _request_workflow(
+        'GET',
+        f'{table_name}?id=eq.{quote(task_id, safe="")}&limit=1',
+    )
+    rows = r.json()
+    return rows[0] if rows else None
+
+
 def sync_content_tasks(rows: list[dict], table: Optional[str] = None) -> None:
     table_name = table or CONTENT_TASK_TABLE
     current = list_content_tasks(table_name)
@@ -587,6 +600,19 @@ def sync_content_script_blocks(rows: list[dict], script_ids: list[str] | None = 
                 json=rows[i:i + chunk],
                 prefer='resolution=merge-duplicates,return=minimal',
             )
+
+
+def purge_content_script_blocks(script_ids: list[str], table: Optional[str] = None) -> None:
+    table_name = table or CONTENT_SCRIPT_BLOCK_TABLE
+    for script_id in script_ids or []:
+        sid = str(script_id or '').strip()
+        if not sid:
+            continue
+        _request_workflow(
+            'DELETE',
+            f'{table_name}?script_id=eq.{quote(sid, safe="")}',
+            prefer='return=minimal',
+        )
 
 
 # ── seen_posts ──────────────────────────────────────────

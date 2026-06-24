@@ -14,7 +14,6 @@ import {
   ChevronUp,
   Clipboard,
   Copy,
-  Database,
   FileDown,
   GripVertical,
   Image as ImageIcon,
@@ -33,8 +32,10 @@ import {
   Wand2,
   X,
 } from 'lucide-react';
-import { AI_TIMEOUT_MS, api } from '@/lib/api';
+import { AI_TIMEOUT_MS, api, getApiBase } from '@/lib/api';
 import { BusinessProfilePanel } from '@/components/BusinessProfilePanel';
+import { SettingsFormModal } from '@/components/SettingsFormModal';
+import { SettingsSectionCard } from '@/components/SettingsSectionCard';
 import './script-writer-panel.css';
 import './script-writer-panel-v3.css';
 
@@ -233,35 +234,6 @@ const MODEL_FALLBACKS: Record<string, AiModelOption[]> = {
 function fallbackModels(provider: string) {
   return MODEL_FALLBACKS[provider] || MODEL_FALLBACKS.gemini;
 }
-
-const INITIAL_SCRIPTS: ScriptDocument[] = [
-  {
-    id: 'script-truss-rod',
-    title: 'Hướng dẫn điều chỉnh ty đàn',
-    platform: 'TikTok',
-    status: 'approved',
-    writer: 'An',
-    date: '01/06/2026',
-    blocks: [
-      { id: 'b1', type: 'hook', text: 'Bạn đang bị rè dây, tiếng đàn không chuẩn? Đây là cách xử lý!' },
-      { id: 'b2', type: 'scene', text: '[Cảnh: Cận đàn guitar, tay điều chỉnh ốc ty]' },
-      { id: 'b3', type: 'body', text: 'Ty đàn (truss rod) là thanh kim loại bên trong cần đàn giúp điều chỉnh độ cong. Khi thời tiết thay đổi, ty có thể bị lệch.' },
-      { id: 'b4', type: 'cta', text: 'Like và follow Guitar Sài Thành để nhận thêm mẹo chăm sóc đàn mỗi ngày! 🎸' },
-    ],
-  },
-  {
-    id: 'script-acoustic-review',
-    title: 'Review đàn acoustic 3 triệu',
-    platform: 'YouTube',
-    status: 'pending',
-    writer: 'Bình',
-    date: '02/06/2026',
-    blocks: [
-      { id: 'b5', type: 'hook', text: '3 triệu mua được đàn acoustic ngon? Mình sẽ review thật 100%!' },
-      { id: 'b6', type: 'body', text: 'Hôm nay mình review 3 cây đàn acoustic tầm giá 3 triệu đồng...' },
-    ],
-  },
-];
 
 function newId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -475,10 +447,11 @@ type ScriptBlockEditorProps = {
   block: ScriptBlock;
   placeholder: string;
   onChange: (patch: Partial<ScriptBlock>) => void;
+  onBlurSave?: () => void;
   minimal?: boolean;
 };
 
-function ScriptBlockEditor({ block, placeholder, onChange, minimal = false }: ScriptBlockEditorProps) {
+function ScriptBlockEditor({ block, placeholder, onChange, onBlurSave, minimal = false }: ScriptBlockEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const mountedBlockId = useRef('');
 
@@ -595,15 +568,18 @@ function ScriptBlockEditor({ block, placeholder, onChange, minimal = false }: Sc
         data-placeholder={placeholder}
         style={{ textAlign: block.align || 'left' }}
         onInput={syncEditor}
-        onBlur={syncEditor}
+        onBlur={() => {
+          syncEditor();
+          onBlurSave?.();
+        }}
       />
     </div>
   );
 }
 
 export function ScriptWriterPanel() {
-  const [scripts, setScripts] = useState<ScriptDocument[]>(INITIAL_SCRIPTS);
-  const [selectedId, setSelectedId] = useState(INITIAL_SCRIPTS[0].id);
+  const [scripts, setScripts] = useState<ScriptDocument[]>([]);
+  const [selectedId, setSelectedId] = useState('');
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<ScriptStatus | ''>('');
   const [showCreate, setShowCreate] = useState(false);
@@ -647,10 +623,41 @@ export function ScriptWriterPanel() {
   const [studioSetup, setStudioSetup] = useState<ContentStudioSetup>(defaultContentStudioSetup);
   const [setupStatus, setSetupStatus] = useState('');
   const [setupBusy, setSetupBusy] = useState(false);
+  const [settingsModal, setSettingsModal] = useState<'prompt' | 'ai' | 'techniques' | null>(null);
   const [imageBusy, setImageBusy] = useState(false);
   const [publishTargetType, setPublishTargetType] = useState<'group' | 'page'>('group');
   const [publishTargetId, setPublishTargetId] = useState('');
   const [publishBusy, setPublishBusy] = useState(false);
+  const userEditedRef = useRef(false);
+  const skipNextAutosaveRef = useRef(false);
+  const scriptsRef = useRef(scripts);
+  const saveTimerRef = useRef<number | null>(null);
+  const dirtyRef = useRef(false);
+  scriptsRef.current = scripts;
+
+  function flushSaveKeepalive(rows: ScriptDocument[]) {
+    if (typeof window === 'undefined' || !rows.length) return;
+    const url = `${getApiBase()}/api/scripts`;
+    void fetch(url, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scripts: rows }),
+      keepalive: true,
+    });
+  }
+
+  function queueSave(showNotice = false, immediate = false) {
+    if (!loaded) return;
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    dirtyRef.current = true;
+    const run = () => {
+      dirtyRef.current = false;
+      void saveScripts(scriptsRef.current, showNotice);
+    };
+    const delay = immediate ? 80 : 500;
+    saveTimerRef.current = window.setTimeout(run, delay);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -662,23 +669,26 @@ export function ScriptWriterPanel() {
         const response = await api('/api/scripts', { timeoutMs: 30000 });
         const payload = await response.json();
         if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không tải được thư viện kịch bản');
-        if (cancelled) return;
-        const rows = Array.isArray(payload.scripts) && payload.scripts.length
-          ? payload.scripts as ScriptDocument[]
-          : INITIAL_SCRIPTS;
+        if (cancelled || userEditedRef.current) return;
+        const rows = Array.isArray(payload.scripts) ? payload.scripts as ScriptDocument[] : [];
+        const scriptIdFromUrl = typeof window !== 'undefined'
+          ? new URLSearchParams(window.location.search).get('script')?.trim() || ''
+          : '';
+        const preferred = rows.find((script) => script.id === scriptIdFromUrl);
+        skipNextAutosaveRef.current = true;
         setScripts(rows);
-        setSelectedId(rows[0]?.id || '');
+        setSelectedId(preferred?.id || rows[0]?.id || '');
         setSyncWarning(typeof payload.warning === 'string' ? payload.warning : '');
         if (payload.storage === 'local') {
           setSyncStatus(
             payload.warning
               ? 'Đang chờ Supabase API cập nhật cache…'
-              : payload.scripts?.length
-                ? 'Đã lưu tạm trên máy chủ'
-                : 'Chưa có Supabase — dùng dữ liệu mẫu',
+              : rows.length
+                ? `Đã lưu tạm trên máy chủ · ${rows.length} kịch bản`
+                : 'Chưa có kịch bản — bấm + để tạo mới',
           );
         } else {
-          setSyncStatus(payload.scripts?.length ? 'Đã tải từ Supabase' : 'Đang tạo dữ liệu mẫu trên Supabase...');
+          setSyncStatus(payload.scripts?.length ? `Đã tải ${payload.scripts.length} kịch bản từ Supabase` : 'Chưa có kịch bản — bấm + để tạo mới');
         }
       } catch (error) {
         if (cancelled) return;
@@ -719,14 +729,30 @@ export function ScriptWriterPanel() {
   }, []);
 
   useEffect(() => {
-    if (!loaded || syncError) return;
-    const timer = window.setTimeout(() => {
-      void saveScripts(scripts, false);
-    }, 900);
-    return () => window.clearTimeout(timer);
-    // saveScripts is intentionally driven by the latest scripts snapshot.
+    if (!loaded) return;
+    if (skipNextAutosaveRef.current) {
+      skipNextAutosaveRef.current = false;
+      return;
+    }
+    queueSave(false, false);
+    return () => {
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    };
+    // queueSave is intentionally driven by the latest scripts snapshot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded, scripts]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const onPageHide = () => {
+      if (dirtyRef.current) flushSaveKeepalive(scriptsRef.current);
+    };
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      if (dirtyRef.current) flushSaveKeepalive(scriptsRef.current);
+    };
+  }, [loaded]);
 
   useEffect(() => {
     if (!notice) return;
@@ -781,8 +807,8 @@ export function ScriptWriterPanel() {
         setSyncStatus(payload.warning ? `Đã lưu tạm · chờ Supabase API · ${savedAt}` : `Đã lưu tạm trên máy chủ · ${savedAt}`);
         if (showNotice) setNotice(payload.warning ? 'Đã lưu tạm. Supabase API chưa nhận bảng — xem hướng dẫn vàng phía trên.' : 'Đã lưu tạm trên máy chủ.');
       } else {
-        setSyncStatus(`Đã lưu Supabase · ${savedAt}`);
-        if (showNotice) setNotice('Đã lưu kịch bản lên Supabase.');
+        setSyncStatus(`Đã lưu Supabase · ${rows.length} kịch bản · ${savedAt}`);
+        if (showNotice) setNotice(`Đã lưu ${rows.length} kịch bản lên Supabase.`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Không kết nối được Supabase';
@@ -799,7 +825,10 @@ export function ScriptWriterPanel() {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không tải được kỹ thuật content');
       setTechniques(Array.isArray(payload.techniques) ? payload.techniques : []);
-      setTechniqueStatus(payload.warning || '');
+      setTechniqueStatus(
+        payload.warning
+        || (payload.seeded ? 'Đã tự thêm kỹ thuật marketing mặc định cho khách.' : ''),
+      );
     } catch (error) {
       setTechniqueStatus(error instanceof Error ? error.message : 'Không tải được kỹ thuật content');
     }
@@ -1018,6 +1047,7 @@ export function ScriptWriterPanel() {
   }
 
   function updateSelected(updater: (script: ScriptDocument) => ScriptDocument) {
+    userEditedRef.current = true;
     setScripts((rows) => rows.map((script) => (script.id === selectedId ? updater(script) : script)));
   }
 
@@ -1030,12 +1060,15 @@ export function ScriptWriterPanel() {
     const script = scripts.find((item) => item.id === scriptId);
     if (!script) return;
     if (!window.confirm(`Xóa kịch bản "${script.title}"?`)) return;
+    userEditedRef.current = true;
     const next = scripts.filter((item) => item.id !== scriptId);
     setScripts(next);
     if (selectedId === scriptId) {
       setSelectedId(next[0]?.id || '');
     }
-    setNotice('Đã xóa kịch bản.');
+    setNotice('Đã xóa kịch bản — đang lưu Supabase...');
+    skipNextAutosaveRef.current = true;
+    void saveScripts(next, true);
   }
 
   function createScript() {
@@ -1053,11 +1086,18 @@ export function ScriptWriterPanel() {
       date: new Date().toLocaleDateString('vi-VN'),
       blocks: [{ id: newId('block'), type: 'hook', text: '' }],
     };
-    setScripts((rows) => [script, ...rows]);
+    userEditedRef.current = true;
+    const nextScripts = [script, ...scripts];
+    setScripts(nextScripts);
     setSelectedId(script.id);
     setNewTitle('');
     setShowCreate(false);
-    setNotice('Đã tạo kịch bản mới.');
+    setNotice('Đã tạo kịch bản mới — đang lưu Supabase...');
+    void saveScripts(nextScripts, true);
+  }
+
+  function handleEditorBlurSave() {
+    queueSave(false, true);
   }
 
   function addBlock(type: BlockType = 'text', afterIndex?: number, text = '') {
@@ -1320,15 +1360,15 @@ export function ScriptWriterPanel() {
   function addAiTemplate(type: 'hook' | 'intro' | 'full' | 'cta') {
     if (!selected) return;
     const topic = selected.title || 'nội dung này';
-    const templates = {
-      hook: `Bạn có chắc mình đã hiểu đúng về ${topic.toLocaleLowerCase('vi')}? 30 giây tới sẽ giúp bạn tránh lỗi phổ biến nhất.`,
-      intro: `Trong video này, mình sẽ chia sẻ ngắn gọn và thực tế về ${topic.toLocaleLowerCase('vi')}, kèm ví dụ để bạn có thể áp dụng ngay.`,
-      full: `Bắt đầu bằng vấn đề khách hàng thường gặp.\n\nGiải thích nguyên nhân bằng ngôn ngữ đơn giản.\n\nĐưa ra 3 bước xử lý cụ thể và minh họa trực quan.`,
-      cta: 'Theo dõi Seeding Fsolution để nhận thêm kịch bản và mẹo triển khai nội dung hiệu quả mỗi ngày.',
+    const prompts: Record<typeof type, string> = {
+      hook: `Viết 1 hook ngắn (tối đa 2 câu) cho chủ đề "${topic}".`,
+      intro: `Viết đoạn mở đầu ngắn cho chủ đề "${topic}".`,
+      full: `Viết khung nội dung HOOK / BODY / CTA cho chủ đề "${topic}".`,
+      cta: `Viết 1 CTA ngắn cho chủ đề "${topic}".`,
     };
-    const blockType: BlockType = type === 'intro' || type === 'full' ? 'body' : type;
-    addBlock(blockType, undefined, templates[type]);
-    setNotice('Đã chèn gợi ý vào kịch bản.');
+    const section: SectionKey = type === 'hook' ? 'opening' : type === 'cta' ? 'closing' : 'body';
+    setAiTab('chat');
+    void quickAi(prompts[type], section);
   }
 
   function mentionedTechniqueIds(message: string) {
@@ -1542,17 +1582,58 @@ export function ScriptWriterPanel() {
   }
 
   function renderSettingsPanel() {
+    const promptSummary = SECTION_ORDER.map((section) => studioSetup.sections[section].label).join(' · ');
+    const aiSummary = [
+      aiCustomerName.trim() || 'Chưa đặt tên khách',
+      aiProvider === 'openai' ? 'OpenAI' : aiProvider === 'groq' ? 'Groq' : 'Gemini',
+      aiModel.replace(/^models\//, ''),
+    ].join(' · ');
+    const techniqueSummary = techniques.length
+      ? techniques.map((item) => `@${item.name}`).slice(0, 4).join(' ') + (techniques.length > 4 ? ` +${techniques.length - 4}` : '')
+      : 'Chưa có kỹ thuật';
+
     return (
       <div className="script-ai-settings-tab">
-        <BusinessProfilePanel embedded />
+        <BusinessProfilePanel embedded compact />
 
-        <div className="script-settings-card">
-          <div className="script-tech-head">
-            <div><Wand2 /><strong>Cài đặt Prompt</strong></div>
-            <button type="button" className="script-primary compact" disabled={setupBusy} onClick={() => void saveStudioSetup()}>
-              <Save /> Lưu rule
-            </button>
-          </div>
+        <SettingsSectionCard
+          icon="✨"
+          title="Cài đặt Prompt"
+          summary={promptSummary}
+          hint="Hook · Mở đầu · CTA"
+          onOpen={() => setSettingsModal('prompt')}
+        />
+
+        <SettingsSectionCard
+          icon="🤖"
+          title="Cấu hình AI theo khách"
+          summary={aiSummary}
+          hint={aiKeyMasked ? `API key: ${aiKeyMasked}` : 'Chưa lưu API key'}
+          onOpen={() => setSettingsModal('ai')}
+        />
+
+        <SettingsSectionCard
+          icon="📚"
+          title="Kỹ thuật content"
+          summary={techniqueSummary}
+          hint={`${techniques.length} kỹ thuật · gõ @ khi chat AI`}
+          onOpen={() => setSettingsModal('techniques')}
+        />
+
+        <SettingsFormModal
+          open={settingsModal === 'prompt'}
+          title="Cài đặt Prompt"
+          wide
+          onClose={() => setSettingsModal(null)}
+          footer={(
+            <div className="settings-modal-actions">
+              {setupStatus ? <span className="profile-status">{setupStatus}</span> : <span />}
+              <button type="button" className="script-primary compact" disabled={setupBusy} onClick={() => void saveStudioSetup()}>
+                <Save /> Lưu rule
+              </button>
+            </div>
+          )}
+        >
           <div className="script-settings-grid">
             {SECTION_ORDER.map((section) => {
               const row = studioSetup.sections[section];
@@ -1578,71 +1659,101 @@ export function ScriptWriterPanel() {
               );
             })}
           </div>
-          {setupStatus ? <p className="script-tech-status">{setupStatus}</p> : null}
-        </div>
+        </SettingsFormModal>
 
-        <div className="script-ai-config-card">
-          <div className="script-tech-head">
-            <div><Bot /><strong>Cấu hình AI theo khách</strong></div>
-            <button type="button" title="Tải lại" disabled={aiConfigBusy} onClick={() => void loadAiConfig()}><RefreshCw /></button>
-          </div>
+        <SettingsFormModal
+          open={settingsModal === 'ai'}
+          title="Cấu hình AI theo khách"
+          onClose={() => setSettingsModal(null)}
+          footer={(
+            <div className="settings-modal-actions">
+              {aiConfigStatus ? <span className="profile-status">{aiConfigStatus}</span> : <span />}
+              <div className="settings-modal-actions-buttons">
+                <button type="button" title="Tải lại" disabled={aiConfigBusy} onClick={() => void loadAiConfig()}>
+                  <RefreshCw size={14} /> Tải lại
+                </button>
+                <button type="button" disabled={aiConfigBusy} onClick={() => void testAiConfig()}>
+                  <Sparkles size={14} /> Test
+                </button>
+                <button type="button" className="script-primary compact" disabled={aiConfigBusy} onClick={() => void saveAiConfig()}>
+                  <Save /> Lưu AI
+                </button>
+              </div>
+            </div>
+          )}
+        >
           <div className="script-ai-config-grid">
-            <input value={aiCustomerName} onChange={(event) => setAiCustomerName(event.target.value)} placeholder="Tên khách / thương hiệu" />
-            <select
-              value={aiProvider}
-              onChange={(event) => {
-                const provider = event.target.value;
-                setAiProvider(provider);
-                setAiModel(DEFAULT_MODELS[provider] || DEFAULT_MODELS.gemini);
-                setAiModels(fallbackModels(provider));
-                setAiKeyMasked('');
-                void loadAiModels(provider);
-              }}
-            >
-              <option value="gemini">Google Gemini</option>
-              <option value="openai">OpenAI / ChatGPT API</option>
-              <option value="groq">Groq</option>
-            </select>
-            <select value={aiModel} onChange={(event) => setAiModel(event.target.value)}>
-              {aiModels.map((item) => (
-                <option key={item.id} value={item.id}>{item.display_name || item.id}</option>
-              ))}
-            </select>
-            <input value={aiKeyInput} onChange={(event) => setAiKeyInput(event.target.value)} placeholder={aiKeyMasked ? `Đã lưu ${aiKeyMasked}` : 'Nhập API key'} />
-          </div>
-          <div className="script-ai-config-actions">
-            <button type="button" className="script-primary compact" disabled={aiConfigBusy} onClick={() => void saveAiConfig()}><Save /> Lưu AI</button>
-            <button type="button" disabled={aiConfigBusy} onClick={() => void testAiConfig()}><Sparkles /> Test</button>
-          </div>
-          {aiConfigStatus ? <p className="script-tech-status">{aiConfigStatus}</p> : null}
-        </div>
-
-        <div className="script-tech-manager">
-          <div className="script-tech-head">
-            <div><Database /><strong>Kỹ thuật content</strong></div>
-            <button type="button" title="Tải lại" disabled={techniqueBusy} onClick={() => void loadTechniques()}><RefreshCw /></button>
-          </div>
-          <div className="script-tech-form">
-            <input value={techniqueName} onChange={(event) => setTechniqueName(event.target.value)} placeholder="Tên kỹ thuật, VD: AIDA" />
-            <textarea value={techniqueContent} onChange={(event) => setTechniqueContent(event.target.value)} placeholder="Nội dung rule của kỹ thuật" rows={3} />
-            <button type="button" className="script-primary compact" disabled={techniqueBusy} onClick={() => void addTechnique()}><Plus /> Lưu kỹ thuật</button>
-          </div>
-          <div className="script-tech-list">
-            {techniques.map((technique) => (
-              <button
-                type="button"
-                key={technique.id}
-                className={selectedTechniqueIds.includes(technique.id) ? 'active' : ''}
-                title={technique.content}
-                onClick={() => setSelectedTechniqueIds((ids) => (ids.includes(technique.id) ? ids.filter((id) => id !== technique.id) : [...ids, technique.id]))}
+            <div className="profile-field full">
+              <label>Tên khách / thương hiệu</label>
+              <input value={aiCustomerName} onChange={(event) => setAiCustomerName(event.target.value)} placeholder="Tên khách / thương hiệu" />
+            </div>
+            <div className="profile-field">
+              <label>Provider</label>
+              <select
+                value={aiProvider}
+                onChange={(event) => {
+                  const provider = event.target.value;
+                  setAiProvider(provider);
+                  setAiModel(DEFAULT_MODELS[provider] || DEFAULT_MODELS.gemini);
+                  setAiModels(fallbackModels(provider));
+                  setAiKeyMasked('');
+                  void loadAiModels(provider);
+                }}
               >
-                <span>@{technique.name}</span>
-                {!technique.system ? <em onClick={(event) => { event.stopPropagation(); void deleteTechnique(technique.id); }}>x</em> : null}
-              </button>
-            ))}
+                <option value="gemini">Google Gemini</option>
+                <option value="openai">OpenAI / ChatGPT API</option>
+                <option value="groq">Groq</option>
+              </select>
+            </div>
+            <div className="profile-field">
+              <label>Model</label>
+              <select value={aiModel} onChange={(event) => setAiModel(event.target.value)}>
+                {aiModels.map((item) => (
+                  <option key={item.id} value={item.id}>{item.display_name || item.id}</option>
+                ))}
+              </select>
+            </div>
+            <div className="profile-field full">
+              <label>API key</label>
+              <input value={aiKeyInput} onChange={(event) => setAiKeyInput(event.target.value)} placeholder={aiKeyMasked ? `Đã lưu ${aiKeyMasked}` : 'Nhập API key'} />
+            </div>
           </div>
-          {techniqueStatus ? <p className="script-tech-status">{techniqueStatus}</p> : null}
-        </div>
+        </SettingsFormModal>
+
+        <SettingsFormModal
+          open={settingsModal === 'techniques'}
+          title="Kỹ thuật content"
+          wide
+          onClose={() => setSettingsModal(null)}
+          footer={techniqueStatus ? <span className="profile-status">{techniqueStatus}</span> : undefined}
+        >
+          <div className="script-tech-manager modal-inner">
+            <div className="script-tech-form">
+              <input value={techniqueName} onChange={(event) => setTechniqueName(event.target.value)} placeholder="Tên kỹ thuật, VD: AIDA" />
+              <textarea value={techniqueContent} onChange={(event) => setTechniqueContent(event.target.value)} placeholder="Nội dung rule của kỹ thuật" rows={3} />
+              <button type="button" className="script-primary compact" disabled={techniqueBusy} onClick={() => void addTechnique()}>
+                <Plus /> Lưu kỹ thuật
+              </button>
+            </div>
+            <div className="script-tech-list">
+              {techniques.map((technique) => (
+                <button
+                  type="button"
+                  key={technique.id}
+                  className={selectedTechniqueIds.includes(technique.id) ? 'active' : ''}
+                  title={technique.content}
+                  onClick={() => setSelectedTechniqueIds((ids) => (ids.includes(technique.id) ? ids.filter((id) => id !== technique.id) : [...ids, technique.id]))}
+                >
+                  <span>@{technique.name}</span>
+                  {!technique.system ? <em onClick={(event) => { event.stopPropagation(); void deleteTechnique(technique.id); }}>x</em> : null}
+                </button>
+              ))}
+            </div>
+            <button type="button" className="settings-inline-reload" disabled={techniqueBusy} onClick={() => void loadTechniques()}>
+              <RefreshCw size={14} /> Tải lại danh sách
+            </button>
+          </div>
+        </SettingsFormModal>
       </div>
     );
   }
@@ -1698,13 +1809,13 @@ export function ScriptWriterPanel() {
                 <button type="button" className="script-list-edit" title="Sửa kịch bản" onClick={() => editScript(script.id)}>
                   <Pencil /> Sửa
                 </button>
-                <button type="button" className="script-list-delete" title="Xóa kịch bản" onClick={() => deleteScript(script.id)}>
+                <button type="button" className="script-list-delete" title="Xóa kịch bản" onClick={(event) => { event.stopPropagation(); deleteScript(script.id); }}>
                   <Trash2 /> Xóa
                 </button>
               </div>
             </div>
           ))}
-          {!visibleScripts.length ? <div className="script-empty-list">Không tìm thấy kịch bản.</div> : null}
+          {!loaded ? <div className="script-empty-list">Đang tải kịch bản...</div> : !visibleScripts.length ? <div className="script-empty-list">Không tìm thấy kịch bản.</div> : null}
         </div>
       </aside>
 
@@ -1724,35 +1835,33 @@ export function ScriptWriterPanel() {
                 <option>Reels</option>
                 <option>Facebook</option>
               </select>
-              <span className={`script-status-badge ${selected.status}`}>
-                {selected.status === 'approved' ? <Check /> : null}
-                {STATUS_LABELS[selected.status]}
-              </span>
               <select className="script-status-select" value={selected.status} onChange={(event) => updateSelected((script) => ({ ...script, status: event.target.value as ScriptStatus }))} aria-label="Trạng thái">
                 <option value="draft">Nháp</option>
                 <option value="pending">Chờ duyệt</option>
                 <option value="approved">Đã duyệt</option>
               </select>
-              <button type="button" className="script-save" onClick={() => void saveScripts(scripts, true)}><Save /> Lưu bài</button>
-              <button type="button" className="script-save review" onClick={() => void saveCurrentWithStatus('pending', 'Đã gửi duyệt. Task đã chuyển sang Chờ duyệt.')}><SendHorizontal /> Gửi duyệt</button>
-              {selected.status === 'pending' ? (
-                <button type="button" className="script-save approve" onClick={() => void saveCurrentWithStatus('approved', 'Đã duyệt bài và lưu vào Bài đã duyệt.')}><Check /> Duyệt</button>
-              ) : null}
-              <button type="button" className="script-icon-button" title="Xuất file" onClick={exportScript}><FileDown /></button>
-              <button type="button" className="script-icon-button" title="Copy" onClick={() => void copyCompleteVersion()}><Clipboard /></button>
-              <button type="button" className="script-icon-button" title="Xóa kịch bản" onClick={() => { setScripts((rows) => rows.filter((script) => script.id !== selected.id)); setSelectedId(scripts.find((script) => script.id !== selected.id)?.id || ''); }}><Trash2 /></button>
-              <button type="button" className={`script-icon-button${showAi ? ' active' : ''}`} title="Trợ lý AI" onClick={() => setShowAi((value) => !value)}><Bot /></button>
+              <div className="script-editor-toolbar">
+                <button type="button" className="script-save" onClick={() => queueSave(true, true)}><Save /> Lưu bài</button>
+                <button type="button" className="script-save review" onClick={() => void saveCurrentWithStatus('pending', 'Đã gửi duyệt. Task đã chuyển sang Chờ duyệt.')}><SendHorizontal /> Gửi duyệt</button>
+                {selected.status === 'pending' ? (
+                  <button type="button" className="script-save approve" onClick={() => void saveCurrentWithStatus('approved', 'Đã duyệt bài và lưu vào Bài đã duyệt.')}><Check /> Duyệt</button>
+                ) : null}
+                <button type="button" className="script-icon-button" title="Xuất file" onClick={exportScript}><FileDown /></button>
+                <button type="button" className="script-icon-button" title="Copy" onClick={() => void copyCompleteVersion()}><Clipboard /></button>
+                <button type="button" className="script-icon-button" title="Xóa kịch bản" onClick={() => deleteScript(selected.id)}><Trash2 /></button>
+                <button type="button" className={`script-icon-button${showAi ? ' active' : ''}`} title="Trợ lý AI" onClick={() => setShowAi((value) => !value)}><Bot /></button>
+              </div>
             </div>
             <div className="script-editor-meta script-doc-hint">
               <span>{wordCount} từ</span>
               <span>{selected.blocks.length} blocks</span>
-              <span className="script-doc-hint-muted">kéo / đổi loại</span>
-              <span className="script-doc-hint-muted">đổi text → định dạng</span>
-              <span className={syncError ? 'script-sync-error' : 'script-doc-hint-muted'} title={syncError || syncWarning}>{syncError || syncStatus}</span>
               <div className="script-editor-copy">
                 <button type="button" onClick={() => setShowFbPreview((v) => !v)}>{showFbPreview ? 'Ẩn FB' : 'Xem FB'}</button>
                 <button type="button" onClick={printCompleteVersion}><Printer /> In</button>
               </div>
+              <span className={syncError ? 'script-sync-error script-sync-line' : 'script-sync-line script-doc-hint-muted'} title={syncError || syncWarning || syncStatus}>
+                {syncError || syncStatus}
+              </span>
             </div>
 
             {showFbPreview && facebookPost ? (
@@ -1801,6 +1910,7 @@ export function ScriptWriterPanel() {
                         block={block}
                         placeholder={definition.placeholder}
                         onChange={(patch) => updateBlock(block.id, patch)}
+                        onBlurSave={handleEditorBlurSave}
                         minimal
                       />
                     </div>
@@ -1857,10 +1967,10 @@ export function ScriptWriterPanel() {
                       <Wand2 /> Viết toàn bài
                     </button>
                     <button type="button" disabled={chatBusy} onClick={() => addAiTemplate('hook')}>
-                      <AtSign /> Thêm Hook mẫu
+                      <AtSign /> Gợi ý Hook (AI)
                     </button>
                     <button type="button" disabled={chatBusy} onClick={() => addAiTemplate('cta')}>
-                      <MessageSquare /> Thêm CTA mẫu
+                      <MessageSquare /> Gợi ý CTA (AI)
                     </button>
                     <button type="button" disabled={chatBusy} onClick={() => { setAiTab('chat'); quickAi(`Chỉ tạo image_prompt mô tả ảnh minh họa cho bài "${selected?.title || 'nội dung này'}". Không sửa HOOK/BODY/CTA, action none, sections để rỗng.`); }}>
                       <Sparkles /> Prompt ảnh
@@ -1880,7 +1990,7 @@ export function ScriptWriterPanel() {
                       <Wand2 /> 3 góc ý tưởng
                     </button>
                     <button type="button" disabled={chatBusy} onClick={() => addAiTemplate('hook')}>
-                      <Plus /> Chèn hook mẫu
+                      <Plus /> Gợi ý hook (AI)
                     </button>
                   </div>
                 </div>

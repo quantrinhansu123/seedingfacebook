@@ -242,7 +242,30 @@ export function ContentPlanPanel() {
       if (!response.ok || !payload.ok) {
         throw new Error(payload.error || 'Không lưu được task lên Supabase');
       }
+      if (Array.isArray(payload.tasks) && payload.tasks.length) {
+        setTasks(payload.tasks as PlanTask[]);
+        try {
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: payload.tasks, archived: nextArchived, members }));
+        } catch {
+          /* ignore */
+        }
+      }
       if (payload.warning) setScriptsStatus(payload.warning);
+      return payload;
+    }).then(async (payload) => {
+      const rows = Array.isArray(payload?.tasks) ? payload.tasks as PlanTask[] : nextTasks;
+      const needsScripts = rows.some((task) => (task.col === 1 || task.col === 2 || task.status === 'doing' || task.status === 'pending'));
+      if (!needsScripts) return;
+      try {
+        const response = await api('/api/scripts', { timeoutMs: 20000 });
+        const scriptPayload = await response.json().catch(() => ({}));
+        if (response.ok && scriptPayload.ok && Array.isArray(scriptPayload.scripts)) {
+          setScripts(scriptPayload.scripts as PlanScript[]);
+          setScriptsStatus(`${scriptPayload.scripts.length} kịch bản`);
+        }
+      } catch {
+        /* ignore */
+      }
     }).catch((error) => {
       setScriptsStatus(error instanceof Error ? error.message : 'Không lưu được task lên Supabase');
     });
@@ -362,6 +385,9 @@ export function ContentPlanPanel() {
   function moveTask(taskId: string, col: PlanColumn) {
     const next = tasks.map((task) => (task.id === taskId ? { ...task, col, status: statusFromCol(col) } : task));
     updateTasks(next);
+    if (col === 1 || col === 2) {
+      setNotice(col === 1 ? 'Đã chuyển Đang làm — đồng bộ kịch bản...' : 'Đã chuyển Chờ duyệt — đồng bộ kịch bản...');
+    }
   }
 
   function deleteTask(taskId: string) {
@@ -451,32 +477,51 @@ export function ContentPlanPanel() {
     const task = notesTask;
     const text = noteText.trim();
     if (!task || !text) return;
+
+    const optimisticId = `note-${Date.now()}`;
+    const optimisticNote = {
+      id: optimisticId,
+      text,
+      at: new Date().toISOString(),
+      staff_name: 'Bạn',
+    };
+
+    setTasks((current) => current.map((item) => (
+      item.id === task.id
+        ? { ...item, notes: [...(item.notes || []), optimisticNote] }
+        : item
+    )));
+    setNoteText('');
     setNoteBusy(true);
+
     try {
       const response = await api(`/api/content-tasks/${encodeURIComponent(task.id)}/notes`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
-        timeoutMs: 30000,
+        timeoutMs: 15000,
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không lưu được ghi chú');
-      const rows = Array.isArray(payload.tasks) ? payload.tasks as PlanTask[] : [];
-      if (rows.length) {
-        setTasks(rows);
+      if (payload.task) {
+        const updated = payload.task as PlanTask;
+        setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
         try {
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: rows, archived, members }));
+          const stored = readStoredPlan();
+          const nextTasks = stored.tasks.map((item) => (item.id === updated.id ? updated : item));
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: nextTasks, archived, members }));
         } catch {
           /* ignore */
         }
-      } else if (payload.task) {
-        const updated = payload.task as PlanTask;
-        setTasks((current) => current.map((item) => (item.id === updated.id ? updated : item)));
       }
       if (payload.warning) setScriptsStatus(payload.warning);
-      setNoteText('');
-      setNotice('Đã gửi ghi chú.');
     } catch (error) {
+      setTasks((current) => current.map((item) => (
+        item.id === task.id
+          ? { ...item, notes: (item.notes || []).filter((note) => note.id !== optimisticId) }
+          : item
+      )));
+      setNoteText(text);
       setNotice(error instanceof Error ? error.message : 'Không lưu được ghi chú');
     } finally {
       setNoteBusy(false);
