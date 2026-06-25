@@ -539,48 +539,54 @@ export function ContentPlanPanel() {
     }
   }
 
-  async function createScriptForTask(task: PlanTask) {
-    const today = new Date().toLocaleDateString('vi-VN');
-    const newScript: PlanScript & { date: string; blocks: Array<{ id: string; type: string; text: string }> } = {
-      id: newId('script'),
-      title: task.title.replace(/^script\s+/i, '').trim() || task.title,
-      platform: 'TikTok',
-      status: 'draft',
-      writer: task.assignee,
-      date: today,
-      blocks: [{ id: newId('block'), type: 'hook', text: '' }],
-    };
+  async function ensureScriptForTask(task: PlanTask) {
     try {
-      const response = await api('/api/scripts', {
-        method: 'PUT',
+      setNotice('Đang chuẩn bị kịch bản...');
+      const response = await api(`/api/content-tasks/${encodeURIComponent(task.id)}`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scripts: [...scripts, newScript] }),
-        timeoutMs: 20000,
+        body: JSON.stringify({ status: 'doing', col: 1 }),
+        timeoutMs: 30000,
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không tạo được kịch bản');
-      const rows = Array.isArray(payload.scripts) ? payload.scripts as PlanScript[] : [...scripts, newScript];
-      setScripts(rows);
-      updateTasks(tasks.map((item) => (item.id === task.id ? { ...item, script_id: newScript.id, col: 1, status: statusFromCol(1) } : item)));
-      openScript(newScript.id);
-      setNotice('Đã tạo và mở kịch bản.');
+      if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không chuẩn bị được kịch bản');
+
+      const taskRows = Array.isArray(payload.tasks) ? payload.tasks as PlanTask[] : [];
+      const updatedTask = (payload.task as PlanTask | undefined)
+        || taskRows.find((item) => item.id === task.id);
+      if (taskRows.length) setTasks(taskRows);
+
+      const scriptsResponse = await api('/api/scripts?lite=1', { timeoutMs: 30000 });
+      const scriptsPayload = await scriptsResponse.json().catch(() => ({}));
+      if (!scriptsResponse.ok || !scriptsPayload.ok) {
+        throw new Error(scriptsPayload.error || 'Không tải được kịch bản vừa tạo');
+      }
+      const scriptRows = Array.isArray(scriptsPayload.scripts) ? scriptsPayload.scripts as PlanScript[] : [];
+      setScripts(scriptRows);
+      const scriptId = updatedTask?.script_id
+        || taskRows.find((item) => item.id === task.id)?.script_id
+        || findScriptForTask({ ...task, col: 1, status: 'doing' }, scriptRows)?.id;
+      if (!scriptId) throw new Error('Task chưa liên kết được với kịch bản');
+      openScript(scriptId);
+      setNotice('Đã mở kịch bản của task.');
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : 'Không tạo được kịch bản');
+      setNotice(error instanceof Error ? error.message : 'Không chuẩn bị được kịch bản');
     }
   }
 
   function handleTaskScriptAction(task: PlanTask) {
     const script = resolveTaskScript(task);
-    if (script) {
-      openScript(script.id);
+    const scriptId = script?.id || task.script_id;
+    if (scriptId) {
+      if (task.col === 0) moveTask(task.id, 1);
+      openScript(scriptId);
       return;
     }
-    void createScriptForTask(task);
+    void ensureScriptForTask(task);
   }
 
   function startTask(task: PlanTask) {
-    moveTask(task.id, 1);
-    handleTaskScriptAction({ ...task, col: 1, status: 'doing' });
+    handleTaskScriptAction(task);
   }
 
   function approveTask(task: PlanTask) {

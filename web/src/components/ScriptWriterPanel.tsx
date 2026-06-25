@@ -548,6 +548,15 @@ function ScriptBlockEditor({ block, placeholder, onChange, onBlurSave, minimal =
           <button type="button" title="Gạch chân" onMouseDown={(event) => handleFormatMouseDown(event, 'underline')}>
             <Underline />
           </button>
+          <button type="button" className="script-font-size-button" title="Chữ nhỏ" onMouseDown={(event) => handleFormatMouseDown(event, 'fontSize', '2')}>
+            A−
+          </button>
+          <button type="button" className="script-font-size-button" title="Chữ thường" onMouseDown={(event) => handleFormatMouseDown(event, 'fontSize', '3')}>
+            A
+          </button>
+          <button type="button" className="script-font-size-button" title="Chữ lớn" onMouseDown={(event) => handleFormatMouseDown(event, 'fontSize', '5')}>
+            A+
+          </button>
           <span className="script-block-toolbar-divider" aria-hidden="true" />
           <button type="button" className={block.align === 'left' || !block.align ? 'active' : ''} title="Căn trái" onMouseDown={(event) => handleAlignMouseDown(event, 'left')}>
             <AlignLeft />
@@ -597,6 +606,7 @@ export function ScriptWriterPanel() {
   const [newWriter, setNewWriter] = useState('An');
   const [notice, setNotice] = useState('');
   const [loaded, setLoaded] = useState(false);
+  const [detailsLoaded, setDetailsLoaded] = useState(false);
   const [syncStatus, setSyncStatus] = useState('Đang tải từ Supabase...');
   const [syncError, setSyncError] = useState('');
   const [syncWarning, setSyncWarning] = useState('');
@@ -649,13 +659,13 @@ export function ScriptWriterPanel() {
       method: 'PUT',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scripts: rows }),
+      body: JSON.stringify({ scripts: rows, full_documents: true }),
       keepalive: true,
     });
   }
 
   function queueSave(showNotice = false, immediate = false) {
-    if (!loaded) return;
+    if (!loaded || !detailsLoaded) return;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     dirtyRef.current = true;
     const run = () => {
@@ -709,7 +719,6 @@ export function ScriptWriterPanel() {
         }
         const liteRows = Array.isArray(litePayload.scripts) ? litePayload.scripts as ScriptDocument[] : [];
         applyScriptRows(liteRows, litePayload);
-        setLoaded(true);
 
         setSyncStatus(liteRows.length ? 'Đang tải nội dung chi tiết...' : 'Chưa có kịch bản — bấm + để tạo mới');
         const response = await api('/api/scripts', { timeoutMs: 60000 });
@@ -718,6 +727,7 @@ export function ScriptWriterPanel() {
         if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không tải được nội dung kịch bản');
         const rows = Array.isArray(payload.scripts) ? payload.scripts as ScriptDocument[] : [];
         applyScriptRows(rows, payload);
+        setDetailsLoaded(true);
       } catch (error) {
         if (isStale()) return;
         setSyncError(error instanceof Error ? error.message : 'Không kết nối được Supabase');
@@ -783,7 +793,7 @@ export function ScriptWriterPanel() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const selected = scripts.find((script) => script.id === selectedId) || null;
+  const selected = detailsLoaded ? scripts.find((script) => script.id === selectedId) || null : null;
   const facebookPost = useMemo(() => (selected ? buildFacebookPost(selected) : null), [selected]);
   const visibleScripts = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase('vi');
@@ -819,7 +829,7 @@ export function ScriptWriterPanel() {
       const response = await api('/api/scripts', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scripts: rows }),
+        body: JSON.stringify({ scripts: rows, full_documents: true }),
         timeoutMs: 30000,
       });
       const payload = await response.json();
@@ -1070,6 +1080,7 @@ export function ScriptWriterPanel() {
   }
 
   function updateSelected(updater: (script: ScriptDocument) => ScriptDocument) {
+    if (!detailsLoaded) return;
     userEditedRef.current = true;
     setScripts((rows) => rows.map((script) => (script.id === selectedId ? updater(script) : script)));
   }
@@ -1950,7 +1961,6 @@ export function ScriptWriterPanel() {
                         placeholder={definition.placeholder}
                         onChange={(patch) => updateBlock(block.id, patch)}
                         onBlurSave={handleEditorBlurSave}
-                        minimal
                       />
                     </div>
                   </div>
@@ -1969,6 +1979,8 @@ export function ScriptWriterPanel() {
               ) : null}
             </div>
           </>
+        ) : selectedId && !detailsLoaded ? (
+          <div className="script-empty-editor full"><RefreshCw /><h3>Đang tải nội dung kịch bản...</h3><p>Vui lòng chờ nội dung đầy đủ trước khi chỉnh sửa.</p></div>
         ) : (
           <div className="script-empty-editor full"><Sparkles /><h3>Chọn hoặc tạo kịch bản mới</h3></div>
         )}

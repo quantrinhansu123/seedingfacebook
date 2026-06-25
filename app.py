@@ -3655,6 +3655,8 @@ def _sync_managed_channel_supabase(row: dict, *, channel_id: str = '') -> tuple[
         if cid:
             try:
                 remote = sb.update_managed_channel(cid, db_row, SUPABASE_CHANNEL_TABLE)
+                if not remote:
+                    remote = sb.upsert_managed_channel({**db_row, 'id': cid}, SUPABASE_CHANNEL_TABLE)
             except Exception as update_err:
                 remote = sb.upsert_managed_channel({**db_row, 'id': cid}, SUPABASE_CHANNEL_TABLE)
                 if not remote:
@@ -7528,6 +7530,56 @@ def _merged_facebook_groups() -> list[dict]:
     return list(by_id.values())
 
 
+def _legacy_group_channel_id(group_id: str) -> str:
+    digest = hashlib.sha1(str(group_id or '').encode('utf-8')).hexdigest()[:12]
+    return f'legacy-{digest}'
+
+
+def _restore_legacy_groups_to_managed_channels() -> tuple[int, str]:
+    """Migrate groups saved in the legacy groups table into managed_channels.
+
+    Vercel storage is ephemeral, so displaying only managed_channels can make
+    older groups appear lost after a deployment even though they still exist
+    in Supabase's legacy groups table.
+    """
+    global _managed_channels
+    existing_targets = {
+        str(item.get('target_id') or '').strip()
+        for item in _managed_channels
+        if str(item.get('platform') or '').strip().lower() == 'facebook'
+        and str(item.get('channel_type') or '').strip().lower() in ('nhóm', 'nhom', 'group')
+        and str(item.get('target_id') or '').strip()
+    }
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    added = 0
+    warning = ''
+    for group in _groups:
+        group_id = str(group.get('id') or '').strip()
+        if not group_id or group_id in existing_targets:
+            continue
+        group_name = str(group.get('name') or '').strip()[:160]
+        row = {
+            'id': _legacy_group_channel_id(group_id),
+            'platform': 'Facebook',
+            'channel_name': group_name or f'Nhóm Facebook {group_id}',
+            'channel_type': 'Nhóm',
+            'link': f'https://www.facebook.com/groups/{group_id}',
+            'target_id': group_id,
+            'note': 'Khôi phục từ danh sách nhóm đã lưu trước đây',
+            'created_at': now,
+            'updated_at': now,
+        }
+        if USE_SUPABASE:
+            row, row_warning = _sync_managed_channel_supabase(row)
+            warning = _append_warning(warning, row_warning)
+        _managed_channels.append(row)
+        existing_targets.add(group_id)
+        added += 1
+    if added:
+        _save_managed_channels()
+    return added, warning
+
+
 def _refresh_managed_channels_from_supabase(*, force: bool = False) -> None:
     global _managed_channels, _managed_channels_remote_at
     if not USE_SUPABASE:
@@ -7557,13 +7609,23 @@ def _visible_managed_channels() -> list[dict]:
 @app.route('/api/channels', methods=['GET'])
 def channels_get():
     _refresh_managed_channels_from_supabase()
-    return jsonify({'ok': True, 'channels': _visible_managed_channels(), 'can_assign_staff': _is_admin()})
+    restored, warning = _restore_legacy_groups_to_managed_channels()
+    payload = {
+        'ok': True,
+        'channels': _visible_managed_channels(),
+        'can_assign_staff': _is_admin(),
+        'restored_groups': restored,
+    }
+    if warning:
+        payload['warning'] = warning
+    return jsonify(payload)
 
 
 @app.route('/api/channels/publish-targets', methods=['GET'])
 def channels_publish_targets():
     """Nhóm/Page đăng bài — chỉ lấy từ bảng managed_channels (Supabase)."""
     _refresh_managed_channels_from_supabase()
+    _restore_legacy_groups_to_managed_channels()
     visible = _filter_managed_channels_for_staff(_managed_channels)
     groups = _facebook_group_channels(visible)
     pages = _facebook_page_channels(visible)
@@ -7837,6 +7899,7 @@ def tg_remove(chat_id):
 def groups_get():
     """Danh sách nhóm Facebook — chỉ từ bảng managed_channels (/kenh), lọc theo nhân sự."""
     _refresh_managed_channels_from_supabase()
+    _restore_legacy_groups_to_managed_channels()
     visible = _filter_managed_channels_for_staff(_managed_channels)
     return jsonify(_facebook_group_channels(visible))
 
@@ -9195,6 +9258,11 @@ def _is_workflow_script_task(row: dict) -> bool:
     return bool(script_id) and task_id == f'task-{script_id}'
 
 
+def _plan_visible_tasks(rows: list[dict]) -> list[dict]:
+    """Hide internal script workflow rows from the user-facing planning board."""
+    return [row for row in (rows or []) if not _is_workflow_script_task(row)]
+
+
 def _plan_task_ids_by_script(tasks: list[dict]) -> dict[str, str]:
     plan_by_script: dict[str, str] = {}
     for task in tasks or []:
@@ -9619,6 +9687,22 @@ def scripts_save():
             'storage': 'disabled',
         }), 503
     try:
+        if body.get('full_documents') is not True:
+            existing_rows = _load_scripts_from_workflow_supabase()
+            incoming_by_id = {str(row.get('id') or ''): row for row in rows}
+            at_risk = [
+                row for row in existing_rows
+                if row.get('blocks')
+                and (
+                    str(row.get('id') or '') not in incoming_by_id
+                    or not incoming_by_id[str(row.get('id') or '')].get('blocks')
+                )
+            ]
+            if at_risk:
+                return jsonify({
+                    'ok': False,
+                    'error': 'Dữ liệu kịch bản chưa tải đầy đủ. Hãy tải lại trang trước khi lưu để tránh mất nội dung.',
+                }), 409
         _save_scripts_to_workflow_supabase(rows)
         try:
             _sync_legacy_content_scripts_table(rows)
@@ -9746,7 +9830,10 @@ def _patch_content_task_notes(task_id: str, notes: list) -> tuple[dict | None, s
 
 
 def _tasks_payload(rows: list[dict], storage: str, warning: str = '', *, lite: bool = False) -> dict:
-    public_rows = [_public_content_task(row, lite=lite) for row in _clean_content_tasks(rows)]
+    public_rows = [
+        _public_content_task(row, lite=lite)
+        for row in _plan_visible_tasks(_clean_content_tasks(rows))
+    ]
     payload = {'ok': True, 'tasks': public_rows, 'storage': storage}
     if warning:
         payload['warning'] = warning
@@ -9841,9 +9928,11 @@ def content_tasks_sync():
     body = request.get_json(silent=True) or {}
     if not isinstance(body.get('tasks'), list):
         return jsonify({'ok': False, 'error': 'Dữ liệu tasks không hợp lệ'}), 400
-    incoming = _clean_content_tasks(body.get('tasks') or [])
+    incoming = _plan_visible_tasks(_clean_content_tasks(body.get('tasks') or []))
     if _is_admin():
-        rows_to_save = incoming
+        current_all, _, _ = _load_tasks_any(include_all=True)
+        internal_rows = [row for row in current_all if _is_workflow_script_task(row)]
+        rows_to_save = [*internal_rows, *incoming]
     else:
         current_all, _, _ = _load_tasks_any(include_all=True)
         incoming_ids = {str(row.get('id') or '') for row in incoming}
@@ -9894,7 +9983,10 @@ def content_tasks_patch(task_id):
     updated['timeline'] = timeline[-100:]
     next_rows = [updated if str(row.get('id') or '') == task_id else row for row in rows]
     saved, storage, warning = _save_tasks_any(next_rows)
-    public_rows = [_public_content_task(row) for row in _filter_content_tasks_for_current_staff(saved)]
+    public_rows = [
+        _public_content_task(row)
+        for row in _plan_visible_tasks(_filter_content_tasks_for_current_staff(saved))
+    ]
     payload = {'ok': True, 'task': next((row for row in public_rows if row.get('id') == task_id), _public_content_task(updated)), 'tasks': public_rows, 'storage': storage}
     if warning:
         payload['warning'] = warning

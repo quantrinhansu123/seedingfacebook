@@ -34,6 +34,10 @@
 }
 
 .script-block-list-v3 {
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: scroll !important;
+  overscroll-behavior: contain;
   padding: 18px 20px 48px !important;
   display: flex;
   flex-direction: column;
@@ -70,6 +74,7 @@
 .script-block-card-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 6px;
 }
@@ -110,7 +115,7 @@
   display: flex;
   gap: 2px;
   margin: 0;
-  opacity: 0;
+  opacity: 1;
   transition: opacity 0.12s;
 }
 .script-block-card:hover .script-block-actions { opacity: 1; }
@@ -131,8 +136,14 @@
 .script-block-card .script-block-actions button svg { width: 13px; height: 13px; }
 
 .script-block-card .script-block-editor {
+  min-width: 0;
+  max-width: 100%;
   border: 0;
   background: transparent;
+}
+.script-block-card .script-block-toolbar {
+  opacity: 1;
+  margin-bottom: 4px;
 }
 .script-block-card .script-block-editor.minimal .script-rich-editor {
   min-height: 36px;
@@ -148,6 +159,14 @@
 .script-block-card .script-block-editor.minimal .script-rich-editor:focus {
   border-color: #e8e5ff;
   background: #fff;
+}
+.script-block-card .script-rich-editor {
+  min-width: 0;
+  max-width: 100%;
+  overflow: visible;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .script-block-card.block-hook .script-rich-editor { font-weight: 700; font-size: 14px; }
 .script-block-card.block-cta .script-rich-editor {

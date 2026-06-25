@@ -394,6 +394,13 @@
 .script-block-toolbar button:hover { background: var(--script-soft); color: var(--script-primary-dark); }
 .script-block-toolbar button.active { background: var(--script-primary); color: #fff; }
 .script-block-toolbar button svg { width: 13px; height: 13px; }
+.script-block-toolbar .script-font-size-button {
+  width: auto;
+  min-width: 28px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 800;
+}
 .script-rich-editor {
   width: 100%;
   min-height: 44px;
@@ -409,6 +416,13 @@
   font-style: normal;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.script-rich-editor * {
+  max-width: 100%;
+  white-space: pre-wrap !important;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .script-rich-editor b,
 .script-rich-editor strong { font-weight: 800; }

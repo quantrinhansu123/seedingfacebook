@@ -709,7 +709,12 @@ export function MonitorPage() {
         applyScopedFacebookGroups(
           filterChannelsForManageScope(rows, currentStaffRef.current).filter(isFacebookGroupChannel),
         );
-        setChannelStatus('');
+        const restored = Number(d.restored_groups || 0);
+        setChannelStatus(
+          restored > 0
+            ? `✅ Đã khôi phục ${restored} nhóm cũ vào Kênh theo dõi${d.warning ? ` · ${d.warning}` : ''}`
+            : d.warning ? `⚠️ ${d.warning}` : '',
+        );
         return rows as ManagedChannel[];
       } else {
         setChannelStatus('❌ ' + (d.error || 'Không tải được danh sách kênh'));
