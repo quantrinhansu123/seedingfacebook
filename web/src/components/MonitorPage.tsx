@@ -217,6 +217,8 @@ function readStoredScanSelectedGroups(): Record<string, boolean> {
   }
 }
 
+const MONITOR_HEAVY_VIEWS: ViewKey[] = ['home', 'manage', 'channels', 'report', 'leads', 'marketing', 'history', 'staff'];
+
 export function MonitorPage() {
   const [groups, setGroups] = useState<string[]>([]);
   const [scanSelectedGroups, setScanSelectedGroups] = useState<Record<string, boolean>>(readStoredScanSelectedGroups);
@@ -377,6 +379,7 @@ export function MonitorPage() {
   const currentStaffRef = useRef<StaffAccount | null>(null);
   const limitRef = useRef(10);
   const autoOnRef = useRef(false);
+  const heavyBootstrapDoneRef = useRef(false);
 
   useEffect(() => {
     groupsRef.current = groups;
@@ -1263,6 +1266,31 @@ export function MonitorPage() {
     if (!authChecked || !authenticated) return;
     let cancelled = false;
 
+    (async () => {
+      try {
+        const sr = await api('/api/settings');
+        const s = await sr.json();
+        if (!cancelled) {
+          setIntervalMin(s.interval || 5);
+          setAutoOn(s.auto_refresh ?? true);
+        }
+      } catch {
+        if (!cancelled) setAutoOn(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authChecked, authenticated]);
+
+  useEffect(() => {
+    if (!authChecked || !authenticated) return;
+    if (!MONITOR_HEAVY_VIEWS.includes(activeView)) return;
+    if (heavyBootstrapDoneRef.current) return;
+    heavyBootstrapDoneRef.current = true;
+    let cancelled = false;
+
     const loadAiBundle = async (): Promise<boolean> => {
       try {
         const [cRes, modelsRes, clRes, lRes, csRes] = await Promise.all([
@@ -1335,17 +1363,6 @@ export function MonitorPage() {
     };
 
     (async () => {
-      try {
-        const sr = await api('/api/settings');
-        const s = await sr.json();
-        if (!cancelled) {
-          setIntervalMin(s.interval || 5);
-          setAutoOn(s.auto_refresh ?? true);
-        }
-      } catch {
-        if (!cancelled) setAutoOn(true);
-      }
-
       await Promise.allSettled([
         loadStaffCookies(),
         loadTg(),
@@ -1353,24 +1370,22 @@ export function MonitorPage() {
         loadChannels(),
       ]);
       if (cancelled) return;
-
       const autoClassify = await loadAiBundle();
       if (cancelled) return;
-
       void loadManageHeavy(autoClassify);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [authChecked, authenticated, loadChannels, loadContentPipeline, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTodayCommentStats]);
+  }, [activeView, authChecked, authenticated, loadChannels, loadContentPipeline, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTodayCommentStats]);
 
   useEffect(() => {
     if (autoTimerRef.current) {
       clearTimeout(autoTimerRef.current);
       autoTimerRef.current = null;
     }
-    if (!autoOn) {
+    if (!autoOn || !MONITOR_HEAVY_VIEWS.includes(activeView)) {
       setToolStatus((t) => statusBaseRef.current || t);
       return;
     }
@@ -1386,7 +1401,7 @@ export function MonitorPage() {
     return () => {
       if (autoTimerRef.current) clearTimeout(autoTimerRef.current);
     };
-  }, [autoOn, intervalMin, loadPosts]);
+  }, [activeView, autoOn, intervalMin, loadPosts]);
 
   function saveSettings(auto: boolean, interval: number) {
     void api('/api/settings', {
@@ -2805,9 +2820,10 @@ export function MonitorPage() {
   const formatDateTime = (value?: string) => (value ? new Date(value).toLocaleString('vi-VN') : '-');
 
   useEffect(() => {
-    if (!authenticated) return;
-    if (adminStaff) void loadStaffCookies();
-  }, [authenticated, adminStaff, loadStaffCookies]);
+    if (!authenticated || !adminStaff) return;
+    if (activeView !== 'staff' && !MONITOR_HEAVY_VIEWS.includes(activeView)) return;
+    void loadStaffCookies();
+  }, [activeView, authenticated, adminStaff, loadStaffCookies]);
 
   useEffect(() => {
     if (!authenticated) return;

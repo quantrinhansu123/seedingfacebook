@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   AlignCenter,
   AlignJustify,
@@ -9,6 +10,7 @@ import {
   AtSign,
   Bot,
   Bold,
+  CalendarDays,
   Check,
   ChevronDown,
   ChevronUp,
@@ -33,6 +35,7 @@ import {
   X,
 } from 'lucide-react';
 import { AI_TIMEOUT_MS, api, getApiBase } from '@/lib/api';
+import { viewToPath } from '@/lib/app-routes';
 import { BusinessProfilePanel } from '@/components/BusinessProfilePanel';
 import { SettingsFormModal } from '@/components/SettingsFormModal';
 import { SettingsSectionCard } from '@/components/SettingsSectionCard';
@@ -58,6 +61,8 @@ type ScriptDocument = {
   writer: string;
   date: string;
   blocks: ScriptBlock[];
+  plan_task_id?: string;
+  plan_task_title?: string;
 };
 
 type SectionKey = 'opening' | 'body' | 'ending';
@@ -578,6 +583,7 @@ function ScriptBlockEditor({ block, placeholder, onChange, onBlurSave, minimal =
 }
 
 export function ScriptWriterPanel() {
+  const router = useRouter();
   const [scripts, setScripts] = useState<ScriptDocument[]>([]);
   const [selectedId, setSelectedId] = useState('');
   const [query, setQuery] = useState('');
@@ -633,6 +639,7 @@ export function ScriptWriterPanel() {
   const scriptsRef = useRef(scripts);
   const saveTimerRef = useRef<number | null>(null);
   const dirtyRef = useRef(false);
+  const loadSeqRef = useRef(0);
   scriptsRef.current = scripts;
 
   function flushSaveKeepalive(rows: ScriptDocument[]) {
@@ -660,46 +667,67 @@ export function ScriptWriterPanel() {
   }
 
   useEffect(() => {
-    let cancelled = false;
+    const seq = ++loadSeqRef.current;
+    const isStale = () => seq !== loadSeqRef.current;
+
+    function scriptIdFromUrl() {
+      return typeof window !== 'undefined'
+        ? new URLSearchParams(window.location.search).get('script')?.trim() || ''
+        : '';
+    }
+
+    function applyScriptRows(rows: ScriptDocument[], payload: { warning?: string; storage?: string; scripts?: unknown[] }) {
+      if (userEditedRef.current) return;
+      const preferred = rows.find((script) => script.id === scriptIdFromUrl());
+      skipNextAutosaveRef.current = true;
+      setScripts(rows);
+      setSelectedId((current) => (rows.some((script) => script.id === current) ? current : preferred?.id || rows[0]?.id || ''));
+      setSyncWarning(typeof payload.warning === 'string' ? payload.warning : '');
+      if (payload.storage === 'local') {
+        setSyncStatus(
+          payload.warning
+            ? 'Đang chờ Supabase API cập nhật cache…'
+            : rows.length
+              ? `Đã lưu tạm trên máy chủ · ${rows.length} kịch bản`
+              : 'Chưa có kịch bản — bấm + để tạo mới',
+        );
+      } else {
+        setSyncStatus(rows.length ? `Đã tải ${rows.length} kịch bản từ Supabase` : 'Chưa có kịch bản — bấm + để tạo mới');
+      }
+    }
+
     async function loadScripts() {
       setSyncStatus('Đang tải từ Supabase...');
       setSyncError('');
       setSyncWarning('');
       try {
-        const response = await api('/api/scripts', { timeoutMs: 30000 });
-        const payload = await response.json();
-        if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không tải được thư viện kịch bản');
-        if (cancelled || userEditedRef.current) return;
-        const rows = Array.isArray(payload.scripts) ? payload.scripts as ScriptDocument[] : [];
-        const scriptIdFromUrl = typeof window !== 'undefined'
-          ? new URLSearchParams(window.location.search).get('script')?.trim() || ''
-          : '';
-        const preferred = rows.find((script) => script.id === scriptIdFromUrl);
-        skipNextAutosaveRef.current = true;
-        setScripts(rows);
-        setSelectedId(preferred?.id || rows[0]?.id || '');
-        setSyncWarning(typeof payload.warning === 'string' ? payload.warning : '');
-        if (payload.storage === 'local') {
-          setSyncStatus(
-            payload.warning
-              ? 'Đang chờ Supabase API cập nhật cache…'
-              : rows.length
-                ? `Đã lưu tạm trên máy chủ · ${rows.length} kịch bản`
-                : 'Chưa có kịch bản — bấm + để tạo mới',
-          );
-        } else {
-          setSyncStatus(payload.scripts?.length ? `Đã tải ${payload.scripts.length} kịch bản từ Supabase` : 'Chưa có kịch bản — bấm + để tạo mới');
+        const liteResponse = await api('/api/scripts?lite=1', { timeoutMs: 30000 });
+        const litePayload = await liteResponse.json().catch(() => ({}));
+        if (isStale()) return;
+        if (!liteResponse.ok || !litePayload.ok) {
+          throw new Error(litePayload.error || 'Không tải được thư viện kịch bản');
         }
+        const liteRows = Array.isArray(litePayload.scripts) ? litePayload.scripts as ScriptDocument[] : [];
+        applyScriptRows(liteRows, litePayload);
+        setLoaded(true);
+
+        setSyncStatus(liteRows.length ? 'Đang tải nội dung chi tiết...' : 'Chưa có kịch bản — bấm + để tạo mới');
+        const response = await api('/api/scripts', { timeoutMs: 60000 });
+        const payload = await response.json().catch(() => ({}));
+        if (isStale() || userEditedRef.current) return;
+        if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không tải được nội dung kịch bản');
+        const rows = Array.isArray(payload.scripts) ? payload.scripts as ScriptDocument[] : [];
+        applyScriptRows(rows, payload);
       } catch (error) {
-        if (cancelled) return;
+        if (isStale()) return;
         setSyncError(error instanceof Error ? error.message : 'Không kết nối được Supabase');
         setSyncStatus('Chưa đồng bộ Supabase');
       } finally {
-        if (!cancelled) setLoaded(true);
+        if (!isStale()) setLoaded(true);
       }
     }
     void loadScripts();
-    return () => { cancelled = true; };
+    return () => { loadSeqRef.current += 1; };
   }, []);
 
   useEffect(() => {
@@ -712,21 +740,16 @@ export function ScriptWriterPanel() {
   }, [loaded, scripts]);
 
   useEffect(() => {
-    void loadTechniques();
-    // loadTechniques is stable enough for this mount-only fetch.
+    if (!loaded) return;
+    const timer = window.setTimeout(() => {
+      void loadTechniques();
+      void loadAiConfig();
+      void loadStudioSetup();
+    }, 0);
+    return () => window.clearTimeout(timer);
+    // Defer AI settings bootstrap until scripts are on screen.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    void loadAiConfig();
-    // loadAiConfig is a mount-only bootstrap for the content AI panel.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    void loadStudioSetup();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loaded]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -1815,7 +1838,13 @@ export function ScriptWriterPanel() {
               </div>
             </div>
           ))}
-          {!loaded ? <div className="script-empty-list">Đang tải kịch bản...</div> : !visibleScripts.length ? <div className="script-empty-list">Không tìm thấy kịch bản.</div> : null}
+          {!loaded ? (
+            <div className="script-empty-list">Đang tải kịch bản...</div>
+          ) : syncError && !scripts.length ? (
+            <div className="script-empty-list script-sync-error">{syncError}</div>
+          ) : !visibleScripts.length ? (
+            <div className="script-empty-list">Không tìm thấy kịch bản.</div>
+          ) : null}
         </div>
       </aside>
 
@@ -1841,6 +1870,16 @@ export function ScriptWriterPanel() {
                 <option value="approved">Đã duyệt</option>
               </select>
               <div className="script-editor-toolbar">
+                {selected.plan_task_id ? (
+                  <button
+                    type="button"
+                    className="script-save plan-link"
+                    title={selected.plan_task_title ? `Task kế hoạch: ${selected.plan_task_title}` : 'Mở task trên Kế hoạch content'}
+                    onClick={() => router.push(`${viewToPath('plan')}?task=${encodeURIComponent(selected.plan_task_id!)}`)}
+                  >
+                    <CalendarDays /> Kế hoạch
+                  </button>
+                ) : null}
                 <button type="button" className="script-save" onClick={() => queueSave(true, true)}><Save /> Lưu bài</button>
                 <button type="button" className="script-save review" onClick={() => void saveCurrentWithStatus('pending', 'Đã gửi duyệt. Task đã chuyển sang Chờ duyệt.')}><SendHorizontal /> Gửi duyệt</button>
                 {selected.status === 'pending' ? (

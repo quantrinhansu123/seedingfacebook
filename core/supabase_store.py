@@ -496,11 +496,18 @@ def _request_workflow(method: str, path: str, **kwargs) -> requests.Response:
     raise RuntimeError(f'Supabase {method} {path} failed')
 
 
-def list_content_tasks(table: Optional[str] = None) -> list:
+def list_content_tasks(table: Optional[str] = None, *, lite: bool = False) -> list:
     table_name = table or CONTENT_TASK_TABLE
+    if lite:
+        select = (
+            'id,title,assignee_id,assignee_name,assignee_username,status,priority,due_date,'
+            'script_id,platform,color,created_at,updated_at,started_at,submitted_at,approved_at,completed_at'
+        )
+    else:
+        select = '*'
     r = _request_workflow(
         'GET',
-        f'{table_name}?select=*&order=updated_at.desc',
+        f'{table_name}?select={select}&order=updated_at.desc',
     )
     return r.json()
 
@@ -576,7 +583,7 @@ def list_content_script_blocks(table: Optional[str] = None) -> list:
     table_name = table or CONTENT_SCRIPT_BLOCK_TABLE
     r = _request_workflow(
         'GET',
-        f'{table_name}?select=*&order=block_order.asc',
+        f'{table_name}?select=id,script_id,content_type,content,block_order,metadata&order=block_order.asc',
     )
     return r.json()
 

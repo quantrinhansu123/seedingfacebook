@@ -247,6 +247,14 @@
   white-space: nowrap;
 }
 .content-plan-card.has-script { box-shadow: inset 0 0 0 1px #ebe7ff; }
+.content-plan-card.highlight-task {
+  box-shadow: 0 0 0 2px #7c6cf0, 0 8px 20px rgba(124, 108, 240, 0.18);
+  animation: content-plan-highlight 1.2s ease-in-out 2;
+}
+@keyframes content-plan-highlight {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
 .content-plan-scripts-status {
   font-size: 10px;
   color: #94a3b8;

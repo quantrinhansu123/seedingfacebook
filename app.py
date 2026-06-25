@@ -9018,7 +9018,7 @@ def _clean_content_tasks(rows) -> list[dict]:
     return cleaned
 
 
-def _public_content_task(row: dict) -> dict:
+def _public_content_task(row: dict, *, lite: bool = False) -> dict:
     status = str(row.get('status') or 'todo').strip().lower()
     if status not in WORKFLOW_STATUSES:
         status = 'todo'
@@ -9028,7 +9028,7 @@ def _public_content_task(row: dict) -> dict:
     assignee = str(row.get('assignee_name') or '').strip()
     color_seed = abs(hash(assignee or row.get('id') or 'task')) % 5
     colors = ['#7C6CF0', '#3B82F6', '#10B981', '#F59E0B', '#EF4444']
-    return {
+    payload = {
         'id': row.get('id'),
         'col': WORKFLOW_STATUS_TO_PLAN_COL.get(status, 0),
         'status': status,
@@ -9043,8 +9043,6 @@ def _public_content_task(row: dict) -> dict:
         'color': row.get('color') or colors[color_seed],
         'script_id': row.get('script_id') or '',
         'platform': row.get('platform') or 'TikTok',
-        'notes': _safe_json_list(row.get('notes')),
-        'timeline': _safe_json_list(row.get('timeline')),
         'created_at': row.get('created_at') or '',
         'updated_at': row.get('updated_at') or '',
         'started_at': row.get('started_at') or '',
@@ -9052,6 +9050,13 @@ def _public_content_task(row: dict) -> dict:
         'approved_at': row.get('approved_at') or '',
         'completed_at': row.get('completed_at') or '',
     }
+    if lite:
+        payload['notes'] = []
+        payload['timeline'] = []
+    else:
+        payload['notes'] = _safe_json_list(row.get('notes'))
+        payload['timeline'] = _safe_json_list(row.get('timeline'))
+    return payload
 
 
 def _filter_content_tasks_for_current_staff(rows: list[dict]) -> list[dict]:
@@ -9184,6 +9189,83 @@ def _script_db_payload_from_script(script: dict, existing_task: dict | None = No
     return task, blocks
 
 
+def _is_workflow_script_task(row: dict) -> bool:
+    task_id = str(row.get('id') or '').strip()
+    script_id = str(row.get('script_id') or '').strip()
+    return bool(script_id) and task_id == f'task-{script_id}'
+
+
+def _plan_task_ids_by_script(tasks: list[dict]) -> dict[str, str]:
+    plan_by_script: dict[str, str] = {}
+    for task in tasks or []:
+        script_id = str(task.get('script_id') or '').strip()
+        task_id = str(task.get('id') or '').strip()
+        if not script_id or not task_id or _is_workflow_script_task(task):
+            continue
+        plan_by_script.setdefault(script_id, task_id)
+    return plan_by_script
+
+
+def _attach_plan_links_to_scripts(scripts: list[dict], tasks: list[dict]) -> list[dict]:
+    plan_by_script = _plan_task_ids_by_script(tasks)
+    plan_titles: dict[str, str] = {}
+    for task in tasks or []:
+        script_id = str(task.get('script_id') or '').strip()
+        task_id = str(task.get('id') or '').strip()
+        if script_id and task_id == plan_by_script.get(script_id):
+            plan_titles[script_id] = str(task.get('title') or '').strip()
+    for script in scripts:
+        script_id = str(script.get('id') or '').strip()
+        plan_task_id = plan_by_script.get(script_id)
+        if plan_task_id:
+            script['plan_task_id'] = plan_task_id
+            if plan_titles.get(script_id):
+                script['plan_task_title'] = plan_titles[script_id]
+    return scripts
+
+
+def _sync_plan_tasks_from_scripts(plan_tasks: list[dict], scripts: list[dict]) -> list[dict]:
+    scripts_by_id = {str(script.get('id') or ''): script for script in scripts if str(script.get('id') or '').strip()}
+    staff = _current_staff()
+    synced: list[dict] = []
+    for row in plan_tasks:
+        task = dict(row)
+        script_id = str(task.get('script_id') or '').strip()
+        script = scripts_by_id.get(script_id)
+        if not script:
+            synced.append(task)
+            continue
+        script_status = str(script.get('status') or 'draft').strip().lower()
+        new_status = SCRIPT_TO_WORKFLOW_STATUS.get(script_status, 'doing')
+        old_status = str(task.get('status') or '').strip().lower()
+        if new_status != old_status:
+            task['status'] = new_status
+            timeline = _safe_json_list(task.get('timeline'))
+            now = _workflow_now()
+            if new_status == 'doing' and not task.get('started_at'):
+                task['started_at'] = now
+                if old_status in {'', 'todo'}:
+                    timeline.append(_workflow_event('started', 'Bắt đầu làm từ kịch bản', staff))
+            if new_status == 'pending' and old_status != 'pending':
+                task['started_at'] = task.get('started_at') or now
+                task['submitted_at'] = task.get('submitted_at') or now
+                timeline.append(_workflow_event('submitted', 'Gửi duyệt từ kịch bản', staff))
+            if new_status == 'approved' and old_status != 'approved':
+                task['started_at'] = task.get('started_at') or now
+                task['submitted_at'] = task.get('submitted_at') or now
+                task['approved_at'] = task.get('approved_at') or now
+                task['completed_at'] = task.get('completed_at') or now
+                task['approved_by_staff_id'] = staff.get('id') or None
+                task['approved_by_staff_name'] = staff.get('name') or staff.get('username') or None
+                timeline.append(_workflow_event('approved', 'Duyệt từ kịch bản', staff))
+            task['timeline'] = timeline[-100:]
+        writer = str(script.get('writer') or '').strip()
+        if writer:
+            task['assignee_name'] = writer
+        synced.append(task)
+    return synced
+
+
 def _scripts_from_workflow_rows(tasks: list[dict], blocks: list[dict]) -> list[dict]:
     by_script: dict[str, list[dict]] = {}
     for block in blocks or []:
@@ -9230,6 +9312,37 @@ def _scripts_from_workflow_rows(tasks: list[dict], blocks: list[dict]) -> list[d
     return _clean_script_library(cleaned)
 
 
+def _scripts_lite_from_tasks(tasks: list[dict]) -> list[dict]:
+    scripts_by_id: dict[str, dict] = {}
+    for task in tasks or []:
+        script_id = str(task.get('script_id') or '').strip()
+        if not script_id:
+            continue
+        entry = {
+            'id': script_id,
+            'title': task.get('title') or '',
+            'platform': task.get('platform') or 'TikTok',
+            'status': _script_status_from_task(task),
+            'writer': task.get('assignee_name') or '',
+            'date': task.get('due_date') or '',
+            'blocks': [],
+            '_task_id': str(task.get('id') or ''),
+        }
+        existing = scripts_by_id.get(script_id)
+        if not existing:
+            scripts_by_id[script_id] = entry
+            continue
+        task_is_workflow = str(task.get('id') or '') == f'task-{script_id}'
+        existing_is_workflow = str(existing.get('_task_id') or '') == f'task-{script_id}'
+        if task_is_workflow and not existing_is_workflow:
+            scripts_by_id[script_id] = entry
+    cleaned = []
+    for script in scripts_by_id.values():
+        script.pop('_task_id', None)
+        cleaned.append(script)
+    return _clean_script_library(cleaned)
+
+
 def _content_workflow_supabase_warning(exc: Exception) -> str:
     text = str(exc)
     if 'PGRST205' in text or 'schema cache' in text.lower() or 'Could not find the table' in text:
@@ -9239,11 +9352,86 @@ def _content_workflow_supabase_warning(exc: Exception) -> str:
     return text[:500]
 
 
+WORKFLOW_READ_CACHE_SEC = 2.5
+_workflow_read_cache: dict[str, object] = {'tasks': None, 'blocks': None, 'ts': 0.0}
+
+
+def _invalidate_workflow_read_cache() -> None:
+    _workflow_read_cache['ts'] = 0.0
+    _workflow_read_cache['tasks'] = None
+    _workflow_read_cache['blocks'] = None
+
+
+def _cached_workflow_tasks(*, lite: bool = False, force: bool = False) -> list:
+    key = 'tasks_lite' if lite else 'tasks'
+    now = time_module.monotonic()
+    cached = _workflow_read_cache.get(key)
+    ts = float(_workflow_read_cache.get('ts') or 0.0)
+    if not force and isinstance(cached, list) and now - ts < WORKFLOW_READ_CACHE_SEC:
+        return cached
+    rows = sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE, lite=lite)
+    _workflow_read_cache[key] = rows
+    if not lite:
+        _workflow_read_cache['tasks'] = rows
+    _workflow_read_cache['ts'] = now
+    return rows
+
+
+def _cached_workflow_blocks(*, force: bool = False) -> list:
+    now = time_module.monotonic()
+    cached = _workflow_read_cache.get('blocks')
+    ts = float(_workflow_read_cache.get('ts') or 0.0)
+    if not force and isinstance(cached, list) and now - ts < WORKFLOW_READ_CACHE_SEC:
+        return cached
+    rows = sb.list_content_script_blocks(SUPABASE_CONTENT_SCRIPT_BLOCK_TABLE)
+    _workflow_read_cache['blocks'] = rows
+    _workflow_read_cache['ts'] = now
+    return rows
+
+
 def _load_scripts_from_workflow_supabase() -> list[dict]:
-    # Thư viện kịch bản dùng chung — không lọc theo staff như board Kế hoạch.
-    tasks = sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE)
-    blocks = sb.list_content_script_blocks(SUPABASE_CONTENT_SCRIPT_BLOCK_TABLE)
-    return _scripts_from_workflow_rows(tasks, blocks)
+    tasks = _cached_workflow_tasks()
+    blocks = _cached_workflow_blocks()
+    scripts = _scripts_from_workflow_rows(tasks, blocks)
+    return _attach_plan_links_to_scripts(scripts, tasks)
+
+
+def _ensure_scripts_from_active_plan_tasks() -> None:
+    if not USE_SUPABASE:
+        return
+    try:
+        raw_tasks = _cached_workflow_tasks(lite=True)
+    except Exception:
+        return
+    plan_rows = [
+        _public_content_task(row, lite=True)
+        for row in raw_tasks
+        if not _is_workflow_script_task(row) and _workflow_status_from_task(row) in {'doing', 'pending'}
+    ]
+    if not plan_rows:
+        return
+    try:
+        existing_scripts = _load_scripts_from_workflow_supabase()
+    except Exception:
+        existing_scripts = _attach_plan_links_to_scripts(_scripts_lite_from_tasks(raw_tasks), raw_tasks)
+    updated_rows, new_scripts = _provision_scripts_for_active_plan_tasks(plan_rows, existing_scripts)
+    script_id_changed = any(
+        str(next_row.get('script_id') or '').strip() != str(prev_row.get('script_id') or '').strip()
+        for next_row, prev_row in zip(updated_rows, plan_rows)
+    )
+    if not new_scripts and not script_id_changed:
+        return
+    scripts_by_id = {
+        str(script.get('id') or ''): dict(script)
+        for script in existing_scripts
+        if str(script.get('id') or '').strip()
+    }
+    for script in new_scripts:
+        scripts_by_id[script['id']] = script
+    _save_scripts_to_workflow_supabase(
+        list(scripts_by_id.values()),
+        plan_provision_updates=updated_rows,
+    )
 
 
 def _script_id_for_plan_task(task: dict) -> str:
@@ -9303,14 +9491,15 @@ def _apply_script_provision_from_plan_tasks(rows: list[dict]) -> list[dict]:
     scripts_by_id = {str(script.get('id') or ''): script for script in existing_scripts if str(script.get('id') or '').strip()}
     for script in new_scripts:
         scripts_by_id.setdefault(script['id'], script)
-    _save_scripts_to_workflow_supabase(list(scripts_by_id.values()))
+    _save_scripts_to_workflow_supabase(list(scripts_by_id.values()), plan_provision_updates=updated_rows)
     return updated_rows
 
 
-def _save_scripts_to_workflow_supabase(rows: list[dict]) -> None:
+def _save_scripts_to_workflow_supabase(rows: list[dict], *, plan_provision_updates: list[dict] | None = None) -> None:
     existing_tasks = sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE)
     by_script = {str(row.get('script_id') or ''): row for row in existing_tasks if row.get('script_id')}
     by_id = {str(row.get('id') or ''): row for row in existing_tasks if row.get('id')}
+    provision_by_id = {str(row.get('id') or ''): row for row in (plan_provision_updates or []) if str(row.get('id') or '').strip()}
     kept_script_ids = {script['id'] for script in rows}
     removed_script_ids = [
         str(row.get('script_id') or '').strip()
@@ -9332,10 +9521,23 @@ def _save_scripts_to_workflow_supabase(rows: list[dict]) -> None:
         row for row in existing_tasks
         if str(row.get('id') or '').strip() and str(row.get('id') or '').strip() not in script_task_ids
     ]
-    sb.sync_content_tasks([*plan_tasks, *task_rows], SUPABASE_CONTENT_TASK_TABLE)
+    merged_plan: list[dict] = []
+    for row in plan_tasks:
+        task = dict(row)
+        provision = provision_by_id.get(str(task.get('id') or '').strip())
+        if provision and provision.get('script_id'):
+            task['script_id'] = provision['script_id']
+        merged_plan.append(task)
+    plan_tasks = _sync_plan_tasks_from_scripts(merged_plan, rows)
+    plan_payloads = [
+        _task_db_payload(task, by_id.get(str(task.get('id') or '').strip()))
+        for task in plan_tasks
+    ]
+    sb.sync_content_tasks([*plan_payloads, *task_rows], SUPABASE_CONTENT_TASK_TABLE)
     sb.sync_content_script_blocks(block_rows, script_ids, SUPABASE_CONTENT_SCRIPT_BLOCK_TABLE)
     if removed_script_ids:
         sb.purge_content_script_blocks(removed_script_ids, SUPABASE_CONTENT_SCRIPT_BLOCK_TABLE)
+    _invalidate_workflow_read_cache()
 
 
 def _sync_legacy_content_scripts_table(rows: list[dict]) -> None:
@@ -9365,6 +9567,7 @@ def _sync_legacy_content_scripts_table(rows: list[dict]) -> None:
 @app.route('/api/scripts', methods=['GET'])
 def scripts_get():
     status_filter = str(request.args.get('status') or '').strip().lower()
+    lite = str(request.args.get('lite') or '').strip().lower() in {'1', 'true', 'yes'}
     if not USE_SUPABASE:
         return jsonify({
             'ok': False,
@@ -9372,18 +9575,19 @@ def scripts_get():
             'storage': 'disabled',
         }), 503
     try:
-        all_tasks, _, _ = _load_tasks_any(include_all=True)
-        cleaned_tasks = _clean_content_tasks(all_tasks)
-        provisioned = _apply_script_provision_from_plan_tasks(cleaned_tasks)
-        before_links = {str(row.get('id') or ''): str(row.get('script_id') or '') for row in cleaned_tasks}
-        after_links = {str(row.get('id') or ''): str(row.get('script_id') or '') for row in provisioned}
-        if before_links != after_links:
-            _save_tasks_any(provisioned)
-        workflow_tasks = sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE)
+        _ensure_scripts_from_active_plan_tasks()
+        if lite:
+            tasks = _cached_workflow_tasks(lite=True)
+            rows = _apply_legacy_script_statuses(
+                _attach_plan_links_to_scripts(_scripts_lite_from_tasks(tasks), tasks),
+            )
+            rows = _filter_scripts_by_status(rows, status_filter)
+            return jsonify({'ok': True, 'scripts': rows, 'storage': 'supabase_workflow_lite'})
         rows = _apply_legacy_script_statuses(_load_scripts_from_workflow_supabase())
         if rows:
             rows = _filter_scripts_by_status(rows, status_filter)
             return jsonify({'ok': True, 'scripts': rows, 'storage': 'supabase_workflow'})
+        workflow_tasks = sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE)
         if workflow_tasks:
             return jsonify({'ok': True, 'scripts': [], 'storage': 'supabase_workflow'})
         legacy_rows = _filter_scripts_by_status(
@@ -9523,6 +9727,7 @@ def _patch_content_task_notes(task_id: str, notes: list) -> tuple[dict | None, s
             if saved:
                 merged = _upsert_task_local(saved)
                 cleaned = _clean_content_tasks([merged])
+                _invalidate_workflow_read_cache()
                 return (cleaned[0] if cleaned else None), 'supabase', ''
         except Exception as exc:
             warning = _content_workflow_supabase_warning(exc)
@@ -9540,18 +9745,18 @@ def _patch_content_task_notes(task_id: str, notes: list) -> tuple[dict | None, s
     return (cleaned[0] if cleaned else None), 'local', ''
 
 
-def _tasks_payload(rows: list[dict], storage: str, warning: str = '') -> dict:
-    public_rows = [_public_content_task(row) for row in _clean_content_tasks(rows)]
+def _tasks_payload(rows: list[dict], storage: str, warning: str = '', *, lite: bool = False) -> dict:
+    public_rows = [_public_content_task(row, lite=lite) for row in _clean_content_tasks(rows)]
     payload = {'ok': True, 'tasks': public_rows, 'storage': storage}
     if warning:
         payload['warning'] = warning
     return payload
 
 
-def _load_tasks_any(include_all: bool = False) -> tuple[list[dict], str, str]:
+def _load_tasks_any(include_all: bool = False, *, lite: bool = False) -> tuple[list[dict], str, str]:
     if USE_SUPABASE:
         try:
-            rows = _clean_content_tasks(sb.list_content_tasks(SUPABASE_CONTENT_TASK_TABLE))
+            rows = _clean_content_tasks(_cached_workflow_tasks(lite=lite))
             return (rows if include_all else _filter_content_tasks_for_current_staff(rows)), 'supabase', ''
         except Exception as exc:
             rows = _load_tasks_local()
@@ -9571,6 +9776,7 @@ def _save_tasks_any(rows: list[dict], *, provision_scripts: bool = True) -> tupl
             payloads = [_task_db_payload(row, by_id.get(str(row.get('id') or ''))) for row in cleaned]
             sb.sync_content_tasks(payloads, SUPABASE_CONTENT_TASK_TABLE)
             _save_tasks_local(cleaned)
+            _invalidate_workflow_read_cache()
             return cleaned, 'supabase', ''
         except Exception as exc:
             _save_tasks_local(cleaned)
@@ -9581,17 +9787,21 @@ def _save_tasks_any(rows: list[dict], *, provision_scripts: bool = True) -> tupl
 
 @app.route('/api/content-tasks', methods=['GET'])
 def content_tasks_get():
-    all_rows, storage, warning = _load_tasks_any(include_all=True)
-    cleaned = _clean_content_tasks(all_rows)
-    provisioned = _apply_script_provision_from_plan_tasks(cleaned)
-    before_links = {str(row.get('id') or ''): str(row.get('script_id') or '') for row in cleaned}
-    after_links = {str(row.get('id') or ''): str(row.get('script_id') or '') for row in provisioned}
-    if before_links != after_links:
-        provisioned, storage, save_warning = _save_tasks_any(provisioned)
-        if save_warning:
-            warning = f'{warning} {save_warning}'.strip() if warning else save_warning
-    visible = _filter_content_tasks_for_current_staff(provisioned)
-    return jsonify(_tasks_payload(visible, storage, warning))
+    lite = str(request.args.get('lite') or '').strip().lower() in {'1', 'true', 'yes'}
+    rows, storage, warning = _load_tasks_any(include_all=_is_admin(), lite=lite)
+    return jsonify(_tasks_payload(rows, storage, warning, lite=lite))
+
+
+@app.route('/api/content-tasks/<task_id>', methods=['GET'])
+def content_tasks_get_one(task_id):
+    task_id = str(task_id or '').strip()
+    row, storage = _get_content_task_by_id(task_id)
+    if not row:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy task'}), 404
+    visible = _filter_content_tasks_for_current_staff([row])
+    if not visible:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy task'}), 404
+    return jsonify({'ok': True, 'task': _public_content_task(visible[0]), 'storage': storage})
 
 
 @app.route('/api/content-tasks', methods=['POST'])

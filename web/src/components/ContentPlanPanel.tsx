@@ -225,6 +225,7 @@ export function ContentPlanPanel() {
   const [notesTaskId, setNotesTaskId] = useState('');
   const [noteText, setNoteText] = useState('');
   const [noteBusy, setNoteBusy] = useState(false);
+  const [highlightTaskId, setHighlightTaskId] = useState('');
 
   const persist = useCallback((nextTasks: PlanTask[], nextArchived: ArchivedTask[]) => {
     try {
@@ -257,7 +258,7 @@ export function ContentPlanPanel() {
       const needsScripts = rows.some((task) => (task.col === 1 || task.col === 2 || task.status === 'doing' || task.status === 'pending'));
       if (!needsScripts) return;
       try {
-        const response = await api('/api/scripts', { timeoutMs: 20000 });
+        const response = await api('/api/scripts?lite=1', { timeoutMs: 20000 });
         const scriptPayload = await response.json().catch(() => ({}));
         if (response.ok && scriptPayload.ok && Array.isArray(scriptPayload.scripts)) {
           setScripts(scriptPayload.scripts as PlanScript[]);
@@ -279,13 +280,20 @@ export function ContentPlanPanel() {
 
   useEffect(() => {
     let cancelled = false;
-    async function loadTasks() {
+    async function loadPlanData() {
+      setScriptsStatus('Đang tải...');
       try {
-        const response = await api('/api/content-tasks', { timeoutMs: 30000 });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không tải được task');
+        const [tasksResponse, scriptsResponse] = await Promise.all([
+          api('/api/content-tasks?lite=1', { timeoutMs: 30000 }),
+          api('/api/scripts?lite=1', { timeoutMs: 20000 }),
+        ]);
+        const tasksPayload = await tasksResponse.json().catch(() => ({}));
+        const scriptsPayload = await scriptsResponse.json().catch(() => ({}));
         if (cancelled) return;
-        const rows = Array.isArray(payload.tasks) ? payload.tasks as PlanTask[] : [];
+        if (!tasksResponse.ok || !tasksPayload.ok) {
+          throw new Error(tasksPayload.error || 'Không tải được task');
+        }
+        const rows = Array.isArray(tasksPayload.tasks) ? tasksPayload.tasks as PlanTask[] : [];
         if (rows.length) {
           setTasks(rows);
           try {
@@ -294,59 +302,51 @@ export function ContentPlanPanel() {
             /* ignore */
           }
         }
-        if (payload.warning) setScriptsStatus(payload.warning);
+        if (scriptsResponse.ok && scriptsPayload.ok) {
+          const scriptRows = Array.isArray(scriptsPayload.scripts) ? scriptsPayload.scripts as PlanScript[] : [];
+          setScripts(scriptRows);
+          setScriptsStatus(scriptRows.length ? `${scriptRows.length} kịch bản` : 'Chưa có kịch bản');
+        } else {
+          setScriptsStatus(scriptsPayload.error || 'Không tải được kịch bản');
+        }
+        const warning = [tasksPayload.warning, scriptsPayload.warning].filter(Boolean).join(' · ');
+        if (warning) setScriptsStatus(warning);
       } catch (error) {
-        if (!cancelled) setScriptsStatus(error instanceof Error ? error.message : 'Không tải được task từ Supabase');
+        if (!cancelled) {
+          setScriptsStatus(error instanceof Error ? error.message : 'Không tải được dữ liệu kế hoạch');
+        }
       }
     }
-    void loadTasks();
+    void loadPlanData();
     return () => { cancelled = true; };
   }, [archived, members]);
 
   useEffect(() => {
-    let cancelled = false;
-    async function loadScripts() {
-      setScriptsStatus('Đang tải kịch bản...');
-      try {
-        const response = await api('/api/scripts', { timeoutMs: 20000 });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không tải được kịch bản');
-        if (cancelled) return;
-        const rows = Array.isArray(payload.scripts) ? payload.scripts as PlanScript[] : [];
-        setScripts(rows);
-        setScriptsStatus(rows.length ? `${rows.length} kịch bản` : 'Chưa có kịch bản');
-      } catch (error) {
-        if (!cancelled) {
-          setScriptsStatus(error instanceof Error ? error.message : 'Không tải được kịch bản');
-        }
-      }
-    }
-    void loadScripts();
-    return () => { cancelled = true; };
-  }, []);
+    if (!scripts.length) return;
+    let changed = false;
+    const next = tasks.map((task) => {
+      const script = findScriptForTask(task, scripts);
+      if (!script) return task;
+      const col = planColFromScriptStatus(script.status);
+      if (task.script_id === script.id && task.col === col) return task;
+      changed = true;
+      return { ...task, script_id: script.id, col, status: statusFromCol(col) };
+    });
+    if (!changed) return;
+    updateTasks(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scripts]);
 
   useEffect(() => {
-    if (!scripts.length) return;
-    setTasks((prev) => {
-      let changed = false;
-      const next = prev.map((task) => {
-        const script = findScriptForTask(task, scripts);
-        if (!script) return task;
-        const col = planColFromScriptStatus(script.status);
-        if (task.script_id === script.id && task.col === col) return task;
-        changed = true;
-        return { ...task, script_id: script.id, col, status: statusFromCol(col) };
-      });
-      if (changed) {
-        try {
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: next, archived, members }));
-        } catch {
-          /* ignore */
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [archived, members, scripts]);
+    if (typeof window === 'undefined') return;
+    const taskId = new URLSearchParams(window.location.search).get('task')?.trim() || '';
+    if (!taskId) return;
+    setHighlightTaskId(taskId);
+    setViewMode('all');
+    window.setTimeout(() => {
+      document.querySelector(`[data-plan-task-id="${taskId}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 120);
+  }, [tasks]);
 
   useEffect(() => {
     if (!notice) return;
@@ -471,6 +471,17 @@ export function ContentPlanPanel() {
   function openNotes(task: PlanTask) {
     setNotesTaskId(task.id);
     setNoteText('');
+    if (task.notes?.length) return;
+    void api(`/api/content-tasks/${encodeURIComponent(task.id)}`, { timeoutMs: 15000 })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || !payload.ok || !payload.task) return;
+        const updated = payload.task as PlanTask;
+        setTasks((current) => current.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
+      })
+      .catch(() => {
+        /* ignore */
+      });
   }
 
   async function sendTaskNote() {
@@ -750,7 +761,8 @@ export function ContentPlanPanel() {
                     return (
                       <div
                         key={task.id}
-                        className={`content-plan-card ${deadlineClass(task.dl)}${linkedScript ? ' has-script' : ''}`}
+                        data-plan-task-id={task.id}
+                        className={`content-plan-card ${deadlineClass(task.dl)}${linkedScript ? ' has-script' : ''}${highlightTaskId === task.id ? ' highlight-task' : ''}`}
                         draggable
                         onDragStart={() => setDragTaskId(task.id)}
                         onDragEnd={() => setDragTaskId(null)}
