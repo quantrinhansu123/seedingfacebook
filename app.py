@@ -9527,21 +9527,24 @@ def _provision_scripts_for_active_plan_tasks(
         if not script_id:
             script_id = _script_id_for_plan_task(row)
             row['script_id'] = script_id
+            script_status = 'pending' if status == 'pending' else 'draft'
+            script = {
+                'id': script_id,
+                'title': row.get('title') or 'Kịch bản',
+                'platform': row.get('platform') or 'TikTok',
+                'status': script_status,
+                'writer': str(row.get('assignee_name') or row.get('assignee') or '').strip(),
+                'date': str(row.get('due_date') or row.get('dl') or '').strip(),
+                'blocks': [{'id': f'{script_id}-block-0', 'type': 'hook', 'text': ''}],
+            }
+            new_scripts.append(script)
+            scripts_by_id[script_id] = script
+            updated_rows.append(row)
+            continue
         if script_id in scripts_by_id:
             updated_rows.append(row)
             continue
-        script_status = 'pending' if status == 'pending' else 'draft'
-        script = {
-            'id': script_id,
-            'title': row.get('title') or 'Kịch bản',
-            'platform': row.get('platform') or 'TikTok',
-            'status': script_status,
-            'writer': str(row.get('assignee_name') or row.get('assignee') or '').strip(),
-            'date': str(row.get('due_date') or row.get('dl') or '').strip(),
-            'blocks': [{'id': f'{script_id}-block-0', 'type': 'hook', 'text': ''}],
-        }
-        new_scripts.append(script)
-        scripts_by_id[script_id] = script
+        # Giữ task kế hoạch đã gắn script_id nhưng không tự tạo lại kịch bản đã xóa.
         updated_rows.append(row)
     return updated_rows, new_scripts
 
@@ -9585,14 +9588,23 @@ def _save_scripts_to_workflow_supabase(rows: list[dict], *, plan_provision_updat
         script_ids.append(script['id'])
     # Giữ task kế hoạch (id khác task kịch bản workflow), kể cả khi đã gắn script_id.
     script_task_ids = {str(task_row.get('id') or '').strip() for task_row in task_rows if str(task_row.get('id') or '').strip()}
-    plan_tasks = [
-        row for row in existing_tasks
-        if str(row.get('id') or '').strip() and str(row.get('id') or '').strip() not in script_task_ids
-    ]
+    removed_script_ids_set = set(removed_script_ids)
     merged_plan: list[dict] = []
-    for row in plan_tasks:
+    for row in existing_tasks:
+        task_id = str(row.get('id') or '').strip()
+        script_id = str(row.get('script_id') or '').strip()
+        if not task_id or task_id in script_task_ids:
+            continue
+        if script_id in removed_script_ids_set and _is_workflow_script_task(row):
+            continue
         task = dict(row)
-        provision = provision_by_id.get(str(task.get('id') or '').strip())
+        if script_id in removed_script_ids_set:
+            task['script_id'] = None
+            if _workflow_status_from_task(task) in {'doing', 'pending'}:
+                task['status'] = 'todo'
+                task['started_at'] = None
+                task['submitted_at'] = None
+        provision = provision_by_id.get(task_id)
         if provision and provision.get('script_id'):
             task['script_id'] = provision['script_id']
         merged_plan.append(task)

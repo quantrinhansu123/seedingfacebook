@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Archive, Clock3, FileText, MessageSquare, Plus, RotateCcw, SendHorizontal, Trash2, X } from 'lucide-react';
+import { Archive, Clock3, FileText, MessageSquare, Pencil, Plus, RotateCcw, SendHorizontal, Trash2, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { viewToPath } from '@/lib/app-routes';
+import type { StaffAccount } from '@/lib/types';
 import './content-plan-panel.css';
 
 type PlanColumn = 0 | 1 | 2 | 3;
@@ -38,11 +39,10 @@ type PlanTask = {
 type ArchivedTask = PlanTask & { archivedAt: string };
 
 type PlanMember = {
-  id: number;
+  id: string;
   name: string;
   role: string;
   color: string;
-  kpi: { t: number; d: number };
 };
 
 type PlanViewMode = 'all' | 'todo' | 'doing' | 'done' | 'archive';
@@ -59,12 +59,16 @@ const KANBAN_COLUMNS: Array<{ id: PlanColumn; label: string; color: string }> = 
   { id: 3, label: 'Xong', color: '#10B981' },
 ];
 
-const DEFAULT_MEMBERS: PlanMember[] = [
-  { id: 1, name: 'An', role: 'Content Writer', color: MEMBER_COLORS[0], kpi: { t: 15, d: 10 } },
-  { id: 2, name: 'Bình', role: 'Script Writer', color: MEMBER_COLORS[1], kpi: { t: 12, d: 7 } },
-  { id: 3, name: 'Chi', role: 'Editor', color: MEMBER_COLORS[2], kpi: { t: 10, d: 6 } },
-  { id: 4, name: 'Dung', role: 'Designer', color: MEMBER_COLORS[3], kpi: { t: 8, d: 5 } },
-];
+function staffRowsToMembers(rows: StaffAccount[]): PlanMember[] {
+  return rows
+    .filter((item) => item.enabled !== false && String(item.name || item.username || '').trim())
+    .map((item, index) => ({
+      id: String(item.id || item.username || index),
+      name: String(item.name || item.username || '').trim(),
+      role: item.role === 'admin' ? 'Admin' : 'Nhân sự',
+      color: MEMBER_COLORS[index % MEMBER_COLORS.length],
+    }));
+}
 
 const DEFAULT_TASKS: PlanTask[] = [
   { id: 't1', col: 0, title: 'Kế hoạch content tuần 3', assignee: 'Dung', dl: '2026-06-15', pri: '🟡', color: MEMBER_COLORS[3] },
@@ -81,8 +85,18 @@ function newId(prefix: string) {
 
 function parseDate(value: string) {
   if (!value || value === '--') return null;
-  const date = new Date(value);
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+  const date = new Date(iso || value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function dlToInputValue(dl: string) {
+  const date = parseDate(dl);
+  if (!date) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function deadlineClass(dl: string) {
@@ -180,24 +194,22 @@ function findScriptForTask(task: PlanTask, scripts: PlanScript[]) {
 type StoredPlan = {
   tasks: PlanTask[];
   archived: ArchivedTask[];
-  members: PlanMember[];
 };
 
 function readStoredPlan(): StoredPlan {
   if (typeof window === 'undefined') {
-    return { tasks: DEFAULT_TASKS, archived: [], members: DEFAULT_MEMBERS };
+    return { tasks: DEFAULT_TASKS, archived: [] };
   }
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { tasks: DEFAULT_TASKS, archived: [], members: DEFAULT_MEMBERS };
+    if (!raw) return { tasks: DEFAULT_TASKS, archived: [] };
     const parsed = JSON.parse(raw) as Partial<StoredPlan>;
     return {
       tasks: Array.isArray(parsed.tasks) && parsed.tasks.length ? parsed.tasks : DEFAULT_TASKS,
       archived: Array.isArray(parsed.archived) ? parsed.archived : [],
-      members: Array.isArray(parsed.members) && parsed.members.length ? parsed.members : DEFAULT_MEMBERS,
     };
   } catch {
-    return { tasks: DEFAULT_TASKS, archived: [], members: DEFAULT_MEMBERS };
+    return { tasks: DEFAULT_TASKS, archived: [] };
   }
 }
 
@@ -205,7 +217,8 @@ export function ContentPlanPanel() {
   const router = useRouter();
   const [tasks, setTasks] = useState<PlanTask[]>(DEFAULT_TASKS);
   const [archived, setArchived] = useState<ArchivedTask[]>([]);
-  const [members] = useState<PlanMember[]>(DEFAULT_MEMBERS);
+  const [members, setMembers] = useState<PlanMember[]>([]);
+  const [membersStatus, setMembersStatus] = useState('Đang tải nhân sự...');
   const [scripts, setScripts] = useState<PlanScript[]>([]);
   const [scriptsStatus, setScriptsStatus] = useState('');
   const [viewMode, setViewMode] = useState<PlanViewMode>('all');
@@ -215,8 +228,9 @@ export function ContentPlanPanel() {
   const [bottomTab, setBottomTab] = useState<BottomTab>('activity');
   const [dragTaskId, setDragTaskId] = useState<string | null>(null);
   const [showTaskModal, setShowTaskModal] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState('');
   const [newTitle, setNewTitle] = useState('');
-  const [newAssignee, setNewAssignee] = useState('An');
+  const [newAssignee, setNewAssignee] = useState('');
   const [newCol, setNewCol] = useState<PlanColumn>(0);
   const [newDl, setNewDl] = useState('');
   const [newPri, setNewPri] = useState('🟡');
@@ -229,7 +243,7 @@ export function ContentPlanPanel() {
 
   const persist = useCallback((nextTasks: PlanTask[], nextArchived: ArchivedTask[]) => {
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: nextTasks, archived: nextArchived, members }));
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: nextTasks, archived: nextArchived }));
     } catch {
       /* ignore */
     }
@@ -246,7 +260,7 @@ export function ContentPlanPanel() {
       if (Array.isArray(payload.tasks) && payload.tasks.length) {
         setTasks(payload.tasks as PlanTask[]);
         try {
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: payload.tasks, archived: nextArchived, members }));
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: payload.tasks, archived: nextArchived }));
         } catch {
           /* ignore */
         }
@@ -270,7 +284,39 @@ export function ContentPlanPanel() {
     }).catch((error) => {
       setScriptsStatus(error instanceof Error ? error.message : 'Không lưu được task lên Supabase');
     });
-  }, [members]);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadStaffMembers() {
+      setMembersStatus('Đang tải nhân sự...');
+      try {
+        const response = await api('/api/staff-cookies', { timeoutMs: 30000 });
+        const payload = await response.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!response.ok) {
+          throw new Error(payload.error || 'Không tải được nhân sự');
+        }
+        const nextMembers = staffRowsToMembers(Array.isArray(payload.staff) ? payload.staff as StaffAccount[] : []);
+        setMembers(nextMembers);
+        setMembersStatus(nextMembers.length ? '' : 'Chưa có nhân sự — thêm tại /nhan-su');
+        if (nextMembers.length) {
+          setNewAssignee((current) => (
+            current && nextMembers.some((member) => member.name === current) ? current : nextMembers[0].name
+          ));
+        }
+        if (payload.warning) {
+          setScriptsStatus((current) => current || String(payload.warning));
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setMembers([]);
+        setMembersStatus(error instanceof Error ? error.message : 'Không tải được nhân sự');
+      }
+    }
+    void loadStaffMembers();
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     const stored = readStoredPlan();
@@ -297,7 +343,7 @@ export function ContentPlanPanel() {
         if (rows.length) {
           setTasks(rows);
           try {
-            window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: rows, archived, members }));
+            window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: rows, archived }));
           } catch {
             /* ignore */
           }
@@ -319,7 +365,7 @@ export function ContentPlanPanel() {
     }
     void loadPlanData();
     return () => { cancelled = true; };
-  }, [archived, members]);
+  }, [archived]);
 
   useEffect(() => {
     if (!scripts.length) return;
@@ -448,12 +494,24 @@ export function ContentPlanPanel() {
   }
 
   function openTaskModal(col: PlanColumn = 0) {
+    setEditingTaskId('');
     setNewCol(col);
     setNewTitle('');
-    setNewAssignee(members[0]?.name || 'An');
+    setNewAssignee(members[0]?.name || '');
     setNewDl('');
     setNewPri('🟡');
     setNewScriptId('');
+    setShowTaskModal(true);
+  }
+
+  function openEditTask(task: PlanTask) {
+    setEditingTaskId(task.id);
+    setNewCol(task.col);
+    setNewTitle(task.title);
+    setNewAssignee(task.assignee);
+    setNewDl(dlToInputValue(task.dl));
+    setNewPri(task.pri || '🟡');
+    setNewScriptId(task.script_id || '');
     setShowTaskModal(true);
   }
 
@@ -520,7 +578,7 @@ export function ContentPlanPanel() {
         try {
           const stored = readStoredPlan();
           const nextTasks = stored.tasks.map((item) => (item.id === updated.id ? updated : item));
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: nextTasks, archived, members }));
+          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: nextTasks, archived }));
         } catch {
           /* ignore */
         }
@@ -594,15 +652,18 @@ export function ContentPlanPanel() {
     setNotice('Đã duyệt task.');
   }
 
-  function createTask() {
+  function saveTask() {
     const title = newTitle.trim();
     if (!title) {
       setNotice('Nhập tên task.');
       return;
     }
+    if (!newAssignee) {
+      setNotice('Chưa có nhân sự để giao task. Thêm tại /nhan-su.');
+      return;
+    }
     const member = members.find((item) => item.name === newAssignee);
-    const next: PlanTask = {
-      id: newId('task'),
+    const fields = {
       col: newCol,
       status: statusFromCol(newCol),
       title,
@@ -611,6 +672,18 @@ export function ContentPlanPanel() {
       pri: newPri,
       color: member?.color || MEMBER_COLORS[0],
       script_id: newScriptId || undefined,
+    };
+    if (editingTaskId) {
+      const next = tasks.map((task) => (task.id === editingTaskId ? { ...task, ...fields } : task));
+      updateTasks(next);
+      setShowTaskModal(false);
+      setEditingTaskId('');
+      setNotice('Đã cập nhật task.');
+      return;
+    }
+    const next: PlanTask = {
+      id: newId('task'),
+      ...fields,
     };
     updateTasks([...tasks, next]);
     setShowTaskModal(false);
@@ -646,7 +719,7 @@ export function ContentPlanPanel() {
       const review = all.filter((task) => task.col === 2).length;
       const todo = all.filter((task) => task.col === 0).length;
       const archivedCount = archived.filter((task) => task.assignee === member.name).length;
-      const kpiPct = Math.min(100, Math.round((member.kpi.d / member.kpi.t) * 100));
+      const kpiPct = Math.min(100, Math.round((done / total) * 100));
       return { member, total, done, doing, review, todo, archivedCount, kpiPct };
     });
   }, [archived, members, tasks]);
@@ -674,6 +747,8 @@ export function ContentPlanPanel() {
             </button>
           ))}
         </div>
+
+        {membersStatus ? <span className="content-plan-members-status">{membersStatus}</span> : null}
 
         {viewMode !== 'archive' ? (
           <>
@@ -782,6 +857,23 @@ export function ContentPlanPanel() {
                           >
                             {task.title}
                           </button>
+                        </div>
+                        {linkedScript ? (
+                          <div className="content-plan-script-chip">
+                            {linkedScript.title} · {linkedScript.status === 'approved' ? 'Đã duyệt' : linkedScript.status === 'pending' ? 'Chờ duyệt' : 'Nháp'}
+                          </div>
+                        ) : null}
+                        <div className="content-plan-card-body">
+                          <div className="content-plan-card-meta-line">
+                            <span className="content-plan-avatar sm" style={{ background: task.color }}>{task.assignee[0]}</span>
+                            <span className="content-plan-card-assignee">{task.assignee}</span>
+                          </div>
+                          <div className="content-plan-card-meta-line">
+                            {badge ? <span className={`content-plan-dl ${badge.tone}`}>{badge.text}</span> : null}
+                            <span className="content-plan-card-pri">{task.pri}</span>
+                          </div>
+                        </div>
+                        <div className="content-plan-card-quick">
                           <button
                             type="button"
                             className="content-plan-script-btn"
@@ -800,19 +892,10 @@ export function ContentPlanPanel() {
                             {task.notes?.length ? <em>{task.notes.length}</em> : null}
                           </button>
                         </div>
-                        {linkedScript ? (
-                          <div className="content-plan-script-chip">
-                            {linkedScript.title} · {linkedScript.status === 'approved' ? 'Đã duyệt' : linkedScript.status === 'pending' ? 'Chờ duyệt' : 'Nháp'}
-                          </div>
-                        ) : null}
-                        <div className="content-plan-card-meta">
-                          <span className="content-plan-avatar sm" style={{ background: task.color }}>{task.assignee[0]}</span>
-                          <span>{task.assignee}</span>
-                          {badge ? <span className={`content-plan-dl ${badge.tone}`}>{badge.text}</span> : null}
-                          <span>{task.pri}</span>
+                        <div className="content-plan-card-actions">
                           {column.id === 3 ? (
-                            <button type="button" className="content-plan-icon-btn inline" title="Lưu trữ" onClick={() => archiveTask(task.id)}>
-                              <Archive />
+                            <button type="button" className="content-plan-mini-action" title="Lưu trữ" onClick={() => archiveTask(task.id)}>
+                              <Archive /> Lưu
                             </button>
                           ) : null}
                           {column.id === 0 ? (
@@ -820,23 +903,16 @@ export function ContentPlanPanel() {
                               Đang làm
                             </button>
                           ) : null}
-                          {column.id === 1 ? (
-                            <button type="button" className="content-plan-mini-action" onClick={() => handleTaskScriptAction(task)}>
-                              Sửa
+                          {column.id === 2 ? (
+                            <button type="button" className="content-plan-mini-action approve" onClick={() => approveTask(task)}>
+                              Duyệt
                             </button>
                           ) : null}
-                          {column.id === 2 ? (
-                            <>
-                              <button type="button" className="content-plan-mini-action" onClick={() => handleTaskScriptAction(task)}>
-                                Xem
-                              </button>
-                              <button type="button" className="content-plan-mini-action approve" onClick={() => approveTask(task)}>
-                                Duyệt
-                              </button>
-                            </>
-                          ) : null}
-                          <button type="button" className="content-plan-icon-btn inline" title="Xóa" onClick={() => deleteTask(task.id)}>
-                            <X />
+                          <button type="button" className="content-plan-card-action edit" onClick={() => openEditTask(task)}>
+                            <Pencil /> Sửa
+                          </button>
+                          <button type="button" className="content-plan-card-action delete" onClick={() => deleteTask(task.id)}>
+                            <Trash2 /> Xóa
                           </button>
                         </div>
                       </div>
@@ -864,6 +940,7 @@ export function ContentPlanPanel() {
 
         {bottomTab === 'activity' ? (
           <div className="content-plan-activity-grid">
+            {!members.length ? <p className="content-plan-members-empty">{membersStatus || 'Chưa có nhân sự — thêm tại /nhan-su'}</p> : null}
             {activityCards.map(({ member, status, statusTone, taskTitle }) => (
               <div className="content-plan-activity-card" key={member.id}>
                 <div className="content-plan-avatar" style={{ background: member.color }}>{member.name[0]}</div>
@@ -877,6 +954,7 @@ export function ContentPlanPanel() {
           </div>
         ) : (
           <div className="content-plan-perf">
+            {!members.length ? <p className="content-plan-members-empty">{membersStatus || 'Chưa có nhân sự — thêm tại /nhan-su'}</p> : null}
             {perfRows.map(({ member, total, done, doing, review, todo, archivedCount, kpiPct }) => (
               <div className="content-plan-perf-row" key={member.id}>
                 <div className="content-plan-perf-name">{member.name}</div>
@@ -906,8 +984,8 @@ export function ContentPlanPanel() {
         <div className="content-plan-modal-backdrop" role="presentation" onMouseDown={() => setShowTaskModal(false)}>
           <div className="content-plan-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
             <div className="content-plan-modal-head">
-              <strong>Task mới</strong>
-              <button type="button" onClick={() => setShowTaskModal(false)}><X /></button>
+              <strong>{editingTaskId ? 'Sửa task' : 'Task mới'}</strong>
+              <button type="button" onClick={() => { setShowTaskModal(false); setEditingTaskId(''); }}><X /></button>
             </div>
             <label>
               Tên task
@@ -916,7 +994,8 @@ export function ContentPlanPanel() {
             <div className="content-plan-modal-grid">
               <label>
                 Giao cho
-                <select value={newAssignee} onChange={(event) => setNewAssignee(event.target.value)}>
+                <select value={newAssignee} onChange={(event) => setNewAssignee(event.target.value)} disabled={!members.length}>
+                  {!members.length ? <option value="">Chưa có nhân sự</option> : null}
                   {members.map((member) => (
                     <option key={member.id} value={member.name}>{member.name}</option>
                   ))}
@@ -955,8 +1034,8 @@ export function ContentPlanPanel() {
               </select>
             </label>
             <div className="content-plan-modal-actions">
-              <button type="button" onClick={() => setShowTaskModal(false)}>Hủy</button>
-              <button type="button" className="content-plan-btn primary" onClick={createTask}>Thêm</button>
+              <button type="button" onClick={() => { setShowTaskModal(false); setEditingTaskId(''); }}>Hủy</button>
+              <button type="button" className="content-plan-btn primary" onClick={saveTask}>{editingTaskId ? 'Lưu' : 'Thêm'}</button>
             </div>
           </div>
         </div>

@@ -902,6 +902,8 @@ export function ScriptWriterPanel() {
         setSyncStatus(`Đã lưu Supabase · ${rows.length} kịch bản · ${savedAt}`);
         if (showNotice) setNotice(`Đã lưu ${rows.length} kịch bản lên Supabase.`);
       }
+      dirtyRef.current = false;
+      userEditedRef.current = false;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Không kết nối được Supabase';
       setSyncError(message);

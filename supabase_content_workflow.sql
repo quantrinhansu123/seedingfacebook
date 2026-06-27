@@ -57,6 +57,7 @@ alter table public.content_tasks add column if not exists priority text default 
 alter table public.content_tasks add column if not exists due_date text;
 alter table public.content_tasks add column if not exists script_id text unique;
 alter table public.content_tasks add column if not exists platform text default 'TikTok';
+alter table public.content_tasks add column if not exists color text default '';
 alter table public.content_tasks add column if not exists notes jsonb default '[]'::jsonb;
 alter table public.content_tasks add column if not exists timeline jsonb default '[]'::jsonb;
 alter table public.content_tasks add column if not exists approved_by_staff_id text;

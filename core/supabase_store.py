@@ -501,7 +501,7 @@ def list_content_tasks(table: Optional[str] = None, *, lite: bool = False) -> li
     if lite:
         select = (
             'id,title,assignee_id,assignee_name,assignee_username,status,priority,due_date,'
-            'script_id,platform,color,created_at,updated_at,started_at,submitted_at,approved_at,completed_at'
+            'script_id,platform,created_at,updated_at,started_at,submitted_at,approved_at,completed_at'
         )
     else:
         select = '*'
