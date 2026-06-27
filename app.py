@@ -9263,14 +9263,26 @@ def _plan_visible_tasks(rows: list[dict]) -> list[dict]:
     return [row for row in (rows or []) if not _is_workflow_script_task(row)]
 
 
+def _plan_board_tasks(rows: list[dict]) -> list[dict]:
+    """Plan tasks for the kanban board; fall back to workflow rows when no plan rows exist."""
+    cleaned = _clean_content_tasks(rows)
+    plan = _plan_visible_tasks(cleaned)
+    if plan:
+        return plan
+    return [row for row in cleaned if _is_workflow_script_task(row)]
+
+
 def _plan_task_ids_by_script(tasks: list[dict]) -> dict[str, str]:
     plan_by_script: dict[str, str] = {}
     for task in tasks or []:
         script_id = str(task.get('script_id') or '').strip()
         task_id = str(task.get('id') or '').strip()
-        if not script_id or not task_id or _is_workflow_script_task(task):
+        if not script_id or not task_id:
             continue
-        plan_by_script.setdefault(script_id, task_id)
+        if _is_workflow_script_task(task):
+            plan_by_script.setdefault(script_id, task_id)
+            continue
+        plan_by_script[script_id] = task_id
     return plan_by_script
 
 
@@ -9420,7 +9432,7 @@ def _content_workflow_supabase_warning(exc: Exception) -> str:
     return text[:500]
 
 
-WORKFLOW_READ_CACHE_SEC = 2.5
+WORKFLOW_READ_CACHE_SEC = 15
 _workflow_read_cache: dict[str, object] = {'tasks': None, 'blocks': None, 'ts': 0.0}
 
 
@@ -9510,24 +9522,39 @@ def _script_id_for_plan_task(task: dict) -> str:
     return (f'script-{compact}' if compact else f'script-{uuid.uuid4().hex[:12]}')[:160]
 
 
+def _script_status_from_workflow(status: str) -> str:
+    status = str(status or 'todo').strip().lower()
+    if status == 'approved':
+        return 'approved'
+    if status == 'pending':
+        return 'pending'
+    return 'draft'
+
+
 def _provision_scripts_for_active_plan_tasks(
     rows: list[dict],
     existing_scripts: list[dict] | None = None,
+    *,
+    recreate_missing: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     scripts_by_id = {str(script.get('id') or ''): script for script in (existing_scripts or []) if str(script.get('id') or '').strip()}
     updated_rows: list[dict] = []
     new_scripts: list[dict] = []
     for raw in rows:
         row = dict(raw)
-        status = _workflow_status_from_task(row)
-        if status not in {'doing', 'pending'}:
+        if _is_workflow_script_task(row):
             updated_rows.append(row)
             continue
+        status = _workflow_status_from_task(row)
         script_id = str(row.get('script_id') or '').strip()
         if not script_id:
             script_id = _script_id_for_plan_task(row)
             row['script_id'] = script_id
-            script_status = 'pending' if status == 'pending' else 'draft'
+        if script_id in scripts_by_id:
+            updated_rows.append(row)
+            continue
+        if recreate_missing or status in {'todo', 'doing', 'pending', 'approved'}:
+            script_status = _script_status_from_workflow(status)
             script = {
                 'id': script_id,
                 'title': row.get('title') or 'Kịch bản',
@@ -9539,12 +9566,6 @@ def _provision_scripts_for_active_plan_tasks(
             }
             new_scripts.append(script)
             scripts_by_id[script_id] = script
-            updated_rows.append(row)
-            continue
-        if script_id in scripts_by_id:
-            updated_rows.append(row)
-            continue
-        # Giữ task kế hoạch đã gắn script_id nhưng không tự tạo lại kịch bản đã xóa.
         updated_rows.append(row)
     return updated_rows, new_scripts
 
@@ -9556,7 +9577,7 @@ def _apply_script_provision_from_plan_tasks(rows: list[dict]) -> list[dict]:
         existing_scripts = _load_scripts_from_workflow_supabase()
     except Exception:
         existing_scripts = []
-    updated_rows, new_scripts = _provision_scripts_for_active_plan_tasks(rows, existing_scripts)
+    updated_rows, new_scripts = _provision_scripts_for_active_plan_tasks(rows, existing_scripts, recreate_missing=True)
     if not new_scripts:
         return updated_rows
     scripts_by_id = {str(script.get('id') or ''): script for script in existing_scripts if str(script.get('id') or '').strip()}
@@ -9655,7 +9676,6 @@ def scripts_get():
             'storage': 'disabled',
         }), 503
     try:
-        _ensure_scripts_from_active_plan_tasks()
         if lite:
             tasks = _cached_workflow_tasks(lite=True)
             rows = _apply_legacy_script_statuses(
@@ -9844,7 +9864,7 @@ def _patch_content_task_notes(task_id: str, notes: list) -> tuple[dict | None, s
 def _tasks_payload(rows: list[dict], storage: str, warning: str = '', *, lite: bool = False) -> dict:
     public_rows = [
         _public_content_task(row, lite=lite)
-        for row in _plan_visible_tasks(_clean_content_tasks(rows))
+        for row in _plan_board_tasks(rows)
     ]
     payload = {'ok': True, 'tasks': public_rows, 'storage': storage}
     if warning:
@@ -9940,7 +9960,9 @@ def content_tasks_sync():
     body = request.get_json(silent=True) or {}
     if not isinstance(body.get('tasks'), list):
         return jsonify({'ok': False, 'error': 'Dữ liệu tasks không hợp lệ'}), 400
-    incoming = _plan_visible_tasks(_clean_content_tasks(body.get('tasks') or []))
+    incoming_clean = _clean_content_tasks(body.get('tasks') or [])
+    plan_incoming = _plan_visible_tasks(incoming_clean)
+    incoming = plan_incoming if plan_incoming else [row for row in incoming_clean if _is_workflow_script_task(row)]
     if _is_admin():
         current_all, _, _ = _load_tasks_any(include_all=True)
         internal_rows = [row for row in current_all if _is_workflow_script_task(row)]
@@ -9997,7 +10019,7 @@ def content_tasks_patch(task_id):
     saved, storage, warning = _save_tasks_any(next_rows)
     public_rows = [
         _public_content_task(row)
-        for row in _plan_visible_tasks(_filter_content_tasks_for_current_staff(saved))
+        for row in _plan_board_tasks(_filter_content_tasks_for_current_staff(saved))
     ]
     payload = {'ok': True, 'task': next((row for row in public_rows if row.get('id') == task_id), _public_content_task(updated)), 'tasks': public_rows, 'storage': storage}
     if warning:

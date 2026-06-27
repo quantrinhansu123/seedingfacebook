@@ -778,15 +778,21 @@ export function ScriptWriterPanel() {
         }
         const liteRows = Array.isArray(litePayload.scripts) ? litePayload.scripts as ScriptDocument[] : [];
         applyScriptRows(liteRows, litePayload);
+        if (!isStale()) setLoaded(true);
 
-        setSyncStatus(liteRows.length ? 'Đang tải nội dung chi tiết...' : 'Chưa có kịch bản — bấm + để tạo mới');
+        if (!liteRows.length) {
+          setDetailsLoaded(true);
+          return;
+        }
+
+        setSyncStatus('Đang tải nội dung chi tiết...');
         const response = await api('/api/scripts', { timeoutMs: 60000 });
         const payload = await response.json().catch(() => ({}));
         if (isStale() || userEditedRef.current) return;
         if (!response.ok || !payload.ok) throw new Error(payload.error || 'Không tải được nội dung kịch bản');
         const rows = Array.isArray(payload.scripts) ? payload.scripts as ScriptDocument[] : [];
         applyScriptRows(rows, payload);
-        setDetailsLoaded(true);
+        if (!isStale()) setDetailsLoaded(true);
       } catch (error) {
         if (isStale()) return;
         setSyncError(error instanceof Error ? error.message : 'Không kết nối được Supabase');
@@ -821,7 +827,7 @@ export function ScriptWriterPanel() {
   }, [loaded]);
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || !detailsLoaded) return;
     if (skipNextAutosaveRef.current) {
       skipNextAutosaveRef.current = false;
       return;
@@ -832,7 +838,7 @@ export function ScriptWriterPanel() {
     };
     // queueSave is intentionally driven by the latest scripts snapshot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded, scripts]);
+  }, [loaded, detailsLoaded, scripts]);
 
   useEffect(() => {
     if (!loaded) return;

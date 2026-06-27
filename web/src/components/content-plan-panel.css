@@ -335,6 +335,50 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.content-plan-script-preview {
+  width: 100%;
+  border: 1px solid #ebe7ff;
+  border-radius: 8px;
+  background: #fafaff;
+  padding: 7px 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.content-plan-script-preview:hover {
+  border-color: #c4b5fd;
+  background: #f5f3ff;
+}
+.content-plan-script-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.content-plan-script-preview-head strong {
+  font-size: 9px;
+  font-weight: 800;
+  color: #6d28d9;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.content-plan-script-preview-head em {
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  color: #7c6cf0;
+}
+.content-plan-script-preview p {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.45;
+  color: #374151;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .content-plan-card.has-script { box-shadow: inset 0 0 0 1px #ebe7ff; }
 .content-plan-card.highlight-task {
   box-shadow: 0 0 0 2px #7c6cf0, 0 8px 20px rgba(124, 108, 240, 0.18);

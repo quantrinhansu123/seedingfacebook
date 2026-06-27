@@ -13,12 +13,19 @@ type PlanTaskStatus = 'todo' | 'doing' | 'pending' | 'approved' | 'archived';
 
 type PlanScriptStatus = 'draft' | 'pending' | 'approved';
 
+type PlanScriptBlock = {
+  id: string;
+  type: string;
+  text: string;
+};
+
 type PlanScript = {
   id: string;
   title: string;
   platform: string;
   status: PlanScriptStatus;
   writer: string;
+  blocks?: PlanScriptBlock[];
 };
 
 type PlanTask = {
@@ -178,9 +185,30 @@ function formatLogTime(value: string) {
   });
 }
 
+function scriptIdForTask(task: PlanTask) {
+  if (task.script_id) return task.script_id;
+  if (task.id.startsWith('task-')) return `script-${task.id.slice(5)}`;
+  return '';
+}
+
+function scriptStatusLabel(status: PlanScriptStatus) {
+  if (status === 'approved') return 'Đã duyệt';
+  if (status === 'pending') return 'Chờ duyệt';
+  return 'Nháp';
+}
+
+function scriptPreview(script: PlanScript, maxLen = 140) {
+  const parts = (script.blocks || [])
+    .map((block) => String(block.text || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const text = parts.join(' · ') || 'Chưa có nội dung — bấm để viết kịch bản';
+  return text.length > maxLen ? `${text.slice(0, maxLen)}…` : text;
+}
+
 function findScriptForTask(task: PlanTask, scripts: PlanScript[]) {
-  if (task.script_id) {
-    const linked = scripts.find((item) => item.id === task.script_id);
+  const scriptId = scriptIdForTask(task);
+  if (scriptId) {
+    const linked = scripts.find((item) => item.id === scriptId);
     if (linked) return linked;
   }
   const taskTitle = normalizePlanTitle(task.title);
@@ -234,12 +262,29 @@ export function ContentPlanPanel() {
   const [newCol, setNewCol] = useState<PlanColumn>(0);
   const [newDl, setNewDl] = useState('');
   const [newPri, setNewPri] = useState('🟡');
-  const [newScriptId, setNewScriptId] = useState('');
   const [notice, setNotice] = useState('');
   const [notesTaskId, setNotesTaskId] = useState('');
   const [noteText, setNoteText] = useState('');
   const [noteBusy, setNoteBusy] = useState(false);
   const [highlightTaskId, setHighlightTaskId] = useState('');
+
+  const reloadScripts = useCallback(async (showCount = true) => {
+    try {
+      const response = await api('/api/scripts', { timeoutMs: 60000 });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || 'Không tải được kịch bản');
+      }
+      const scriptRows = Array.isArray(payload.scripts) ? payload.scripts as PlanScript[] : [];
+      setScripts(scriptRows);
+      if (showCount) {
+        setScriptsStatus(scriptRows.length ? `${scriptRows.length} kịch bản` : 'Chưa có kịch bản');
+      }
+      if (payload.warning) setScriptsStatus(payload.warning);
+    } catch (error) {
+      setScriptsStatus(error instanceof Error ? error.message : 'Không tải được kịch bản');
+    }
+  }, []);
 
   const persist = useCallback((nextTasks: PlanTask[], nextArchived: ArchivedTask[]) => {
     try {
@@ -267,24 +312,12 @@ export function ContentPlanPanel() {
       }
       if (payload.warning) setScriptsStatus(payload.warning);
       return payload;
-    }).then(async (payload) => {
-      const rows = Array.isArray(payload?.tasks) ? payload.tasks as PlanTask[] : nextTasks;
-      const needsScripts = rows.some((task) => (task.col === 1 || task.col === 2 || task.status === 'doing' || task.status === 'pending'));
-      if (!needsScripts) return;
-      try {
-        const response = await api('/api/scripts?lite=1', { timeoutMs: 20000 });
-        const scriptPayload = await response.json().catch(() => ({}));
-        if (response.ok && scriptPayload.ok && Array.isArray(scriptPayload.scripts)) {
-          setScripts(scriptPayload.scripts as PlanScript[]);
-          setScriptsStatus(`${scriptPayload.scripts.length} kịch bản`);
-        }
-      } catch {
-        /* ignore */
-      }
+    }).then(async () => {
+      await reloadScripts(true);
     }).catch((error) => {
       setScriptsStatus(error instanceof Error ? error.message : 'Không lưu được task lên Supabase');
     });
-  }, []);
+  }, [reloadScripts]);
 
   useEffect(() => {
     let cancelled = false;
@@ -329,12 +362,10 @@ export function ContentPlanPanel() {
     async function loadPlanData() {
       setScriptsStatus('Đang tải...');
       try {
-        const [tasksResponse, scriptsResponse] = await Promise.all([
+        const [tasksResponse] = await Promise.all([
           api('/api/content-tasks?lite=1', { timeoutMs: 30000 }),
-          api('/api/scripts?lite=1', { timeoutMs: 20000 }),
         ]);
         const tasksPayload = await tasksResponse.json().catch(() => ({}));
-        const scriptsPayload = await scriptsResponse.json().catch(() => ({}));
         if (cancelled) return;
         if (!tasksResponse.ok || !tasksPayload.ok) {
           throw new Error(tasksPayload.error || 'Không tải được task');
@@ -348,14 +379,8 @@ export function ContentPlanPanel() {
             /* ignore */
           }
         }
-        if (scriptsResponse.ok && scriptsPayload.ok) {
-          const scriptRows = Array.isArray(scriptsPayload.scripts) ? scriptsPayload.scripts as PlanScript[] : [];
-          setScripts(scriptRows);
-          setScriptsStatus(scriptRows.length ? `${scriptRows.length} kịch bản` : 'Chưa có kịch bản');
-        } else {
-          setScriptsStatus(scriptsPayload.error || 'Không tải được kịch bản');
-        }
-        const warning = [tasksPayload.warning, scriptsPayload.warning].filter(Boolean).join(' · ');
+        if (!cancelled) await reloadScripts(true);
+        const warning = tasksPayload.warning ? String(tasksPayload.warning) : '';
         if (warning) setScriptsStatus(warning);
       } catch (error) {
         if (!cancelled) {
@@ -365,7 +390,7 @@ export function ContentPlanPanel() {
     }
     void loadPlanData();
     return () => { cancelled = true; };
-  }, [archived]);
+  }, [archived, reloadScripts]);
 
   useEffect(() => {
     if (!scripts.length) return;
@@ -500,7 +525,6 @@ export function ContentPlanPanel() {
     setNewAssignee(members[0]?.name || '');
     setNewDl('');
     setNewPri('🟡');
-    setNewScriptId('');
     setShowTaskModal(true);
   }
 
@@ -511,7 +535,6 @@ export function ContentPlanPanel() {
     setNewAssignee(task.assignee);
     setNewDl(dlToInputValue(task.dl));
     setNewPri(task.pri || '🟡');
-    setNewScriptId(task.script_id || '');
     setShowTaskModal(true);
   }
 
@@ -614,7 +637,7 @@ export function ContentPlanPanel() {
         || taskRows.find((item) => item.id === task.id);
       if (taskRows.length) setTasks(taskRows);
 
-      const scriptsResponse = await api('/api/scripts?lite=1', { timeoutMs: 30000 });
+      const scriptsResponse = await api('/api/scripts', { timeoutMs: 60000 });
       const scriptsPayload = await scriptsResponse.json().catch(() => ({}));
       if (!scriptsResponse.ok || !scriptsPayload.ok) {
         throw new Error(scriptsPayload.error || 'Không tải được kịch bản vừa tạo');
@@ -623,6 +646,7 @@ export function ContentPlanPanel() {
       setScripts(scriptRows);
       const scriptId = updatedTask?.script_id
         || taskRows.find((item) => item.id === task.id)?.script_id
+        || scriptIdForTask(updatedTask || task)
         || findScriptForTask({ ...task, col: 1, status: 'doing' }, scriptRows)?.id;
       if (!scriptId) throw new Error('Task chưa liên kết được với kịch bản');
       openScript(scriptId);
@@ -671,7 +695,6 @@ export function ContentPlanPanel() {
       dl: newDl || '--',
       pri: newPri,
       color: member?.color || MEMBER_COLORS[0],
-      script_id: newScriptId || undefined,
     };
     if (editingTaskId) {
       const next = tasks.map((task) => (task.id === editingTaskId ? { ...task, ...fields } : task));
@@ -839,6 +862,7 @@ export function ContentPlanPanel() {
                   {columnTasks.map((task) => {
                     const badge = deadlineBadge(task.dl);
                     const linkedScript = resolveTaskScript(task);
+                    const showScript = task.col >= 1 || Boolean(linkedScript);
                     return (
                       <div
                         key={task.id}
@@ -877,10 +901,23 @@ export function ContentPlanPanel() {
                             </button>
                           </div>
                         </div>
-                        {linkedScript ? (
-                          <div className="content-plan-script-chip">
-                            {linkedScript.title} · {linkedScript.status === 'approved' ? 'Đã duyệt' : linkedScript.status === 'pending' ? 'Chờ duyệt' : 'Nháp'}
-                          </div>
+                        {showScript ? (
+                          <button
+                            type="button"
+                            className="content-plan-script-preview"
+                            onClick={() => handleTaskScriptAction(task)}
+                            title="Mở kịch bản để sửa"
+                          >
+                            <span className="content-plan-script-preview-head">
+                              <strong>Kịch bản</strong>
+                              {linkedScript ? (
+                                <em>{scriptStatusLabel(linkedScript.status)}</em>
+                              ) : (
+                                <em>Chưa có</em>
+                              )}
+                            </span>
+                            <p>{linkedScript ? scriptPreview(linkedScript) : 'Bấm để tạo và viết kịch bản cho task này.'}</p>
+                          </button>
                         ) : null}
                         <div className="content-plan-card-meta">
                           <span className="content-plan-avatar sm" style={{ background: task.color }}>{task.assignee[0]}</span>
@@ -1020,15 +1057,6 @@ export function ContentPlanPanel() {
                 </select>
               </label>
             </div>
-            <label>
-              Liên kết kịch bản
-              <select value={newScriptId} onChange={(event) => setNewScriptId(event.target.value)}>
-                <option value="">— Chưa chọn —</option>
-                {scripts.map((script) => (
-                  <option key={script.id} value={script.id}>{script.title}</option>
-                ))}
-              </select>
-            </label>
             <div className="content-plan-modal-actions">
               <button type="button" onClick={() => { setShowTaskModal(false); setEditingTaskId(''); }}>Hủy</button>
               <button type="button" className="content-plan-btn primary" onClick={saveTask}>{editingTaskId ? 'Lưu' : 'Thêm'}</button>
