@@ -9,6 +9,7 @@ create table if not exists public.users (
     username    text,
     email       text,
     phone       text,
+    password    text,
     role        text not null default 'staff',
     avatar_url  text,
     enabled     boolean not null default true,
@@ -19,6 +20,7 @@ create table if not exists public.users (
 alter table public.users add column if not exists department text;
 alter table public.users add column if not exists status text not null default 'active';
 alter table public.users add column if not exists access_role text;
+alter table public.users add column if not exists password text;
 
 create table if not exists public.customers (
     customer_id  uuid primary key default gen_random_uuid(),
@@ -152,20 +154,37 @@ where ho_ten is null
    or hop_le is null;
 
 -- One-way sync: seeding staff_users -> Flow/task users.
-insert into public.users (user_id, full_name, username, role, enabled)
+insert into public.users (user_id, full_name, username, phone, password, role, enabled, access_role)
 select
     s.id,
     coalesce(nullif(s.name, ''), nullif(s.username, ''), s.id) as full_name,
     s.username,
+    nullif(s.username, '') as phone,
+    nullif(s.password, '') as password,
     coalesce(nullif(s.role, ''), 'staff') as role,
-    coalesce(s.enabled, true) as enabled
+    coalesce(s.enabled, true) as enabled,
+    case when lower(coalesce(s.role, '')) = 'admin' then 'admin' else 'worker' end as access_role
 from public.staff_users s
 on conflict (user_id) do update
 set full_name = excluded.full_name,
     username = excluded.username,
+    phone = coalesce(public.users.phone, excluded.phone),
+    password = coalesce(public.users.password, excluded.password, '123456'),
     role = excluded.role,
+    access_role = excluded.access_role,
     enabled = excluded.enabled,
     updated_at = now();
+
+update public.users
+set password = coalesce(nullif(password, ''), '123456'),
+    access_role = coalesce(nullif(access_role, ''), case when lower(coalesce(role, '')) = 'admin' then 'admin' else 'worker' end),
+    phone = coalesce(nullif(phone, ''), nullif(username, ''))
+where password is null
+   or password = ''
+   or access_role is null
+   or access_role = ''
+   or phone is null
+   or phone = '';
 
 grant usage on schema public to anon, authenticated, service_role;
 grant select, insert, update, delete on public.users to anon, authenticated, service_role;
