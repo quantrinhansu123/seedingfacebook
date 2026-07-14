@@ -46,8 +46,8 @@ create table if not exists public.role_permissions (
 
 insert into public.access_roles (role_key, role_name, description, is_system)
 values
-    ('admin', 'Admin', 'Toan quyen quan tri he thong, tai khoan, phan quyen va moi module.', true),
-    ('worker', 'Nhan vien', 'Quyen van hanh co ban, khong vao phan quan tri.', true)
+    ('admin', 'Admin', 'Toàn quyền quản trị hệ thống, tài khoản, phân quyền và mọi module.', true),
+    ('worker', 'Nhân viên', 'Quyền vận hành cơ bản, không vào phần quản trị.', true)
 on conflict (role_key) do update
 set role_name = excluded.role_name,
     description = excluded.description,
