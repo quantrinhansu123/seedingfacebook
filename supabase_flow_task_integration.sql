@@ -96,10 +96,15 @@ create table if not exists public.customers (
     name         text not null,
     phone        text,
     email        text,
+    address      text,
+    user_id      text references public.users(user_id) on delete set null,
     department   text,
     created_at   timestamptz not null default now(),
     updated_at   timestamptz not null default now()
 );
+
+alter table public.customers add column if not exists address text;
+alter table public.customers add column if not exists user_id text references public.users(user_id) on delete set null;
 
 create table if not exists public.projects (
     project_id      uuid primary key default gen_random_uuid(),
@@ -107,6 +112,9 @@ create table if not exists public.projects (
     pricing         numeric not null default 0,
     status          text not null default 'active',
     owner_user_id   text references public.users(user_id) on delete set null,
+    deadline        timestamptz,
+    description     text,
+    assignees       text[] not null default '{}'::text[],
     content_blocks  jsonb not null default '{}'::jsonb,
     documents       jsonb not null default '[]'::jsonb,
     created_at      timestamptz not null default now(),
@@ -114,6 +122,9 @@ create table if not exists public.projects (
 );
 
 alter table public.projects add column if not exists customer_id uuid references public.customers(customer_id) on delete set null;
+alter table public.projects add column if not exists deadline timestamptz;
+alter table public.projects add column if not exists description text;
+alter table public.projects add column if not exists assignees text[] not null default '{}'::text[];
 
 -- Legacy finance / ticket modules used by BA, CS and Dashboard pages.
 create table if not exists public.income_rate_config (
@@ -276,6 +287,7 @@ create index if not exists idx_tasks_feature_id on public.tasks(feature_id);
 create index if not exists idx_tasks_parent_task_id on public.tasks(parent_task_id);
 create index if not exists idx_tasks_assigned_to on public.tasks(assigned_to);
 create index if not exists idx_tasks_feature_root on public.tasks(feature_id) where parent_task_id is null;
+create index if not exists idx_customers_user_id on public.customers(user_id);
 create index if not exists idx_income_rate_config_project_id on public.income_rate_config(project_id);
 create index if not exists idx_point_config_project_id on public.point_config(project_id);
 create index if not exists idx_amc_payments_project_id on public.amc_payments(project_id);
