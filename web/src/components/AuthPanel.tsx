@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useState } from 'react';
+import { APP_BRAND } from '@/lib/app-brand';
 
 type Props = {
   mode: 'login' | 'setup';
@@ -41,14 +42,12 @@ export function AuthPanel({ mode, status, onLogin, onSetup }: Props) {
       <section className="auth-shell">
         <div className="auth-brand">
           <div className="auth-logo-card">
-            <img src="/LOGO4_XOANEN.png" alt="Seeding Fsolution" />
+            <img src="/LOGO4_XOANEN.png" alt={APP_BRAND.name} />
           </div>
           <div className="auth-brand-copy">
-            <div className="auth-kicker">Seeding Fsolution</div>
-            <h1>Quản lý bình luận và chăm sóc khách hàng đa kênh</h1>
-            <p>
-              Theo dõi bài viết, lọc comment Facebook/TikTok, lưu lịch sử sale và hỗ trợ AI tóm tắt trong một màn hình vận hành.
-            </p>
+            <div className="auth-kicker">{APP_BRAND.name}</div>
+            <h1>{APP_BRAND.authTitle}</h1>
+            <p>{APP_BRAND.authDescription}</p>
           </div>
           <div className="auth-feature-grid" aria-hidden="true">
             <div>
@@ -68,7 +67,7 @@ export function AuthPanel({ mode, status, onLogin, onSetup }: Props) {
 
         <form className="auth-card" onSubmit={onSubmit}>
           <div className="auth-form-logo">
-            <img src="/LOGO4_XOANEN.png" alt="Seeding Fsolution" />
+            <img src="/LOGO4_XOANEN.png" alt={APP_BRAND.name} />
           </div>
           <div className="auth-title">{isSetup ? 'Setup tài khoản đầu tiên' : 'Đăng nhập'}</div>
           <div className="auth-sub">

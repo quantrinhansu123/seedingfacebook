@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { api, AI_TIMEOUT_MS, PUBLISH_TIMEOUT_MS, UPLOAD_TIMEOUT_MS, formatFetchError } from '@/lib/api';
+import { APP_BRAND } from '@/lib/app-brand';
 import type { ContentPipelinePost, FbPage, GroupRow } from '@/lib/types';
 import { PostPublishPreview } from '@/components/PostPublishPreview';
 
@@ -555,7 +556,7 @@ export function MarketingPipelinePanel({
   }
 
   const targetCount = selectedTargets.length;
-  const previewAuthor = selectedTargets[0]?.name || 'Seeding Fsolution';
+  const previewAuthor = selectedTargets[0]?.name || APP_BRAND.name;
   const previewHint = selectedTargets[0]
     ? (selectedTargets[0].type === 'page' ? 'Facebook Page' : 'Facebook Group')
     : 'Facebook';

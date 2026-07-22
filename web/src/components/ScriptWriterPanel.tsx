@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
+import { APP_BRAND } from '@/lib/app-brand';
 import {
   AlignCenter,
   AlignJustify,
@@ -400,7 +401,7 @@ type ScriptFacebookPreviewProps = {
 };
 
 function ScriptFacebookPreview({ script, postHtml, hasContent, mediaUrls = [] }: ScriptFacebookPreviewProps) {
-  const pageName = script.writer?.trim() || 'Seeding Fsolution';
+  const pageName = script.writer?.trim() || APP_BRAND.name;
   const avatar = pageName.slice(0, 1).toUpperCase();
 
   return (
@@ -1373,7 +1374,7 @@ export function ScriptWriterPanel() {
       .foot { margin-top: 36px; border-top: 1px solid #eee; padding-top: 9px; font-size: 9px; color: #ccc; text-align: center; }
     </style></head><body>
       <div class="head">
-        <div class="brand">Seeding Fsolution · Bài đăng Facebook</div>
+        <div class="brand">${APP_BRAND.name} · Bài đăng Facebook</div>
         <h1>${escapeHtml(selected.title)}</h1>
         <div class="meta">${escapeHtml(selected.writer)} · ${escapeHtml(selected.platform)} · ${escapeHtml(selected.date)}</div>
       </div>

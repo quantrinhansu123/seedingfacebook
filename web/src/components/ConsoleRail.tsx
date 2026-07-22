@@ -4,6 +4,7 @@ import { ChevronRight, PanelLeftClose } from 'lucide-react';
 import { CONSOLE_MODULE_ICONS } from '@/lib/console-nav-icons';
 import { CONSOLE_NAV_ITEMS } from '@/lib/console-nav';
 import type { ViewKey } from '@/lib/app-routes';
+import { APP_BRAND } from '@/lib/app-brand';
 
 type ConsoleRailProps = {
   activeView: ViewKey;
@@ -16,10 +17,10 @@ export function ConsoleRail({ activeView, onNavigate, collapsed = false, onToggl
   return (
     <aside className={`console-rail${collapsed ? ' collapsed' : ''}`}>
       <div className="console-rail-brand">
-        <img className="console-logo" src="/LOGO4_XOANEN.png" alt="Seeding Fsolution" />
+        <img className="console-logo" src="/LOGO4_XOANEN.png" alt={APP_BRAND.name} />
         <div className="console-rail-title">
-          <b>Seeding</b>
-          <span>Fsolution</span>
+          <b>{APP_BRAND.railPrimary}</b>
+          <span>{APP_BRAND.railSecondary}</span>
         </div>
         {onToggleCollapse ? (
           <button

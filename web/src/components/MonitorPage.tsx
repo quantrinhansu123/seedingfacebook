@@ -16,6 +16,7 @@ import { ScriptWriterPanel } from '@/components/ScriptWriterPanel';
 import '@/components/standard-post-panel.css';
 import { StaffCookiePanel, type StaffPayload } from '@/components/StaffCookiePanel';
 import { api, formatFetchError, PUBLISH_TIMEOUT_MS } from '@/lib/api';
+import { APP_BRAND } from '@/lib/app-brand';
 import { LEGACY_PATH_REDIRECTS, pathToView, viewToPath, type ViewKey } from '@/lib/app-routes';
 import { CONSOLE_NAV_ITEMS } from '@/lib/console-nav';
 import { ConsoleRail } from '@/components/ConsoleRail';
@@ -2850,9 +2851,9 @@ export function MonitorPage() {
     return (
       <main className="auth-page">
         <div className="auth-loading">
-          <img src="/LOGO4_XOANEN.png" alt="Seeding Fsolution" />
+          <img src="/LOGO4_XOANEN.png" alt={APP_BRAND.name} />
           <div className="auth-loading-text">
-            <b>Seeding Fsolution</b>
+            <b>{APP_BRAND.name}</b>
             <span>Đang kiểm tra phiên đăng nhập...</span>
           </div>
         </div>
@@ -2900,7 +2901,7 @@ export function MonitorPage() {
             <div>
               <div className="console-page-title">{CONSOLE_NAV_ITEMS.find((item) => item.key === activeView)?.label || 'Trang chủ'}</div>
               <div className="console-page-sub" title={groups.length === 1 ? `ID: ${groups[0]}` : ''}>
-                Seeding Fsolution
+                {APP_BRAND.name}
               </div>
             </div>
             <div className="header-spacer" />
