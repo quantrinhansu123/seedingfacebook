@@ -5368,6 +5368,73 @@ def _record_comment_log(post_id: str, group_id: str, post_url: str, message: str
     return log
 
 
+def _comment_log_identity(log: dict) -> tuple[str, ...]:
+    created_at = str(log.get('created_at') or '').strip()
+    parsed_created_at = _parse_log_time(created_at)
+    if parsed_created_at:
+        created_at = parsed_created_at.isoformat(timespec='seconds')
+    return (
+        str(log.get('staff_id') or '').strip(),
+        str(log.get('post_id') or '').strip(),
+        str(log.get('comment_id') or '').strip(),
+        str(log.get('status') or '').strip(),
+        created_at,
+        str(log.get('comment_text') or '').strip(),
+        str(log.get('error_message') or '').strip(),
+    )
+
+
+def _merge_comment_log_rows(local_rows: list, remote_rows: list, limit: int = 200) -> list[dict]:
+    merged: dict[tuple[str, ...], dict] = {}
+    for source, rows in (('local', local_rows), ('supabase', remote_rows)):
+        for item in rows or []:
+            if not isinstance(item, dict):
+                continue
+            row = {**item, 'storage': item.get('storage') or source}
+            key = _comment_log_identity(row)
+            merged[key] = {**merged.get(key, {}), **row}
+
+    def sort_key(row: dict) -> tuple[float, int]:
+        created_at = _parse_log_time(str(row.get('created_at') or ''))
+        timestamp = created_at.timestamp() if created_at else 0.0
+        try:
+            row_id = int(row.get('id') or 0)
+        except (TypeError, ValueError):
+            row_id = 0
+        return timestamp, row_id
+
+    rows = sorted(merged.values(), key=sort_key)
+    return rows[-max(1, min(int(limit or 200), 5000)):]
+
+
+def _load_comment_logs_from_supabase(staff_id: str = '', limit: int = 1000) -> tuple[list[dict], str]:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return [], 'Chưa cấu hình Supabase'
+    params = {
+        'select': '*',
+        'order': 'created_at.desc',
+        'limit': str(max(1, min(int(limit or 1000), 5000))),
+    }
+    if staff_id:
+        params['staff_id'] = f'eq.{staff_id}'
+    try:
+        resp = _req.get(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_COMMENT_LOG_TABLE}",
+            headers={
+                'apikey': SUPABASE_KEY,
+                'Authorization': f'Bearer {SUPABASE_KEY}',
+            },
+            params=params,
+            timeout=30,
+        )
+        if resp.status_code not in (200, 206):
+            return [], resp.text[:300]
+        rows = resp.json()
+        return (rows if isinstance(rows, list) else []), ''
+    except Exception as e:
+        return [], str(e)[:300]
+
+
 def _today_utc_bounds() -> tuple[datetime, datetime]:
     tz = _app_timezone()
     today = datetime.now(tz).date()
@@ -6387,12 +6454,22 @@ def api_mark_post_processed():
 
 @app.route('/api/comment-logs', methods=['GET'])
 def comment_logs_get():
-    if not _is_admin():
-        staff_id = _current_staff_id()
-        rows = [item for item in _comment_logs if item.get('staff_id') == staff_id]
-    else:
-        rows = _comment_logs
-    return jsonify(rows[-200:])
+    global _comment_logs
+    is_admin = _is_admin()
+    staff_id = '' if is_admin else _current_staff_id()
+    if not is_admin and not staff_id:
+        return jsonify([]), 401
+
+    remote_rows, warning = _load_comment_logs_from_supabase(staff_id)
+    if remote_rows:
+        _comment_logs = _merge_comment_log_rows(_comment_logs, remote_rows, limit=5000)
+    if warning:
+        print(f'[comment_logs] Supabase read failed, using local history: {warning}')
+    scoped_rows = _comment_logs if is_admin else [
+        item for item in _comment_logs
+        if str(item.get('staff_id') or '').strip() == staff_id
+    ]
+    return jsonify(_merge_comment_log_rows(scoped_rows, [], limit=200))
 
 
 @app.route('/api/comment-stats/today', methods=['GET'])

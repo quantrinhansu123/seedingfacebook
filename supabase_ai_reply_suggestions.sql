@@ -319,7 +319,7 @@ create table if not exists public.comment_logs (
   comment_image_url text,
   comment_id text,
   page_id text,
-  status text not null check (status in ('success', 'failed')),
+  status text not null check (status in ('success', 'failed', 'processed')),
   error_message text,
   created_at timestamptz not null default now()
 );
@@ -366,6 +366,13 @@ end $$;
 
 alter table public.comment_logs
   add column if not exists comment_image_url text;
+
+alter table public.comment_logs
+  drop constraint if exists comment_logs_status_check;
+
+alter table public.comment_logs
+  add constraint comment_logs_status_check
+  check (status in ('success', 'failed', 'processed'));
 
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values (
