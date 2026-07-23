@@ -5435,6 +5435,38 @@ def _load_comment_logs_from_supabase(staff_id: str = '', limit: int = 1000) -> t
         return [], str(e)[:300]
 
 
+def _normalise_imported_comment_log(raw: dict, staff_by_username: dict[str, dict]) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    status = str(raw.get('status') or '').strip().lower()
+    post_id = str(raw.get('post_id') or '').strip()
+    created_at = _parse_log_time(str(raw.get('created_at') or ''))
+    username = str(raw.get('staff_username') or '').strip().lower()
+    matched_staff = staff_by_username.get(username) or {}
+    staff_id = str(matched_staff.get('id') or raw.get('staff_id') or '').strip()
+    if status not in {'success', 'failed', 'processed'} or not post_id or not staff_id or not created_at:
+        return {}
+    comment_text = str(raw.get('comment_text') or '').strip()
+    if not comment_text:
+        comment_text = '[Đã xử lý bài viết]' if status == 'processed' else '[Bình luận bằng ảnh]'
+    return {
+        'staff_id': staff_id[:160],
+        'staff_name': str(matched_staff.get('name') or raw.get('staff_name') or '').strip()[:160],
+        'staff_username': str(matched_staff.get('username') or username).strip()[:160],
+        'facebook_user_id': str(raw.get('facebook_user_id') or '').strip()[:160],
+        'post_id': post_id[:500],
+        'group_id': str(raw.get('group_id') or '').strip()[:500],
+        'post_url': str(raw.get('post_url') or '').strip()[:2000],
+        'comment_text': comment_text[:10000],
+        'comment_image_url': str(raw.get('comment_image_url') or '').strip()[:2000],
+        'comment_id': str(raw.get('comment_id') or '').strip()[:500],
+        'page_id': str(raw.get('page_id') or '').strip()[:500],
+        'status': status,
+        'error_message': str(raw.get('error_message') or '').strip()[:2000],
+        'created_at': created_at.isoformat(timespec='seconds').replace('+00:00', 'Z'),
+    }
+
+
 def _today_utc_bounds() -> tuple[datetime, datetime]:
     tz = _app_timezone()
     today = datetime.now(tz).date()
@@ -6470,6 +6502,62 @@ def comment_logs_get():
         if str(item.get('staff_id') or '').strip() == staff_id
     ]
     return jsonify(_merge_comment_log_rows(scoped_rows, [], limit=200))
+
+
+@app.route('/api/comment-logs/import', methods=['POST'])
+def comment_logs_import():
+    global _comment_logs
+    if not _is_admin():
+        return jsonify({'ok': False, 'error': 'Chỉ admin được nhập lịch sử'}), 403
+    body = request.get_json(silent=True) or {}
+    source_rows = body.get('rows') or []
+    if not isinstance(source_rows, list) or not source_rows:
+        return jsonify({'ok': False, 'error': 'Không có lịch sử để nhập'}), 400
+    if len(source_rows) > 1000:
+        return jsonify({'ok': False, 'error': 'Tối đa 1000 dòng mỗi lần nhập'}), 400
+
+    remote_rows, warning = _load_comment_logs_from_supabase('', limit=5000)
+    if warning:
+        return jsonify({'ok': False, 'error': f'Không đọc được lịch sử Supabase đích: {warning}'}), 502
+    staff_by_username = {
+        str(item.get('username') or '').strip().lower(): item
+        for item in _staff_accounts()
+        if str(item.get('username') or '').strip()
+    }
+    existing_keys = {_comment_log_identity(item) for item in remote_rows}
+    imported_rows: list[dict] = []
+    skipped = 0
+    failed = 0
+    errors: list[str] = []
+    for raw in source_rows:
+        row = _normalise_imported_comment_log(raw, staff_by_username)
+        if not row:
+            failed += 1
+            continue
+        key = _comment_log_identity(row)
+        if key in existing_keys:
+            skipped += 1
+            continue
+        ok, error = _save_comment_log_to_supabase(row)
+        if not ok:
+            failed += 1
+            if error and error not in errors:
+                errors.append(error)
+            continue
+        existing_keys.add(key)
+        imported_rows.append(row)
+
+    if imported_rows:
+        _comment_logs = _merge_comment_log_rows(_comment_logs, imported_rows, limit=5000)
+    payload = {
+        'ok': failed == 0,
+        'imported': len(imported_rows),
+        'skipped': skipped,
+        'failed': failed,
+    }
+    if errors:
+        payload['error'] = '; '.join(errors[:3])
+    return jsonify(payload), (200 if failed == 0 else 207)
 
 
 @app.route('/api/comment-stats/today', methods=['GET'])

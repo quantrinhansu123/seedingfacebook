@@ -87,6 +87,49 @@ class CommentHistoryPersistenceTests(unittest.TestCase):
         self.assertEqual(response.get_json()[0]["post_id"], "post-1")
         load_mock.assert_called_once_with("sale-1")
 
+    def test_import_maps_staff_by_username_and_skips_duplicates(self):
+        first = self._row(staff_id="old-id", staff_username="sale01")
+        duplicate = {**first}
+        with patch.object(backend, "_comment_logs", []), patch.object(
+            backend,
+            "_is_admin",
+            return_value=True,
+        ), patch.object(
+            backend,
+            "_staff_accounts",
+            return_value=[{"id": "new-id", "name": "Sale Current", "username": "sale01"}],
+        ), patch.object(
+            backend,
+            "_load_comment_logs_from_supabase",
+            return_value=([], ""),
+        ), patch.object(
+            backend,
+            "_save_comment_log_to_supabase",
+            return_value=(True, ""),
+        ) as save_mock, backend.app.test_request_context(
+            "/api/comment-logs/import",
+            method="POST",
+            json={"rows": [first, duplicate]},
+        ):
+            response, status = backend.comment_logs_import()
+
+        payload = response.get_json()
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["imported"], 1)
+        self.assertEqual(payload["skipped"], 1)
+        self.assertEqual(save_mock.call_args.args[0]["staff_id"], "new-id")
+
+    def test_import_requires_admin(self):
+        with patch.object(backend, "_is_admin", return_value=False), backend.app.test_request_context(
+            "/api/comment-logs/import",
+            method="POST",
+            json={"rows": [self._row()]},
+        ):
+            response, status = backend.comment_logs_import()
+
+        self.assertEqual(status, 403)
+        self.assertFalse(response.get_json()["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()
