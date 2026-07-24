@@ -455,8 +455,46 @@ def _verify_password(password: str, salt: str, digest: str) -> bool:
     return secrets.compare_digest(candidate, digest)
 
 
+_SUPABASE_STARTUP_KV_KEYS = [
+    'settings',
+    'ai_config',
+    'tiktok_config',
+    'content_pipeline',
+    'comment_templates',
+    'comment_tags',
+    'comment_tag_assignments',
+    'comment_inbox_workflow',
+    'comment_manual_phones',
+]
+
+
+def _load_supabase_startup_snapshot() -> tuple[dict, dict[str, str]]:
+    jobs = {
+        'kv': lambda: sb.kv_get_many(_SUPABASE_STARTUP_KV_KEYS),
+        'seen_ids': sb.list_seen_post_ids,
+        'chat_ids': sb.list_chat_ids,
+        'groups': sb.list_groups,
+        'classifications': sb.list_classifications,
+        'managed_channels': lambda: sb.list_managed_channels(SUPABASE_CHANNEL_TABLE),
+        'business_profile': _load_business_profile_from_supabase,
+        'staff': _list_supabase_staff,
+    }
+    values: dict = {}
+    errors: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+        pending = {executor.submit(loader): name for name, loader in jobs.items()}
+        for future in as_completed(pending):
+            name = pending[future]
+            try:
+                values[name] = future.result()
+            except Exception as exc:
+                errors[name] = str(exc)[:300]
+    return values, errors
+
+
 def _load_state():
     global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _deleted_lead_keys, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _managed_channels_remote_at, _tiktok_config, _content_pipeline, _comment_templates, _comment_tags, _comment_tag_assignments, _comment_inbox_workflow, _comment_manual_phones
+    started_at = time_module.monotonic()
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
     except OSError as e:
@@ -467,17 +505,54 @@ def _load_state():
         print(f'[storage] token dir unavailable, token cache disabled: {e}')
 
     loaded_from_supabase = False
+    startup_snapshot: dict = {}
+    startup_kv: dict = {}
+    startup_kv_loaded = False
     if USE_SUPABASE:
         try:
-            _seen_ids = set(sb.list_seen_post_ids())
-            _tg_chat_ids = sb.list_chat_ids() or ['7129448686']
-            _groups = sb.list_groups() or [{'id': DEFAULT_GROUP, 'name': ''}]
-            _settings = sb.kv_get('settings', None) or {'auto_refresh': True, 'interval': 5}
-            _ai_config = sb.kv_get('ai_config', None) or _default_ai_config()
-            _tiktok_config = {**_default_tiktok_config(), **(sb.kv_get('tiktok_config', None) or {})}
-            _classifications = sb.list_classifications()
+            startup_snapshot, startup_errors = _load_supabase_startup_snapshot()
+            for name, error in startup_errors.items():
+                print(f'[supabase] startup {name} failed, using local fallback: {error}')
+            startup_kv_loaded = 'kv' in startup_snapshot
+            startup_kv = startup_snapshot.get('kv') or {}
+            _seen_ids = set(
+                startup_snapshot['seen_ids']
+                if 'seen_ids' in startup_snapshot
+                else _read_json(SEEN_FILE, [])
+            )
+            _tg_chat_ids = (
+                startup_snapshot.get('chat_ids')
+                if 'chat_ids' in startup_snapshot
+                else (_read_json(TG_CONFIG_FILE, {}).get('chat_ids') or [])
+            ) or ['7129448686']
+            _groups = (
+                startup_snapshot.get('groups')
+                if 'groups' in startup_snapshot
+                else _read_json(GROUPS_FILE, [])
+            ) or [{'id': DEFAULT_GROUP, 'name': ''}]
+            _settings = (
+                startup_kv.get('settings')
+                if startup_kv_loaded
+                else _read_json(SETTINGS_FILE, {})
+            ) or {'auto_refresh': True, 'interval': 5}
+            _ai_config = (
+                startup_kv.get('ai_config')
+                if startup_kv_loaded
+                else _read_json(AI_CONFIG_FILE, {})
+            ) or _default_ai_config()
+            loaded_tiktok = (
+                startup_kv.get('tiktok_config')
+                if startup_kv_loaded
+                else _read_json(TIKTOK_CONFIG_FILE, {})
+            ) or {}
+            _tiktok_config = {**_default_tiktok_config(), **loaded_tiktok}
+            _classifications = (
+                startup_snapshot.get('classifications')
+                if 'classifications' in startup_snapshot
+                else _read_json(CLASSIFICATIONS_FILE, {})
+            )
             try:
-                remote_channels = sb.list_managed_channels(SUPABASE_CHANNEL_TABLE)
+                remote_channels = startup_snapshot.get('managed_channels') or []
                 local_channels = _read_json(MANAGED_CHANNELS_FILE, [])
                 _managed_channels = _merge_managed_channels_remote(remote_channels, local_channels)
                 _managed_channels_remote_at = time_module.monotonic()
@@ -488,10 +563,15 @@ def _load_state():
             _reply_suggestions = _read_json(REPLY_SUGGESTIONS_FILE, {})
             loaded_profile = _read_json(BUSINESS_PROFILE_FILE, {})
             _business_profile = {**_default_business_profile(), **loaded_profile}
-            profile_sb, _ = _load_business_profile_from_supabase()
+            profile_sb, profile_warning = startup_snapshot.get('business_profile') or (None, '')
+            if profile_warning:
+                print(f'[supabase] load business profile warning: {profile_warning}')
             if profile_sb:
                 _business_profile = {**_business_profile, **profile_sb}
-            print('[supabase] state loaded from Supabase')
+            staff_rows, staff_warning = startup_snapshot.get('staff') or ([], '')
+            if staff_warning:
+                print(f'[supabase] hydrate staff warning: {staff_warning}')
+            print(f'[supabase] startup snapshot loaded in {time_module.monotonic() - started_at:.2f}s')
             loaded_from_supabase = True
         except Exception as e:
             print(f'[supabase] load failed, fallback file: {e}')
@@ -544,7 +624,9 @@ def _load_state():
     if not isinstance(_tiktok_config, dict):
         _tiktok_config = _default_tiktok_config()
     loaded_pipeline = _read_json(CONTENT_PIPELINE_FILE, {})
-    if USE_SUPABASE:
+    if startup_kv_loaded:
+        loaded_pipeline = startup_kv.get('content_pipeline') or loaded_pipeline
+    elif USE_SUPABASE:
         try:
             loaded_pipeline = sb.kv_get('content_pipeline', loaded_pipeline) or loaded_pipeline
         except Exception as e:
@@ -570,7 +652,13 @@ def _load_state():
     loaded_tag_assignments = _read_json(COMMENT_TAG_ASSIGNMENTS_FILE, {})
     loaded_inbox_workflow = _read_json(COMMENT_INBOX_WORKFLOW_FILE, {})
     loaded_manual_phones = _read_json(COMMENT_MANUAL_PHONES_FILE, {})
-    if USE_SUPABASE:
+    if startup_kv_loaded:
+        loaded_templates = startup_kv.get('comment_templates') or loaded_templates
+        loaded_tags = startup_kv.get('comment_tags') or loaded_tags
+        loaded_tag_assignments = startup_kv.get('comment_tag_assignments') or loaded_tag_assignments
+        loaded_inbox_workflow = startup_kv.get('comment_inbox_workflow') or loaded_inbox_workflow
+        loaded_manual_phones = startup_kv.get('comment_manual_phones') or loaded_manual_phones
+    elif USE_SUPABASE:
         try:
             loaded_templates = sb.kv_get('comment_templates', loaded_templates) or loaded_templates
         except Exception as e:
@@ -11403,5 +11491,6 @@ if SCHEDULED_POST_WORKER_INTERVAL_SECONDS > 0:
 
 if __name__ == '__main__':
     print(f'[server] supabase={"on" if USE_SUPABASE else "off"} | staff cookie optional | http://localhost:{PORT}')
-    app.run(debug=False, host='0.0.0.0', port=PORT, threaded=True)
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=PORT, threads=8, channel_timeout=180)
 

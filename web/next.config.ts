@@ -1,7 +1,7 @@
 import type { NextConfig } from 'next';
 import path from 'path';
 
-const DEFAULT_API_PROXY_BASE_URL = 'https://seeding-fb.onrender.com';
+const DEFAULT_API_PROXY_BASE_URL = 'https://seedingfacebook.onrender.com';
 const webRoot = path.join(__dirname);
 
 function normalizeUrl(value?: string): string {

@@ -161,6 +161,19 @@ def kv_get(key: str, default: Any = None) -> Any:
     return rows[0]['value'] if rows else default
 
 
+def kv_get_many(keys: list[str]) -> dict[str, Any]:
+    normalized = list(dict.fromkeys(str(key or '').strip() for key in keys if str(key or '').strip()))
+    if not normalized:
+        return {}
+    encoded = ','.join(quote(key, safe='') for key in normalized)
+    r = _request('GET', f'app_kv?select=key,value&key=in.({encoded})')
+    return {
+        str(row.get('key') or ''): row.get('value')
+        for row in r.json()
+        if str(row.get('key') or '')
+    }
+
+
 def kv_set(key: str, value: Any) -> None:
     _request('POST', 'app_kv?on_conflict=key', json=[{'key': key, 'value': value}],
              prefer='resolution=merge-duplicates,return=minimal')

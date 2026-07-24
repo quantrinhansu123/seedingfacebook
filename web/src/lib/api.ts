@@ -9,17 +9,18 @@ export function getApiBase(): string {
 }
 
 const API_TIMEOUT_MS = 30000;
+export const AUTH_TIMEOUT_MS = 75000;
 export const AI_TIMEOUT_MS = 120000;
 export const UPLOAD_TIMEOUT_MS = 120000;
 export const PUBLISH_TIMEOUT_MS = 180000;
 
 export function formatFetchError(err: unknown, fallback = 'Không gọi được backend'): string {
   if (err instanceof DOMException && err.name === 'AbortError') {
-    return 'Backend không phản hồi kịp (timeout). Kiểm tra Flask trên cổng 5000 và thử lại.';
+    return 'Máy chủ chưa phản hồi kịp. Nếu Render đang khởi động, đợi một lát rồi thử lại.';
   }
   const message = err instanceof Error ? err.message : String(err || '');
   if (/aborted|abort/i.test(message)) {
-    return 'Backend không phản hồi kịp (timeout). Kiểm tra Flask trên cổng 5000 và thử lại.';
+    return 'Máy chủ chưa phản hồi kịp. Nếu Render đang khởi động, đợi một lát rồi thử lại.';
   }
   return message || fallback;
 }

@@ -15,7 +15,7 @@ import { MarketingPipelinePanel } from '@/components/MarketingPipelinePanel';
 import { ScriptWriterPanel } from '@/components/ScriptWriterPanel';
 import '@/components/standard-post-panel.css';
 import { StaffCookiePanel, type StaffPayload } from '@/components/StaffCookiePanel';
-import { api, formatFetchError, PUBLISH_TIMEOUT_MS } from '@/lib/api';
+import { api, AUTH_TIMEOUT_MS, formatFetchError, PUBLISH_TIMEOUT_MS } from '@/lib/api';
 import { APP_BRAND } from '@/lib/app-brand';
 import { LEGACY_PATH_REDIRECTS, pathToView, viewToPath, type ViewKey } from '@/lib/app-routes';
 import { CONSOLE_NAV_ITEMS } from '@/lib/console-nav';
@@ -208,6 +208,18 @@ function postGroupId(post: FbPost): string {
   return String(post._group_id || post.group_id || '').trim();
 }
 
+function facebookPagesFromChannels(rows: ManagedChannel[]): FbPage[] {
+  const pages = new Map<string, FbPage>();
+  for (const item of rows) {
+    const platform = String(item.platform || '').trim().toLowerCase();
+    const type = String(item.channel_type || '').trim().toLowerCase();
+    const id = String(item.target_id || '').trim();
+    if (platform !== 'facebook' || !['page', 'fanpage', 'trang'].includes(type) || !id) continue;
+    pages.set(id, { id, name: item.channel_name || id });
+  }
+  return [...pages.values()];
+}
+
 function readStoredScanSelectedGroups(): Record<string, boolean> {
   if (typeof window === 'undefined') return {};
   try {
@@ -218,7 +230,7 @@ function readStoredScanSelectedGroups(): Record<string, boolean> {
   }
 }
 
-const MONITOR_HEAVY_VIEWS: ViewKey[] = ['home', 'manage', 'channels', 'report', 'leads', 'marketing', 'history', 'staff'];
+const MONITOR_HEAVY_VIEWS: ViewKey[] = ['manage'];
 
 export function MonitorPage() {
   const [groups, setGroups] = useState<string[]>([]);
@@ -503,7 +515,7 @@ export function MonitorPage() {
 
   const checkAuth = useCallback(async () => {
     try {
-      const r = await api('/api/auth/status', { timeoutMs: 30000 });
+      const r = await api('/api/auth/status', { timeoutMs: AUTH_TIMEOUT_MS });
       if (!r.ok) {
         setSetupRequired(false);
         setAuthenticated(false);
@@ -707,6 +719,7 @@ export function MonitorPage() {
         const rows = d.channels || [];
         channelsRef.current = rows;
         setChannels(rows);
+        setPages(facebookPagesFromChannels(rows));
         applyScopedFacebookGroups(
           filterChannelsForManageScope(rows, currentStaffRef.current).filter(isFacebookGroupChannel),
         );
@@ -908,6 +921,7 @@ export function MonitorPage() {
         const rows = Array.isArray(d.channels) ? d.channels : [];
         channelsRef.current = rows;
         setChannels(rows);
+        setPages(facebookPagesFromChannels(rows));
         const sourceNote = d.source === 'cookie_html' ? ' · lấy bằng cookie HTML' : '';
         const warning = d.warning ? ` · ${d.warning}` : '';
         setChannelStatus(`✅ Đã đồng bộ Page Facebook: thêm ${d.added || 0}, cập nhật ${d.updated || 0}${sourceNote}${warning}`);
@@ -1349,8 +1363,8 @@ export function MonitorPage() {
 
     const loadManageHeavy = async (autoClassify: boolean) => {
       const gIds = groupsRef.current.filter((gid) => scanSelectedGroupsRef.current[gid]);
-      await Promise.allSettled(gIds.map((g) => loadGroupName(g)));
-      await Promise.allSettled([loadContentPipeline(), loadTodayCommentStats()]);
+      void Promise.allSettled(gIds.map((g) => loadGroupName(g)));
+      void loadTodayCommentStats();
       const posts = await loadPosts();
       if (cancelled || !autoClassify || !posts?.length) return;
       try {
@@ -1369,14 +1383,15 @@ export function MonitorPage() {
     };
 
     (async () => {
-      await Promise.allSettled([
+      const supportingLoads = Promise.allSettled([
         loadStaffCookies(),
         loadTg(),
-        loadPages(),
-        loadChannels(),
       ]);
-      if (cancelled) return;
-      const autoClassify = await loadAiBundle();
+      const [, autoClassify] = await Promise.all([
+        loadChannels(),
+        loadAiBundle(),
+      ]);
+      void supportingLoads;
       if (cancelled) return;
       void loadManageHeavy(autoClassify);
     })();
@@ -1384,7 +1399,7 @@ export function MonitorPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeView, authChecked, authenticated, loadChannels, loadContentPipeline, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTodayCommentStats]);
+  }, [activeView, authChecked, authenticated, loadChannels, loadGroupName, loadPosts, loadStaffCookies, loadTg, loadTodayCommentStats]);
 
   useEffect(() => {
     if (autoTimerRef.current) {
@@ -2648,6 +2663,7 @@ export function MonitorPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim(), password }),
+        timeoutMs: AUTH_TIMEOUT_MS,
       });
       const d = await r.json();
       if (d.ok) {
@@ -2656,8 +2672,6 @@ export function MonitorPage() {
         setCurrentStaff(d.staff || null);
         if (isStaffAdmin(d.staff)) setCanManageStaff(true);
         setAuthStatus('');
-        await loadStaffCookies();
-        await loadTodayCommentStats();
       } else {
         setAuthStatus(d.error || 'Sai tài khoản hoặc mật khẩu');
       }
@@ -2673,6 +2687,7 @@ export function MonitorPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        timeoutMs: AUTH_TIMEOUT_MS,
       });
       const d = await r.json();
       if (d.ok) {
@@ -2680,8 +2695,6 @@ export function MonitorPage() {
         setSetupRequired(false);
         setCurrentStaff(d.staff || null);
         setAuthStatus('');
-        await loadStaffCookies();
-        await loadTodayCommentStats();
       } else {
         if (d.already_setup || d.setup_required === false) {
           setSetupRequired(false);
@@ -2826,20 +2839,13 @@ export function MonitorPage() {
   const formatDateTime = (value?: string) => (value ? new Date(value).toLocaleString('vi-VN') : '-');
 
   useEffect(() => {
-    if (!authenticated || !adminStaff) return;
-    if (activeView !== 'staff' && !MONITOR_HEAVY_VIEWS.includes(activeView)) return;
-    void loadStaffCookies();
-  }, [activeView, authenticated, adminStaff, loadStaffCookies]);
-
-  useEffect(() => {
     if (!authenticated) return;
     if (activeView === 'history') void loadCommentLogs();
     if (activeView === 'leads') void reloadLeads();
-    if (activeView === 'channels' || activeView === 'manage') void loadChannels();
+    if (activeView === 'channels') void loadChannels();
     if (activeView === 'channels' || activeView === 'staff') void loadStaffCookies();
     if (activeView === 'manage') void loadFacebookCookieContext();
     if (activeView === 'staff') {
-      void loadStaffCookies();
       void loadChannels();
     }
     if (activeView === 'marketing') {
