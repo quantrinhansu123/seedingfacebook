@@ -45,6 +45,40 @@ class CommentedPostLeadTests(unittest.TestCase):
         self.assertEqual(first["processed_by_staff_id"], "sale-1")
         self.assertEqual(second["processed_by_staff_id"], "sale-2")
 
+    def test_supabase_row_keeps_comment_owner_during_admin_backfill(self):
+        lead = backend._lead_from_comment_log(self._log(staff_id="sale-1"))
+        with patch.object(
+            backend,
+            "_current_staff",
+            return_value={"id": "admin-1", "name": "Admin", "username": "admin"},
+        ):
+            row = backend._lead_to_supabase_row(lead)
+
+        self.assertEqual(row["created_by_staff_id"], "sale-1")
+        self.assertEqual(row["created_by_staff_name"], "Sale One")
+        self.assertEqual(row["created_by_staff_username"], "sale01")
+
+    @patch.object(backend, "_save_leads_to_supabase", return_value=(True, ""))
+    @patch.object(backend, "_merge_leads_into_memory")
+    def test_reconcile_backfills_unique_missing_staff_posts(self, merge_mock, save_mock):
+        first = self._log(staff_id="sale-1", comment_id="comment-1")
+        duplicate = self._log(staff_id="sale-1", comment_id="comment-2")
+        second_staff = self._log(staff_id="sale-2", comment_id="comment-3")
+        existing = backend._lead_from_comment_log(first)
+
+        with patch.object(backend, "_deleted_lead_keys", set()):
+            result, error = backend._reconcile_commented_post_leads(
+                [first, duplicate, second_staff],
+                {"post-123": [existing]},
+            )
+
+        self.assertEqual(error, "")
+        self.assertEqual(result["candidate_count"], 2)
+        self.assertEqual(result["existing_count"], 1)
+        self.assertEqual(result["created_count"], 1)
+        self.assertEqual(merge_mock.call_args.args[0][0]["processed_by_staff_id"], "sale-2")
+        self.assertEqual(save_mock.call_args.args[0][0]["processed_by_staff_id"], "sale-2")
+
     @patch.object(backend, "_save_leads_to_supabase")
     @patch.object(backend, "_merge_leads_into_memory")
     def test_failed_comment_does_not_create_lead(self, merge_mock, save_mock):

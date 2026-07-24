@@ -1540,6 +1540,24 @@ def _lead_to_supabase_row(lead: dict) -> dict:
     row = _normalise_lead(lead)
     staff = _current_staff()
     now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    owner_id = str(
+        row.get('processed_by_staff_id')
+        or row.get('created_by_staff_id')
+        or staff.get('id')
+        or ''
+    ).strip()
+    owner_name = str(
+        row.get('processed_by')
+        or row.get('created_by_staff_name')
+        or staff.get('name')
+        or ''
+    ).strip()
+    owner_username = str(
+        row.get('processed_by_staff_username')
+        or row.get('created_by_staff_username')
+        or (staff.get('username') if owner_id == str(staff.get('id') or '').strip() else '')
+        or ''
+    ).strip()
     return {
         'lead_key': row.get('lead_key'),
         'platform': row.get('platform'),
@@ -1563,9 +1581,9 @@ def _lead_to_supabase_row(lead: dict) -> dict:
         'confidence': row.get('confidence'),
         'evidence': row.get('evidence'),
         'raw_lead': row,
-        'created_by_staff_id': staff.get('id', ''),
-        'created_by_staff_name': staff.get('name', ''),
-        'created_by_staff_username': staff.get('username', ''),
+        'created_by_staff_id': owner_id,
+        'created_by_staff_name': owner_name,
+        'created_by_staff_username': owner_username,
         'created_at': row.get('created_at') or now,
         'updated_at': now,
     }
@@ -5354,19 +5372,20 @@ def _commented_post_lead_key(platform: str, post_id: str, staff_id: str) -> str:
     return hashlib.sha1(identity.encode('utf-8')).hexdigest()
 
 
-def _upsert_lead_from_comment_log(log: dict, lead_context: dict | None = None) -> tuple[dict, bool, str]:
+def _lead_from_comment_log(log: dict, lead_context: dict | None = None) -> dict:
     if str(log.get('status') or '').strip().lower() != 'success':
-        return {}, True, ''
+        return {}
     context = lead_context if isinstance(lead_context, dict) else {}
     post_id = str(log.get('post_id') or '').strip()
     staff_id = str(log.get('staff_id') or '').strip()
     if not post_id or not staff_id:
-        return {}, True, ''
+        return {}
 
     platform = str(context.get('platform') or '').strip().lower()
     if not platform:
         platform = 'tiktok' if post_id.startswith('tiktok_') or str(log.get('group_id') or '') == 'tiktok' else 'facebook'
     processor = str(log.get('staff_name') or log.get('staff_username') or 'Nhân sự').strip()
+    staff_username = str(log.get('staff_username') or '').strip()
     customer_name = str(
         context.get('customer_name')
         or context.get('author_name')
@@ -5383,7 +5402,7 @@ def _upsert_lead_from_comment_log(log: dict, lead_context: dict | None = None) -
     phones = extract_phones(customer_need)
     now = str(log.get('created_at') or datetime.utcnow().isoformat(timespec='seconds') + 'Z')
     lead_key = _commented_post_lead_key(platform, post_id, staff_id)
-    lead = _normalise_lead({
+    return _normalise_lead({
         'lead_key': lead_key,
         'platform': platform,
         'source': 'commented_post',
@@ -5405,13 +5424,63 @@ def _upsert_lead_from_comment_log(log: dict, lead_context: dict | None = None) -
         'processed_at': now,
         'processed_by': processor,
         'processed_by_staff_id': staff_id,
+        'processed_by_staff_username': staff_username,
+        'created_by_staff_id': staff_id,
+        'created_by_staff_name': processor,
+        'created_by_staff_username': staff_username,
         'assigned_sale': processor,
         'crm_status': 'Lead mới',
         'created_at': now,
     }, post_id)
+
+
+def _upsert_lead_from_comment_log(log: dict, lead_context: dict | None = None) -> tuple[dict, bool, str]:
+    lead = _lead_from_comment_log(log, lead_context)
+    if not lead:
+        return {}, True, ''
     _merge_leads_into_memory([lead])
     supabase_ok, supabase_error = _save_leads_to_supabase([lead])
     return lead, supabase_ok, supabase_error
+
+
+def _reconcile_commented_post_leads(logs: list[dict], existing_leads: dict) -> tuple[dict, str]:
+    existing_keys = {
+        str(item.get('lead_key') or _lead_key(item))
+        for items in (existing_leads or {}).values()
+        for item in (items or [])
+    }
+    candidates: dict[str, dict] = {}
+    skipped_deleted = 0
+    ordered_logs = sorted(
+        (item for item in (logs or []) if isinstance(item, dict)),
+        key=lambda item: str(item.get('created_at') or ''),
+    )
+    for log in ordered_logs:
+        lead = _lead_from_comment_log(log)
+        if not lead:
+            continue
+        key = str(lead.get('lead_key') or '')
+        if not key:
+            continue
+        if key in _deleted_lead_keys:
+            skipped_deleted += 1
+            continue
+        candidates[key] = lead
+
+    missing = [lead for key, lead in candidates.items() if key not in existing_keys]
+    if missing:
+        _merge_leads_into_memory(missing)
+        supabase_ok, supabase_error = _save_leads_to_supabase(missing)
+    else:
+        supabase_ok, supabase_error = True, ''
+    return {
+        'ok': supabase_ok,
+        'candidate_count': len(candidates),
+        'existing_count': len(candidates) - len(missing),
+        'created_count': len(missing) if supabase_ok else 0,
+        'pending_count': 0 if supabase_ok else len(missing),
+        'skipped_deleted': skipped_deleted,
+    }, supabase_error
 
 
 def _record_comment_log(post_id: str, group_id: str, post_url: str, message: str, page_id: str,
@@ -6646,6 +6715,22 @@ def comment_logs_import():
     if errors:
         payload['error'] = '; '.join(errors[:3])
     return jsonify(payload), (200 if failed == 0 else 207)
+
+
+@app.route('/api/comment-leads/reconcile', methods=['POST'])
+def comment_leads_reconcile():
+    if not _is_admin():
+        return jsonify({'ok': False, 'error': 'Chỉ admin được đối soát Lead'}), 403
+    logs, log_warning = _load_comment_logs_from_supabase('', limit=5000)
+    if log_warning:
+        return jsonify({'ok': False, 'error': f'Không đọc được lịch sử comment: {log_warning}'}), 502
+    existing_leads, lead_warning = _load_leads_from_supabase(limit=5000)
+    if lead_warning:
+        return jsonify({'ok': False, 'error': f'Không đọc được Lead hiện tại: {lead_warning}'}), 502
+    result, error = _reconcile_commented_post_leads(logs, existing_leads)
+    if error:
+        result['error'] = error
+    return jsonify(result), (200 if result.get('ok') else 502)
 
 
 @app.route('/api/comment-stats/today', methods=['GET'])

@@ -130,6 +130,16 @@ class CommentHistoryPersistenceTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertFalse(response.get_json()["ok"])
 
+    def test_comment_lead_reconcile_requires_admin(self):
+        with patch.object(backend, "_is_admin", return_value=False), backend.app.test_request_context(
+            "/api/comment-leads/reconcile",
+            method="POST",
+        ):
+            response, status = backend.comment_leads_reconcile()
+
+        self.assertEqual(status, 403)
+        self.assertFalse(response.get_json()["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()
