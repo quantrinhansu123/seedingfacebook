@@ -99,6 +99,7 @@ type PostFetchReport = {
 };
 
 const SCAN_SELECTED_STORAGE_KEY = 'scanSelectedGroups';
+const AUTH_STAFF_STORAGE_KEY = 'seeding.auth.staff.v1';
 const DEFAULT_GEMINI_PRO_MODEL = 'gemini-3.1-pro-preview';
 const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
 const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
@@ -227,6 +228,45 @@ function readStoredScanSelectedGroups(): Record<string, boolean> {
     return raw ? JSON.parse(raw) as Record<string, boolean> : {};
   } catch {
     return {};
+  }
+}
+
+function readCachedAuthStaff(): StaffAccount | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(AUTH_STAFF_STORAGE_KEY);
+    if (!raw) return null;
+    const staff = JSON.parse(raw) as StaffAccount;
+    if (!staff?.id || (!staff.name && !staff.username) || staff.enabled === false) {
+      window.localStorage.removeItem(AUTH_STAFF_STORAGE_KEY);
+      return null;
+    }
+    return staff;
+  } catch {
+    window.localStorage.removeItem(AUTH_STAFF_STORAGE_KEY);
+    return null;
+  }
+}
+
+function writeCachedAuthStaff(staff: StaffAccount | null) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (!staff?.id || staff.enabled === false) {
+      window.localStorage.removeItem(AUTH_STAFF_STORAGE_KEY);
+      return;
+    }
+    const cached: StaffAccount = {
+      id: staff.id,
+      name: staff.name,
+      username: staff.username,
+      role: staff.role,
+      enabled: staff.enabled,
+      facebook_user_id: staff.facebook_user_id,
+      active_facebook_name: staff.active_facebook_name,
+    };
+    window.localStorage.setItem(AUTH_STAFF_STORAGE_KEY, JSON.stringify(cached));
+  } catch {
+    /* localStorage can be unavailable in private browsing */
   }
 }
 
@@ -517,12 +557,18 @@ export function MonitorPage() {
     try {
       const r = await api('/api/auth/status', { timeoutMs: AUTH_TIMEOUT_MS });
       if (!r.ok) {
+        const canKeepCachedSession = r.status >= 500 && Boolean(currentStaffRef.current?.id);
         setSetupRequired(false);
-        setAuthenticated(false);
-        setCurrentStaff(null);
+        if (!canKeepCachedSession) {
+          setAuthenticated(false);
+          setCurrentStaff(null);
+          writeCachedAuthStaff(null);
+        }
         setAuthStatus(
           r.status >= 500
-            ? 'Backend chưa chạy (port 5000). Chạy npm run dev:backend hoặc npm run dev.'
+            ? canKeepCachedSession
+              ? 'Máy chủ đang khởi động, dữ liệu sẽ tự tải khi kết nối xong.'
+              : 'Backend chưa chạy (port 5000). Chạy npm run dev:backend hoặc npm run dev.'
             : `Không kiểm tra được đăng nhập (${r.status})`,
         );
         return;
@@ -531,16 +577,23 @@ export function MonitorPage() {
       setSetupRequired(!!d.setup_required && !d.simple_login);
       setAuthenticated(!!d.authenticated);
       setCurrentStaff(d.staff || null);
+      writeCachedAuthStaff(d.authenticated ? d.staff || null : null);
       if (isStaffAdmin(d.staff)) setCanManageStaff(true);
       setAuthStatus('');
     } catch (err: unknown) {
+      const canKeepCachedSession = Boolean(currentStaffRef.current?.id);
       setSetupRequired(false);
-      setAuthenticated(false);
-      setCurrentStaff(null);
+      if (!canKeepCachedSession) {
+        setAuthenticated(false);
+        setCurrentStaff(null);
+        writeCachedAuthStaff(null);
+      }
       const aborted = err instanceof DOMException && err.name === 'AbortError';
       setAuthStatus(
         aborted
-          ? 'Backend không phản hồi. Hãy chạy Flask (port 5000) rồi tải lại trang.'
+          ? canKeepCachedSession
+            ? 'Máy chủ đang khởi động, dữ liệu sẽ tự tải khi kết nối xong.'
+            : 'Backend không phản hồi. Hãy chạy Flask (port 5000) rồi tải lại trang.'
           : 'Không kết nối được server',
       );
     } finally {
@@ -1056,6 +1109,14 @@ export function MonitorPage() {
   }, []);
 
   useEffect(() => {
+    const cachedStaff = readCachedAuthStaff();
+    if (cachedStaff) {
+      currentStaffRef.current = cachedStaff;
+      setCurrentStaff(cachedStaff);
+      setAuthenticated(true);
+      setAuthChecked(true);
+      if (isStaffAdmin(cachedStaff)) setCanManageStaff(true);
+    }
     void checkAuth();
   }, [checkAuth]);
 
@@ -2670,6 +2731,7 @@ export function MonitorPage() {
         setAuthenticated(true);
         setSetupRequired(false);
         setCurrentStaff(d.staff || null);
+        writeCachedAuthStaff(d.staff || null);
         if (isStaffAdmin(d.staff)) setCanManageStaff(true);
         setAuthStatus('');
       } else {
@@ -2694,12 +2756,14 @@ export function MonitorPage() {
         setAuthenticated(true);
         setSetupRequired(false);
         setCurrentStaff(d.staff || null);
+        writeCachedAuthStaff(d.staff || null);
         setAuthStatus('');
       } else {
         if (d.already_setup || d.setup_required === false) {
           setSetupRequired(false);
           setAuthenticated(false);
           setCurrentStaff(null);
+          writeCachedAuthStaff(null);
         }
         setAuthStatus(d.error || 'Lỗi setup');
       }
@@ -2712,6 +2776,7 @@ export function MonitorPage() {
     await api('/api/auth/logout', { method: 'POST' });
     setAuthenticated(false);
     setCurrentStaff(null);
+    writeCachedAuthStaff(null);
     setStaffRows([]);
     setAllPosts([]);
     setHeaderSub('Đã đăng xuất');
