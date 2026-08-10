@@ -179,3 +179,18 @@ CORS_ORIGINS=https://seeding-beta.vercel.app,https://.*\.vercel\.app,http://loca
 ```
 
 Neu mo `https://seeding-beta.vercel.app` ma bi nhay ve `http://localhost:3000`, Vercel dang build nham backend Python — dat Root Directory = `web` roi Redeploy.
+
+### Giu Render Free khong ngu dong
+
+Render Free se ngu neu 15 phut khong co request. Voi production hien tai, tao mot HTTP monitor mien phi tren UptimeRobot:
+
+```text
+Monitor type: HTTP(s)
+Friendly name: Sale F-Solution Backend
+URL: https://sale-fsolution.onrender.com/api/health
+Monitoring interval: 5 minutes
+```
+
+Monitor truc tiep backend, khong monitor URL Vercel va khong dung endpoint can dang nhap. Phan hoi dung la HTTP 200 voi JSON co `"ok": true`.
+
+Mot service chay lien tuc toi da 744 gio trong thang 31 ngay, gan sat han muc 750 Free instance hours cua moi Render workspace. Khong giu them service Free thu hai chay 24/7 trong cung workspace; neu khong se het gio truoc cuoi thang.

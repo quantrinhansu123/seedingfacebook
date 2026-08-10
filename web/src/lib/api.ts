@@ -13,14 +13,15 @@ export const AUTH_TIMEOUT_MS = 75000;
 export const AI_TIMEOUT_MS = 120000;
 export const UPLOAD_TIMEOUT_MS = 120000;
 export const PUBLISH_TIMEOUT_MS = 180000;
+export const AUTH_EXPIRED_EVENT = 'sale-fsolution:auth-expired';
 
 export function formatFetchError(err: unknown, fallback = 'Không gọi được backend'): string {
   if (err instanceof DOMException && err.name === 'AbortError') {
-    return 'Máy chủ chưa phản hồi kịp. Nếu Render đang khởi động, đợi một lát rồi thử lại.';
+    return 'Máy chủ chưa phản hồi kịp. Đợi một lát rồi thử lại.';
   }
   const message = err instanceof Error ? err.message : String(err || '');
   if (/aborted|abort/i.test(message)) {
-    return 'Máy chủ chưa phản hồi kịp. Nếu Render đang khởi động, đợi một lát rồi thử lại.';
+    return 'Máy chủ chưa phản hồi kịp. Đợi một lát rồi thử lại.';
   }
   return message || fallback;
 }
@@ -44,6 +45,21 @@ export function api(path: string, init?: ApiInit): Promise<Response> {
     credentials: 'include',
     ...fetchInit,
     signal: controller.signal,
+  }).then(async (response) => {
+    const authPath = path.split('?', 1)[0];
+    if (
+      typeof window !== 'undefined'
+      && response.status === 401
+      && authPath !== '/api/auth/login'
+      && authPath !== '/api/auth/setup'
+      && authPath !== '/api/auth/status'
+    ) {
+      const payload = await response.clone().json().catch(() => null) as { auth_required?: boolean } | null;
+      if (payload?.auth_required === true) {
+        window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+      }
+    }
+    return response;
   }).finally(() => {
     clearTimeout(timeoutId);
     if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);

@@ -5,15 +5,20 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
+    healthCheckPath: /api/health
     envVars:
       - key: WEB_UI_URL
-        value: https://seeding-beta.vercel.app
+        value: https://sale-fsolution.vercel.app
       - key: CORS_ORIGINS
-        value: https://seeding-beta.vercel.app,https://fb-moni.vercel.app,https://.*\.vercel\.app,http://localhost:3000,http://127.0.0.1:3000
+        value: https://sale-fsolution.vercel.app,https://seeding-beta.vercel.app,https://fb-moni.vercel.app,https://.*\.vercel\.app,http://localhost:3000,http://127.0.0.1:3000
       - key: SIMPLE_LOGIN_ONLY
         value: "true"
       - key: APP_SECRET_KEY
         generateValue: true
+      - key: AI_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_PUBLISHABLE_KEY
@@ -22,6 +27,12 @@ services:
         value: staff_users
       - key: SUPABASE_CHANNEL_TABLE
         value: managed_channels
+      - key: FLOW_SUPABASE_URL
+        sync: false
+      - key: FLOW_SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: FLOW_SUPABASE_SYNC_ENABLED
+        value: "true"
       - key: TIKTOK_PLAYWRIGHT_WORKER_URL
         sync: false
       - key: TIKTOK_PLAYWRIGHT_WORKER_KEY

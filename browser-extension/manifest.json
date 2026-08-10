@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Seeding Fsolution Bridge",
-  "version": "0.1.17",
+  "version": "0.1.32",
   "description": "Ket noi Seeding Fsolution voi phien dang nhap Chrome that cho Facebook/TikTok.",
-  "permissions": ["tabs", "scripting", "cookies"],
+  "permissions": ["tabs", "scripting", "cookies", "storage"],
   "host_permissions": [
     "https://www.tiktok.com/*",
     "https://www.facebook.com/*",
     "https://*.facebook.com/*",
     "https://*.vercel.app/*",
+    "https://sale-fsolution.onrender.com/*",
+    "https://*.supabase.co/*",
     "http://localhost/*",
     "http://127.0.0.1/*"
   ],
@@ -25,6 +27,11 @@
       "matches": ["https://www.tiktok.com/*"],
       "js": ["tiktok-content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.facebook.com/*", "https://*.facebook.com/*"],
+      "js": ["facebook-caption-match.js", "facebook-content.js"],
+      "run_at": "document_idle"
     }
   ],
   "action": {
@@ -32,4 +39,3 @@
     "default_popup": "popup.html"
   }
 }
-

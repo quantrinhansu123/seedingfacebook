@@ -15,7 +15,7 @@ import { MarketingPipelinePanel } from '@/components/MarketingPipelinePanel';
 import { ScriptWriterPanel } from '@/components/ScriptWriterPanel';
 import '@/components/standard-post-panel.css';
 import { StaffCookiePanel, type StaffPayload } from '@/components/StaffCookiePanel';
-import { api, AUTH_TIMEOUT_MS, formatFetchError, PUBLISH_TIMEOUT_MS } from '@/lib/api';
+import { api, AUTH_EXPIRED_EVENT, AUTH_TIMEOUT_MS, formatFetchError, PUBLISH_TIMEOUT_MS } from '@/lib/api';
 import { APP_BRAND } from '@/lib/app-brand';
 import { LEGACY_PATH_REDIRECTS, pathToView, viewToPath, type ViewKey } from '@/lib/app-routes';
 import { CONSOLE_NAV_ITEMS } from '@/lib/console-nav';
@@ -99,7 +99,7 @@ type PostFetchReport = {
 };
 
 const SCAN_SELECTED_STORAGE_KEY = 'scanSelectedGroups';
-const AUTH_STAFF_STORAGE_KEY = 'seeding.auth.staff.v1';
+const LEGACY_AUTH_STAFF_STORAGE_KEY = 'seeding.auth.staff.v1';
 const DEFAULT_GEMINI_PRO_MODEL = 'gemini-3.1-pro-preview';
 const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
 const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
@@ -228,45 +228,6 @@ function readStoredScanSelectedGroups(): Record<string, boolean> {
     return raw ? JSON.parse(raw) as Record<string, boolean> : {};
   } catch {
     return {};
-  }
-}
-
-function readCachedAuthStaff(): StaffAccount | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(AUTH_STAFF_STORAGE_KEY);
-    if (!raw) return null;
-    const staff = JSON.parse(raw) as StaffAccount;
-    if (!staff?.id || (!staff.name && !staff.username) || staff.enabled === false) {
-      window.localStorage.removeItem(AUTH_STAFF_STORAGE_KEY);
-      return null;
-    }
-    return staff;
-  } catch {
-    window.localStorage.removeItem(AUTH_STAFF_STORAGE_KEY);
-    return null;
-  }
-}
-
-function writeCachedAuthStaff(staff: StaffAccount | null) {
-  if (typeof window === 'undefined') return;
-  try {
-    if (!staff?.id || staff.enabled === false) {
-      window.localStorage.removeItem(AUTH_STAFF_STORAGE_KEY);
-      return;
-    }
-    const cached: StaffAccount = {
-      id: staff.id,
-      name: staff.name,
-      username: staff.username,
-      role: staff.role,
-      enabled: staff.enabled,
-      facebook_user_id: staff.facebook_user_id,
-      active_facebook_name: staff.active_facebook_name,
-    };
-    window.localStorage.setItem(AUTH_STAFF_STORAGE_KEY, JSON.stringify(cached));
-  } catch {
-    /* localStorage can be unavailable in private browsing */
   }
 }
 
@@ -554,46 +515,49 @@ export function MonitorPage() {
   }, []);
 
   const checkAuth = useCallback(async () => {
+    setAuthChecked(false);
     try {
-      const r = await api('/api/auth/status', { timeoutMs: AUTH_TIMEOUT_MS });
-      if (!r.ok) {
-        const canKeepCachedSession = r.status >= 500 && Boolean(currentStaffRef.current?.id);
-        setSetupRequired(false);
-        if (!canKeepCachedSession) {
+      const maxRestoreRetries = 3;
+      for (let attempt = 0; attempt <= maxRestoreRetries; attempt += 1) {
+        const r = await api('/api/auth/status', { timeoutMs: AUTH_TIMEOUT_MS });
+        const d = await r.json().catch(() => ({}));
+        if (r.status === 503 && d.auth_recovery_pending && attempt < maxRestoreRetries) {
+          const retryAfterMs = Math.max(1000, Number(d.retry_after || 3) * 1000);
+          setAuthStatus(`Máy chủ đang khôi phục phiên (${attempt + 1}/${maxRestoreRetries})...`);
+          await new Promise((resolve) => window.setTimeout(resolve, retryAfterMs));
+          continue;
+        }
+        if (!r.ok) {
+          setSetupRequired(false);
           setAuthenticated(false);
           setCurrentStaff(null);
-          writeCachedAuthStaff(null);
+          setCanManageStaff(false);
+          heavyBootstrapDoneRef.current = false;
+          setAuthStatus(
+            d.error || (r.status >= 500
+              ? 'Máy chủ chưa sẵn sàng. Vui lòng đợi một lát rồi kiểm tra lại.'
+              : `Không kiểm tra được đăng nhập (${r.status})`),
+          );
+          return;
         }
-        setAuthStatus(
-          r.status >= 500
-            ? canKeepCachedSession
-              ? 'Máy chủ đang khởi động, dữ liệu sẽ tự tải khi kết nối xong.'
-              : 'Backend chưa chạy (port 5000). Chạy npm run dev:backend hoặc npm run dev.'
-            : `Không kiểm tra được đăng nhập (${r.status})`,
-        );
+        setSetupRequired(!!d.setup_required && !d.simple_login);
+        setAuthenticated(!!d.authenticated);
+        setCurrentStaff(d.staff || null);
+        setCanManageStaff(isStaffAdmin(d.staff));
+        if (!d.authenticated) heavyBootstrapDoneRef.current = false;
+        setAuthStatus('');
         return;
       }
-      const d = await r.json();
-      setSetupRequired(!!d.setup_required && !d.simple_login);
-      setAuthenticated(!!d.authenticated);
-      setCurrentStaff(d.staff || null);
-      writeCachedAuthStaff(d.authenticated ? d.staff || null : null);
-      if (isStaffAdmin(d.staff)) setCanManageStaff(true);
-      setAuthStatus('');
     } catch (err: unknown) {
-      const canKeepCachedSession = Boolean(currentStaffRef.current?.id);
       setSetupRequired(false);
-      if (!canKeepCachedSession) {
-        setAuthenticated(false);
-        setCurrentStaff(null);
-        writeCachedAuthStaff(null);
-      }
+      setAuthenticated(false);
+      setCurrentStaff(null);
+      setCanManageStaff(false);
+      heavyBootstrapDoneRef.current = false;
       const aborted = err instanceof DOMException && err.name === 'AbortError';
       setAuthStatus(
         aborted
-          ? canKeepCachedSession
-            ? 'Máy chủ đang khởi động, dữ liệu sẽ tự tải khi kết nối xong.'
-            : 'Backend không phản hồi. Hãy chạy Flask (port 5000) rồi tải lại trang.'
+          ? 'Máy chủ đang khởi động hoặc chưa phản hồi. Vui lòng đợi một lát rồi kiểm tra lại.'
           : 'Không kết nối được server',
       );
     } finally {
@@ -1109,16 +1073,30 @@ export function MonitorPage() {
   }, []);
 
   useEffect(() => {
-    const cachedStaff = readCachedAuthStaff();
-    if (cachedStaff) {
-      currentStaffRef.current = cachedStaff;
-      setCurrentStaff(cachedStaff);
-      setAuthenticated(true);
-      setAuthChecked(true);
-      if (isStaffAdmin(cachedStaff)) setCanManageStaff(true);
+    try {
+      window.localStorage.removeItem(LEGACY_AUTH_STAFF_STORAGE_KEY);
+    } catch {
+      /* localStorage can be unavailable in private browsing */
     }
     void checkAuth();
   }, [checkAuth]);
+
+  useEffect(() => {
+    const handleExpiredSession = () => {
+      currentStaffRef.current = null;
+      heavyBootstrapDoneRef.current = false;
+      setAuthenticated(false);
+      setAuthChecked(true);
+      setCurrentStaff(null);
+      setCanManageStaff(false);
+      setStaffRows([]);
+      setAllPosts([]);
+      setFacebookCookieContext(null);
+      setAuthStatus('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+    };
+    window.addEventListener(AUTH_EXPIRED_EVENT, handleExpiredSession);
+    return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleExpiredSession);
+  }, []);
 
   const loadPages = useCallback(async () => {
     try {
@@ -1697,41 +1675,60 @@ export function MonitorPage() {
     const selectedGroups = groups.filter((g) => postSelected[g]);
     const message = [postTitle.trim() ? `Tiêu đề: ${postTitle.trim()}` : '', postContent.trim(), postSchedule.trim() ? `Lịch đăng: ${postSchedule.trim()}` : ''].filter(Boolean).join('\n\n');
     const mediaUrls = postMedia.map((item) => item.url).filter(Boolean);
-    if (!postTitle.trim() || !postContent.trim()) { setPostResult('? Nhập đủ Tiêu đề và Nội dung'); return; }
+    if (!postContent.trim()) { setPostResult('❌ Nhập Nội dung bài viết'); return; }
     if (!selectedGroups.length) {
       setPostResult('❌ Chọn ít nhất 1 nhóm');
       return;
     }
     setPostSubmitting(true);
-    setPostResult(`⏳ Đang đăng vào ${selectedGroups.length} nhóm...`);
-    let ok = 0;
-    let fail = 0;
-    for (const group_id of selectedGroups) {
-      try {
-        const r = await api('/api/post', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ group_id, page_id: postPageId, message: postCaptions[group_id]?.trim() || message, media_urls: mediaUrls }),
-        });
-        const d = await r.json();
-        if (d.ok) ok++;
-        else fail++;
-      } catch {
-        fail++;
+    setPostResult(
+      selectedGroups.length > 1
+        ? `⏳ Đang xếp hàng ${selectedGroups.length} nhóm, mỗi lượt cách nhau 5 phút...`
+        : '⏳ Đang đăng bài...'
+    );
+    try {
+      const r = await api('/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message,
+          media_urls: mediaUrls,
+          stagger_minutes: selectedGroups.length > 1 ? 5 : 0,
+          targets: selectedGroups.map((groupId) => ({
+            type: 'group',
+            id: groupId,
+            name: groupNames[groupId] || groupId,
+            page_id: postPageId,
+            message: postCaptions[groupId]?.trim() || message,
+          })),
+        }),
+        timeoutMs: PUBLISH_TIMEOUT_MS,
+      });
+      const data = await r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
+      if (data.queued) {
+        setPostResult(`✅ Đã xếp hàng ${data.target_count || selectedGroups.length} nhóm. Lượt đầu chạy trong khoảng 30 giây, sau đó cách nhau 5 phút.`);
+        setPostTitle('');
+        setPostContent('');
+        setPostMedia([]);
+        setPostSchedule('');
+        setTimeout(() => setPostModal(false), 3500);
+      } else if (Array.isArray(data.results)) {
+        const ok = data.results.filter((item: { ok?: boolean }) => item.ok).length;
+        const failed = data.results.filter((item: { ok?: boolean }) => !item.ok);
+        const errors = failed.map((item: { name?: string; id?: string; error?: string }) => `${item.name || item.id}: ${item.error || 'Lỗi không xác định'}`);
+        setPostResult(
+          failed.length
+            ? `✅ ${ok} thành công, ❌ ${failed.length} thất bại. ${errors.slice(0, 3).join(' · ')}`
+            : `✅ Đăng thành công ${ok}/${data.results.length} nhóm!`
+        );
+      } else {
+        setPostResult(`❌ ${data.error || 'Không đăng được bài'}`);
       }
-      setPostResult(`⏳ Đã đăng ${ok + fail}/${selectedGroups.length} (✅${ok} ❌${fail})`);
+    } catch (err: unknown) {
+      setPostResult(`❌ ${formatFetchError(err)}`);
+    } finally {
+      setPostSubmitting(false);
     }
-    if (fail === 0) {
-      setPostResult(`✅ Đăng thành công ${ok}/${selectedGroups.length} nhóm!`);
-      setPostTitle('');
-      setPostContent('');
-      setPostMedia([]);
-      setPostSchedule('');
-      setTimeout(() => setPostModal(false), 2000);
-    } else {
-      setPostResult(`✅ ${ok} thành công, ❌ ${fail} thất bại`);
-    }
-    setPostSubmitting(false);
   }
 
   async function uploadPostMedia(files?: FileList | null) {
@@ -2728,11 +2725,11 @@ export function MonitorPage() {
       });
       const d = await r.json();
       if (d.ok) {
+        heavyBootstrapDoneRef.current = false;
         setAuthenticated(true);
         setSetupRequired(false);
         setCurrentStaff(d.staff || null);
-        writeCachedAuthStaff(d.staff || null);
-        if (isStaffAdmin(d.staff)) setCanManageStaff(true);
+        setCanManageStaff(isStaffAdmin(d.staff));
         setAuthStatus('');
       } else {
         setAuthStatus(d.error || 'Sai tài khoản hoặc mật khẩu');
@@ -2753,17 +2750,18 @@ export function MonitorPage() {
       });
       const d = await r.json();
       if (d.ok) {
+        heavyBootstrapDoneRef.current = false;
         setAuthenticated(true);
         setSetupRequired(false);
         setCurrentStaff(d.staff || null);
-        writeCachedAuthStaff(d.staff || null);
+        setCanManageStaff(isStaffAdmin(d.staff));
         setAuthStatus('');
       } else {
         if (d.already_setup || d.setup_required === false) {
           setSetupRequired(false);
           setAuthenticated(false);
           setCurrentStaff(null);
-          writeCachedAuthStaff(null);
+          setCanManageStaff(false);
         }
         setAuthStatus(d.error || 'Lỗi setup');
       }
@@ -2774,11 +2772,14 @@ export function MonitorPage() {
 
   async function logout() {
     await api('/api/auth/logout', { method: 'POST' });
+    currentStaffRef.current = null;
+    heavyBootstrapDoneRef.current = false;
     setAuthenticated(false);
     setCurrentStaff(null);
-    writeCachedAuthStaff(null);
+    setCanManageStaff(false);
     setStaffRows([]);
     setAllPosts([]);
+    setFacebookCookieContext(null);
     setHeaderSub('Đã đăng xuất');
   }
 
@@ -2828,7 +2829,7 @@ export function MonitorPage() {
         method: staffId ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        timeoutMs: 15000,
+        timeoutMs: 45000,
       });
       const d = await r.json().catch(() => ({
         ok: false,
@@ -2843,6 +2844,7 @@ export function MonitorPage() {
           null;
         if (savedStaff?.id && savedStaff.id === currentStaff?.id) {
           setCurrentStaff(savedStaff);
+          void loadFacebookCookieContext();
         }
         const storageText = d.storage === 'supabase' ? 'Supabase' : 'local';
         const staffCount = Array.isArray(d.staff) ? d.staff.length : 0;
@@ -3018,7 +3020,14 @@ export function MonitorPage() {
               />
             </section>
           ) : null}
-          {activeView === 'history' ? <HistoryPanel rows={commentLogs} status={historyStatus} onReload={loadCommentLogs} /> : null}
+          {activeView === 'history' ? (
+            <HistoryPanel
+              rows={commentLogs}
+              status={historyStatus}
+              onReload={loadCommentLogs}
+              isAdmin={adminStaff}
+            />
+          ) : null}
           {activeView === 'leads' ? (
             <LeadManagerPanel
               leads={leads}
@@ -3044,6 +3053,7 @@ export function MonitorPage() {
               initialPages={facebookPageChannels
                 .map((item) => ({ id: item.target_id || '', name: item.channel_name || item.target_id || '' }))
                 .filter((item) => item.id)}
+              staffName={currentStaff?.name || currentStaff?.username || ''}
             />
           ) : null}
           {activeView === 'staff' ? (
@@ -3300,7 +3310,11 @@ export function MonitorPage() {
               Huỷ
             </button>
             <button type="button" className="btn-submit" disabled={postSubmitting || postUploadingMedia} onClick={() => void submitPost()}>
-              Đăng bài
+              {postSubmitting
+                ? 'Đang xử lý...'
+                : groups.filter((groupId) => postSelected[groupId]).length > 1
+                  ? 'Đăng lần lượt 5 phút'
+                  : 'Đăng bài'}
             </button>
           </div>
         </div>

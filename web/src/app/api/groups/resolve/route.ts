@@ -8,13 +8,18 @@ function resolveBackendBase(): string {
     base = base.slice(0, -4);
   }
   base = base.replace(/\/$/, '');
-  if (base && !base.includes('seeding-beta.vercel.app') && !base.includes('fb-moni.vercel.app')) {
+  if (
+    base
+    && !base.includes('sale-fsolution.vercel.app')
+    && !base.includes('seeding-beta.vercel.app')
+    && !base.includes('fb-moni.vercel.app')
+  ) {
     return base;
   }
   if (process.env.NODE_ENV === 'development') {
     return 'http://127.0.0.1:5000';
   }
-  return 'https://seedingfacebook.onrender.com';
+  return 'https://sale-fsolution.onrender.com';
 }
 
 export async function GET(request: NextRequest) {

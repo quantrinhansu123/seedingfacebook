@@ -1,7 +1,7 @@
 import type { NextConfig } from 'next';
 import path from 'path';
 
-const DEFAULT_API_PROXY_BASE_URL = 'https://seedingfacebook.onrender.com';
+const DEFAULT_API_PROXY_BASE_URL = 'https://sale-fsolution.onrender.com';
 const webRoot = path.join(__dirname);
 
 function normalizeUrl(value?: string): string {
@@ -31,6 +31,7 @@ function resolveApiProxyBase(): string {
     [
       process.env.VERCEL_PROJECT_PRODUCTION_URL,
       process.env.VERCEL_URL,
+      'sale-fsolution.vercel.app',
       'fb-moni.vercel.app',
       'seeding-beta.vercel.app',
     ]
